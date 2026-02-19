@@ -4,6 +4,8 @@ Quality-control diagnostics for [AreTomo](https://github.com/czimaginginstitute/
 
 Parses `.aln` and `_CTF.txt` output files from AreTomo, computes per-frame overlap and CTF metrics, produces diagnostic plots for every tilt series, and generates an interactive HTML viewer for rapid dataset review.
 
+IMPORTANT: THIS IS VERY VERY EARLY DEVELOPMENT. TOTALLY WRITTEN WITH CLAUDE CODE AND NOT MEANT TO BE USED WITHOUT CHECKING
+
 ---
 
 ## Features
