@@ -1,0 +1,21 @@
+# Analysis output directories
+*_analysis/
+
+# Raw data
+run*/
+frames/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Logs and large text files
+*_logfile.txt
+*.log
+
+# Conda env artifacts
+.conda/
