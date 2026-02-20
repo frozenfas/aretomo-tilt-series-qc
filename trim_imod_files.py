@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-trim_imod_files.py  —  For each tilt series create per-variant trimmed copies
-                        of the IMOD support files (.xf, .xtilt, .tlt) and write
-                        matching newst.com files, in the analysis output directory.
+trim_imod_files.py  —  For each tilt series write per-variant .tlt / .xtilt
+                        files and newst.com scripts in the analysis directory,
+                        with dark and/or misaligned frames excluded.
 
 Two variants are produced per tilt series:
 
@@ -11,16 +11,17 @@ Two variants are produced per tilt series:
 
 Files written to  <output>/ts-xxx_Imod/:
 
-    ts-xxx_nodark.xf / .xtilt / .tlt   transform + tilt files for nodark variant
-    ts-xxx_clean.xf  / .xtilt / .tlt   transform + tilt files for clean variant
+    ts-xxx_st.xf    (symlink)           → original full-length transform file
+                                          (.xf must cover the whole stack;
+                                           newstack indexes it by section number
+                                           when SectionsToRead is active)
+    ts-xxx_nodark.xtilt / .tlt          trimmed support files for nodark ali
+    ts-xxx_clean.xtilt  / .tlt          trimmed support files for clean ali
     ts-xxx_nodark_order_list.csv        acquisition metadata for nodark frames
     ts-xxx_clean_order_list.csv         acquisition metadata for clean frames
     newst_nodark.com                    newstack script (dark removed, bin 8)
     newst_clean.com                     newstack script (dark+misaligned, bin 8)
     ts-xxx.mrc  (symlink)               → raw tilt-sorted stack
-
-Each newst.com uses the matching trimmed .xf so that newstack receives exactly
-one transform per input section it reads — no SectionsToRead needed.
 
 Requires:
     parse_aln.py to have been run first  (reads <output>/alignment_data.json)
@@ -93,12 +94,6 @@ def find_sections_by_tilt(target_tilts, sorted_secs, tol=2.0):
 # ─────────────────────────────────────────────────────────────────────────────
 # Source-file readers
 # ─────────────────────────────────────────────────────────────────────────────
-
-def read_xf(path):
-    """Read all lines of a .xf file; return as list of stripped strings."""
-    with open(path) as fh:
-        return [line.rstrip() for line in fh if line.strip()]
-
 
 def read_xtilt(path):
     """Read a .xtilt file; return list of stripped strings (one per section)."""
@@ -235,24 +230,26 @@ def main():
         nodark_keep = sorted(all_sec_idx - dark_secs)
         clean_keep  = sorted(all_sec_idx - dark_secs - flagged_secs)
 
-        # ── Read source transform files ───────────────────────────────────────
-        xf_lines    = read_xf(xf_src)
+        # ── Read xtilt (optional) ─────────────────────────────────────────────
         xtilt_lines = read_xtilt(xtilt_src) if xtilt_src.exists() else []
 
         # ── Create output directory ───────────────────────────────────────────
         ts_out = out_dir / f'{ts_name}_Imod'
         ts_out.mkdir(exist_ok=True)
 
-        # ── Symlink raw stack ─────────────────────────────────────────────────
+        # ── Symlink raw stack and full .xf ────────────────────────────────────
         mrc_link = ts_out / f'{ts_name}.mrc'
         if not mrc_link.exists():
             mrc_link.symlink_to(mrc_dir / f'{ts_name}.mrc')
         if not (mrc_dir / f'{ts_name}.mrc').exists():
             print(f'  WARNING {ts_name}: source .mrc not found at {mrc_dir}')
 
+        xf_link = ts_out / f'{ts_name}_st.xf'
+        if not xf_link.exists():
+            xf_link.symlink_to(xf_src)
+
         # ── Write nodark variant ──────────────────────────────────────────────
-        write_trimmed(ts_out / f'{ts_name}_nodark.xf',    xf_lines,    nodark_keep)
-        write_tlt    (ts_out / f'{ts_name}_nodark.tlt',   sorted_secs, set(nodark_keep))
+        write_tlt(ts_out / f'{ts_name}_nodark.tlt', sorted_secs, set(nodark_keep))
         write_order_list(ts_out / f'{ts_name}_nodark_order_list.csv',
                          sorted_secs, set(nodark_keep))
         if xtilt_lines:
@@ -261,15 +258,14 @@ def main():
         write_newst(
             ts_out / 'newst_nodark.com',
             ts_name,
-            xf_name      = f'{ts_name}_nodark.xf',
+            xf_name      = f'{ts_name}_st.xf',
             output_ali   = f'{ts_name}_nodark.ali',
             bin_factor   = args.bin,
             keep_indices = nodark_keep,
         )
 
         # ── Write clean variant ───────────────────────────────────────────────
-        write_trimmed(ts_out / f'{ts_name}_clean.xf',    xf_lines,    clean_keep)
-        write_tlt    (ts_out / f'{ts_name}_clean.tlt',   sorted_secs, set(clean_keep))
+        write_tlt(ts_out / f'{ts_name}_clean.tlt', sorted_secs, set(clean_keep))
         write_order_list(ts_out / f'{ts_name}_clean_order_list.csv',
                          sorted_secs, set(clean_keep))
         if xtilt_lines:
@@ -278,7 +274,7 @@ def main():
         write_newst(
             ts_out / 'newst_clean.com',
             ts_name,
-            xf_name      = f'{ts_name}_clean.xf',
+            xf_name      = f'{ts_name}_st.xf',
             output_ali   = f'{ts_name}_clean.ali',
             bin_factor   = args.bin,
             keep_indices = clean_keep,
@@ -300,8 +296,9 @@ def main():
     print(sep)
     print(f'\nDone: {n_done} TS processed, {n_skip} skipped')
     print(f'\nFiles written per TS into {out_dir}/ts-xxx_Imod/:')
-    print(f'  ts-xxx_nodark.xf / .xtilt / .tlt / _order_list.csv')
-    print(f'  ts-xxx_clean.xf  / .xtilt / .tlt / _order_list.csv')
+    print(f'  ts-xxx_st.xf          (symlink — full stack, unmodified)')
+    print(f'  ts-xxx_nodark.xtilt / .tlt / _order_list.csv')
+    print(f'  ts-xxx_clean.xtilt  / .tlt / _order_list.csv')
     print(f'  newst_nodark.com  /  newst_clean.com')
     print(f'\nTo run (from inside each ts-xxx_Imod directory):')
     print(f'  submfg newst_nodark.com')
