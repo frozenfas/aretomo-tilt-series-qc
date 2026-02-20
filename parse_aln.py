@@ -190,7 +190,8 @@ def parse_tlt_file(filepath):
     Returns a dict keyed by 1-indexed row number:
         {'nominal_tilt': float, 'acq_order': int,
          'dose_e_per_A2': float, 'z_value': int}
-    where z_value = acq_order - 1  (0-indexed = ZValue in the mdoc file).
+    where dose_e_per_A2 is the per-frame dose (not cumulative) and
+    z_value = acq_order - 1  (0-indexed = ZValue in the mdoc file).
     """
     result = {}
     with open(filepath) as fh:
@@ -938,6 +939,17 @@ def main():
             key = round(tlt_row['nominal_tilt'] + alpha, 2)
             tlt_by_corrected[key] = row_num
 
+        # Cumulative dose per acq_order (RELION convention: prior dose,
+        # so the first acquired frame has cumulative = 0).
+        # Sorted by acq_order; running sum accumulates dose of preceding frames.
+        cum_dose_by_acq = {}
+        if tlt_data:
+            sorted_by_acq = sorted(tlt_data.values(), key=lambda r: r['acq_order'])
+            running = 0.0
+            for r in sorted_by_acq:
+                cum_dose_by_acq[r['acq_order']] = running
+                running += r['dose_e_per_A2']
+
         _MDOC_KEYS = ('sub_frame_path', 'mdoc_defocus', 'target_defocus',
                       'datetime', 'stage_x', 'stage_y', 'stage_z',
                       'exposure_time', 'num_subframes')
@@ -960,10 +972,14 @@ def main():
 
             # _TLT.txt enrichment (row index = SEC value)
             tlt = tlt_data.get(f['sec'], {})
-            f['nominal_tilt']  = tlt.get('nominal_tilt')
-            f['acq_order']     = tlt.get('acq_order')
-            f['dose_e_per_A2'] = tlt.get('dose_e_per_A2')
-            f['z_value']       = tlt.get('z_value')
+            f['nominal_tilt']           = tlt.get('nominal_tilt')
+            f['acq_order']              = tlt.get('acq_order')
+            f['dose_e_per_A2']          = tlt.get('dose_e_per_A2')
+            f['z_value']                = tlt.get('z_value')
+            f['cumulative_dose_e_per_A2'] = (
+                cum_dose_by_acq.get(tlt['acq_order'])
+                if tlt.get('acq_order') is not None else None
+            )
 
             # mdoc enrichment (keyed by z_value)
             mdoc = mdoc_data.get(f['z_value'], {}) if f['z_value'] is not None else {}
@@ -975,16 +991,17 @@ def main():
             row_num = tlt_by_corrected.get(round(df['tilt'], 2))
             if row_num is not None:
                 tlt = tlt_data[row_num]
-                df['nominal_tilt']  = tlt['nominal_tilt']
-                df['acq_order']     = tlt['acq_order']
-                df['dose_e_per_A2'] = tlt['dose_e_per_A2']
-                df['z_value']       = tlt['z_value']
+                df['nominal_tilt']            = tlt['nominal_tilt']
+                df['acq_order']               = tlt['acq_order']
+                df['dose_e_per_A2']           = tlt['dose_e_per_A2']
+                df['z_value']                 = tlt['z_value']
+                df['cumulative_dose_e_per_A2'] = cum_dose_by_acq.get(tlt['acq_order'])
                 mdoc = mdoc_data.get(tlt['z_value'], {})
                 for k in _MDOC_KEYS:
                     df[k] = mdoc.get(k)
             else:
                 for k in ('nominal_tilt', 'acq_order', 'dose_e_per_A2',
-                          'z_value', *_MDOC_KEYS):
+                          'z_value', 'cumulative_dose_e_per_A2', *_MDOC_KEYS):
                     df.setdefault(k, None)
 
         all_ts[ts_name] = data
