@@ -17,6 +17,12 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from pathlib import Path
 
+try:
+    import mdocfile as _mdocfile
+    _HAS_MDOCFILE = True
+except ImportError:
+    _HAS_MDOCFILE = False
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # .aln parsing
@@ -152,6 +158,89 @@ def parse_ctf_file(filepath):
                 except ValueError:
                     pass
     return ctf
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _TLT.txt and mdoc parsing
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _float_or_none(v):
+    try:
+        f = float(v)
+        return None if np.isnan(f) else f
+    except (TypeError, ValueError):
+        return None
+
+
+def _int_or_none(v):
+    try:
+        f = float(v)
+        return None if np.isnan(f) else int(f)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_tlt_file(filepath):
+    """
+    Parse an AreTomo *_TLT.txt file.
+
+    Each row N (1-indexed) corresponds to SEC N in the .aln / _CTF.txt files
+    (tilt-sorted order, including dark frames).
+
+    Returns a dict keyed by 1-indexed row number:
+        {'nominal_tilt': float, 'acq_order': int,
+         'dose_e_per_A2': float, 'z_value': int}
+    where z_value = acq_order - 1  (0-indexed = ZValue in the mdoc file).
+    """
+    result = {}
+    with open(filepath) as fh:
+        for i, line in enumerate(fh, start=1):
+            parts = line.split()
+            if len(parts) >= 3:
+                try:
+                    acq_order = int(parts[1])
+                    result[i] = {
+                        'nominal_tilt':  float(parts[0]),
+                        'acq_order':     acq_order,
+                        'dose_e_per_A2': float(parts[2]),
+                        'z_value':       acq_order - 1,
+                    }
+                except ValueError:
+                    pass
+    return result
+
+
+def parse_mdoc_file(filepath):
+    """
+    Parse a SerialEM .mdoc file using the mdocfile library.
+
+    Returns a dict keyed by ZValue (0-indexed acquisition order):
+        {'sub_frame_path', 'mdoc_defocus', 'target_defocus', 'datetime',
+         'stage_x', 'stage_y', 'stage_z', 'exposure_time', 'num_subframes'}
+    Returns empty dict if mdocfile is not installed.
+    """
+    if not _HAS_MDOCFILE:
+        return {}
+    df = _mdocfile.read(filepath)
+    result = {}
+    for _, row in df.iterrows():
+        z = _int_or_none(row.get('ZValue'))
+        if z is None:
+            continue
+        sub = row.get('SubFramePath', None)
+        stage = row.get('StagePosition', None)
+        result[z] = {
+            'sub_frame_path': Path(sub).name if sub and not isinstance(sub, float) else None,
+            'mdoc_defocus':   _float_or_none(row.get('Defocus')),
+            'target_defocus': _float_or_none(row.get('TargetDefocus')),
+            'datetime':       row.get('DateTime') or None,
+            'stage_x':        float(stage[0]) if stage and not isinstance(stage, float) else None,
+            'stage_y':        float(stage[1]) if stage and not isinstance(stage, float) else None,
+            'stage_z':        _float_or_none(row.get('StageZ')),
+            'exposure_time':  _float_or_none(row.get('ExposureTime')),
+            'num_subframes':  _int_or_none(row.get('NumSubFrames')),
+        }
+    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -794,6 +883,9 @@ def main():
                     help='Output directory for plots, JSON, TSV, and HTML')
     ap.add_argument('--threshold', '-t', type=float, default=80.0,
                     help='%% overlap below which a frame is flagged')
+    ap.add_argument('--mdocdir',   '-m', default='frames',
+                    help='Directory containing per-TS .mdoc files '
+                         '(ts-xxx.mdoc expected; skip enrichment if absent)')
     args = ap.parse_args()
 
     in_dir  = Path(args.input)
@@ -805,9 +897,15 @@ def main():
         print(f'No .aln files found in {in_dir}')
         return
 
+    mdoc_dir = Path(args.mdocdir)
+    if not _HAS_MDOCFILE:
+        print('WARNING: mdocfile not installed — mdoc enrichment skipped\n')
+    elif not mdoc_dir.exists():
+        print(f'WARNING: --mdocdir {mdoc_dir} not found — mdoc enrichment skipped\n')
+
     print(f'Found {len(aln_files)} .aln files  |  threshold = {args.threshold}%\n')
 
-    # ── Pass 1: parse all files, attach overlap + CTF ────────────────────────
+    # ── Pass 1: parse all files, attach overlap + CTF + TLT + mdoc ───────────
     all_ts = {}   # ts_name → data dict
 
     for aln_path in aln_files:
@@ -820,9 +918,29 @@ def main():
 
         W, H = data['width'], data['height']
 
-        # Load CTF (SEC N → CTF row N)
+        # Load CTF (SEC N → CTF row N, 1-indexed, includes dark frames)
         ctf_path = aln_path.parent / f'{ts_name}_CTF.txt'
         ctf_data = parse_ctf_file(ctf_path) if ctf_path.exists() else {}
+
+        # Load _TLT.txt (row N = SEC N, tilt-sorted, includes dark frames)
+        tlt_path = aln_path.parent / f'{ts_name}_TLT.txt'
+        tlt_data = parse_tlt_file(tlt_path) if tlt_path.exists() else {}
+
+        # Load mdoc (keyed by ZValue = acq_order - 1)
+        mdoc_path = mdoc_dir / f'{ts_name}.mdoc'
+        mdoc_data = (parse_mdoc_file(mdoc_path)
+                     if _HAS_MDOCFILE and mdoc_path.exists() else {})
+
+        # Build corrected-tilt → tlt row number map (for dark frame lookup)
+        alpha = data.get('alpha_offset') or 0.0
+        tlt_by_corrected = {}
+        for row_num, tlt_row in tlt_data.items():
+            key = round(tlt_row['nominal_tilt'] + alpha, 2)
+            tlt_by_corrected[key] = row_num
+
+        _MDOC_KEYS = ('sub_frame_path', 'mdoc_defocus', 'target_defocus',
+                      'datetime', 'stage_x', 'stage_y', 'stage_z',
+                      'exposure_time', 'num_subframes')
 
         for f in data['frames']:
             f['overlap_pct']  = compute_overlap(f['tx'], f['ty'], W, H)
@@ -839,6 +957,35 @@ def main():
             f['astig_angle_deg'] = ctf.get('astig_angle_deg')
             f['cc']              = ctf.get('cc')
             f['fit_spacing_A']   = ctf.get('fit_spacing_A')
+
+            # _TLT.txt enrichment (row index = SEC value)
+            tlt = tlt_data.get(f['sec'], {})
+            f['nominal_tilt']  = tlt.get('nominal_tilt')
+            f['acq_order']     = tlt.get('acq_order')
+            f['dose_e_per_A2'] = tlt.get('dose_e_per_A2')
+            f['z_value']       = tlt.get('z_value')
+
+            # mdoc enrichment (keyed by z_value)
+            mdoc = mdoc_data.get(f['z_value'], {}) if f['z_value'] is not None else {}
+            for k in _MDOC_KEYS:
+                f[k] = mdoc.get(k)
+
+        # Enrich dark frames via corrected-tilt matching
+        for df in data['dark_frames']:
+            row_num = tlt_by_corrected.get(round(df['tilt'], 2))
+            if row_num is not None:
+                tlt = tlt_data[row_num]
+                df['nominal_tilt']  = tlt['nominal_tilt']
+                df['acq_order']     = tlt['acq_order']
+                df['dose_e_per_A2'] = tlt['dose_e_per_A2']
+                df['z_value']       = tlt['z_value']
+                mdoc = mdoc_data.get(tlt['z_value'], {})
+                for k in _MDOC_KEYS:
+                    df[k] = mdoc.get(k)
+            else:
+                for k in ('nominal_tilt', 'acq_order', 'dose_e_per_A2',
+                          'z_value', *_MDOC_KEYS):
+                    df.setdefault(k, None)
 
         all_ts[ts_name] = data
 
