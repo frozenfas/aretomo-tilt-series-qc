@@ -1,4 +1,4 @@
-name: aretomo-parse
+name: aretomo3-editor
 channels:
   - conda-forge
   - defaults
@@ -7,3 +7,7 @@ dependencies:
   - numpy
   - matplotlib
   - pip
+  - pip:
+    - mdocfile
+    - starfile
+    - mrcfile
