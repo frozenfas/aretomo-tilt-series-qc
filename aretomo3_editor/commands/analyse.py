@@ -579,14 +579,13 @@ def make_html(ts_entries, out_path, threshold, gain_check=None):
 
         rows_html = ''
         for name, s in gain_check.get('scores', {}).items():
-            marker     = '  \u2190 best' if name == best else ''
-            style      = 'color:#66bb6a;font-weight:bold' if name == best else ''
-            cv_mul_s   = f"{s['cv_mul']:.4f}"      if s.get('cv_mul')      is not None else 'n/a'
-            cv_div_s   = f"{s['cv_div']:.4f}"      if s.get('cv_div')      is not None else 'n/a'
-            ssim_raw_s = f"{s['ssim_vs_raw']:.4f}" if s.get('ssim_vs_raw') is not None else 'n/a'
+            marker   = '  \u2190 best' if name == best else ''
+            style    = 'color:#66bb6a;font-weight:bold' if name == best else ''
+            cv_mul_s = f"{s['cv_mul']:.4f}" if s.get('cv_mul') is not None else 'n/a'
+            cv_div_s = f"{s['cv_div']:.4f}" if s.get('cv_div') is not None else 'n/a'
             rows_html += (
                 f'<tr style="{style}"><td>{name}{marker}</td>'
-                f'<td>{cv_mul_s}</td><td>{cv_div_s}</td><td>{ssim_raw_s}</td></tr>\n'
+                f'<td>{cv_mul_s}</td><td>{cv_div_s}</td></tr>\n'
             )
 
         gain_tab_btn  = '<button class="tab-btn active" onclick="switchTab(\'gain\')">Gain Transform Check</button>'
@@ -597,7 +596,7 @@ def make_html(ts_entries, out_path, threshold, gain_check=None):
       <div class="gc-best">Best transform: {best}</div>
       <div class="gc-flags">{flags}</div>
       <table class="gc-table">
-        <tr><th>Transform</th><th>CV &#x2193; raw&#xd7;gain</th><th>CV &#x2193; raw&#xf7;gain</th><th>SSIM raw vs gain &#x2191;</th></tr>
+        <tr><th>Transform</th><th>CV &#x2193; raw&#xd7;gain</th><th>CV &#x2193; raw&#xf7;gain</th></tr>
         {rows_html}
       </table>
       <div class="gc-meta">
@@ -1102,7 +1101,7 @@ def run(args):
             gain_check = proj.get('gain_check')
             # Copy gain-check PNGs into the output directory so the HTML is
             # self-contained (relative src= paths work from any location).
-            for png_name in ('raw_vs_gains.png', 'corrected_averages.png', 'cv_vs_nmovies.png'):
+            for png_name in ('corrected_averages.png', 'cv_vs_nmovies.png'):
                 src = gc_dir / png_name
                 if src.exists():
                     shutil.copy2(src, out_dir / png_name)
