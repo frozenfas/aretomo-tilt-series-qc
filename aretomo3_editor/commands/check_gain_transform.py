@@ -197,8 +197,9 @@ def _run_square_camera(gain, movies):
 def _accumulate(movies, transformed_gains):
     """
     For each selected movie, sum sub-frames then:
-      (a) accumulate the raw sum (no gain applied)  — Approach A
-      (b) multiply by each transformed gain and accumulate — Approach B
+      (A) accumulate the raw sum (no gain applied)     — Approach A
+      (B×) multiply by each transformed gain           — Approach B multiply
+      (B÷) divide by each transformed gain             — Approach B divide
 
     Parameters
     ----------
@@ -207,9 +208,11 @@ def _accumulate(movies, transformed_gains):
 
     Returns
     -------
-    corr_sums  : dict  name -> float64 ndarray  (accumulated gain-corrected sum)
-    raw_accum  : float64 ndarray                (accumulated raw sum, no gain)
-    cv_history : dict  name -> list of float     (CV after each movie)
+    corr_mul     : dict  name -> float64 ndarray  (accumulated raw × gain)
+    corr_div     : dict  name -> float64 ndarray  (accumulated raw ÷ gain)
+    raw_accum    : float64 ndarray                (accumulated raw, no gain)
+    cv_hist_mul  : dict  name -> list of float    (CV after each movie, multiply)
+    cv_hist_div  : dict  name -> list of float    (CV after each movie, divide)
     """
     try:
         import tifffile
@@ -217,13 +220,15 @@ def _accumulate(movies, transformed_gains):
         print('ERROR: tifffile is not installed.  Run: pip install tifffile')
         sys.exit(1)
 
-    names      = list(transformed_gains.keys())
-    corr_sums  = {n: None for n in names}
-    raw_accum  = None
-    cv_history = {n: []   for n in names}
+    names       = list(transformed_gains.keys())
+    corr_mul    = {n: None for n in names}
+    corr_div    = {n: None for n in names}
+    raw_accum   = None
+    cv_hist_mul = {n: [] for n in names}
+    cv_hist_div = {n: [] for n in names}
 
     for i, (path, acq, tilt) in enumerate(movies):
-        movie = tifffile.imread(str(path)).astype(np.float64)
+        movie   = tifffile.imread(str(path)).astype(np.float64)
         raw_sum = movie.sum(axis=0) if movie.ndim == 3 else movie
 
         # Approach A: accumulate raw (no gain)
@@ -232,22 +237,34 @@ def _accumulate(movies, transformed_gains):
         else:
             raw_accum += raw_sum
 
-        # Approach B: accumulate gain-corrected per transform
         for n in names:
-            corrected = raw_sum * transformed_gains[n]
-            if corr_sums[n] is None:
-                corr_sums[n] = corrected.copy()
-            else:
-                corr_sums[n] += corrected
+            g = transformed_gains[n]
 
-            m = corr_sums[n].mean()
-            cv_history[n].append(corr_sums[n].std() / m if m > 0 else np.nan)
+            # Approach B multiply: raw × gain (AreTomo3 convention)
+            c = raw_sum * g
+            if corr_mul[n] is None:
+                corr_mul[n] = c.copy()
+            else:
+                corr_mul[n] += c
+            m = corr_mul[n].mean()
+            cv_hist_mul[n].append(corr_mul[n].std() / m if m > 0 else np.nan)
+
+            # Approach B divide: raw ÷ gain (guard against zero/negative)
+            safe_g = np.where(g > 0, g, np.nan)
+            c = raw_sum / safe_g
+            c = np.nan_to_num(c, nan=0.0)
+            if corr_div[n] is None:
+                corr_div[n] = c.copy()
+            else:
+                corr_div[n] += c
+            m = corr_div[n].mean()
+            cv_hist_div[n].append(corr_div[n].std() / m if m > 0 else np.nan)
 
         print(f'  [{i+1:3d}/{len(movies)}]  acq {acq:03d}  tilt {tilt:+.2f}\u00b0',
               end='\r', flush=True)
 
     print()  # newline after progress line
-    return corr_sums, raw_accum, cv_history
+    return corr_mul, corr_div, raw_accum, cv_hist_mul, cv_hist_div
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -260,21 +277,32 @@ def _norm01(arr):
     return (arr - lo) / (hi - lo) if hi > lo else np.ones_like(arr, dtype=np.float32)
 
 
-def _score(corr_sums, raw_accum, transformed_gains):
+def _cv(arr):
+    m = arr.mean()
+    return float(arr.std() / m) if m > 0 else np.nan
+
+
+def _ssim_vs_flat(arr, ssim_fn):
+    m = arr.mean()
+    norm = (arr / m).astype(np.float32)
+    dr   = float(norm.max() - norm.min())
+    return float(ssim_fn(norm, np.ones_like(norm), data_range=dr)) if dr > 0 else 1.0
+
+
+def _score(corr_mul, corr_div, raw_accum, transformed_gains):
     """
-    Compute three metrics for each transform:
+    Compute metrics for each transform under two gain application modes.
 
-    Approach A — raw sum vs gain (no gain applied):
-      ssim_vs_raw  : SSIM between the accumulated raw sum and the transformed
-                     gain image.  If the gain orientation is correct the raw
-                     accumulated frames converge to the same spatial pattern as
-                     the gain.  Higher → better.
+    Approach A — raw average vs gain orientations:
+      ssim_vs_raw  : SSIM between the normalised raw average and each
+                     transformed gain image.  Higher → patterns match → better.
 
-    Approach B — corrected sum vs flat (gain applied):
-      cv           : std / mean of the accumulated gain-corrected image.
-                     Lower → flatter → better.
-      ssim_vs_flat : SSIM between the mean-normalised corrected image and a
-                     perfectly uniform (all-ones) reference.  Higher → better.
+    Approach B — corrected average vs flat:
+      cv_mul / cv_div           : CV of (raw × gain) or (raw ÷ gain) accumulation.
+                                  Lower → flatter → better.
+      ssim_vs_flat_mul / _div   : SSIM vs uniform reference.  Higher → better.
+
+    Best transform is selected by cv_mul (AreTomo3 multiplies the gain).
     """
     try:
         from skimage.metrics import structural_similarity as ssim_fn
@@ -283,20 +311,16 @@ def _score(corr_sums, raw_accum, transformed_gains):
         _has_skimage = False
 
     scores = {}
-    for name, arr in corr_sums.items():
-        # Approach B: CV
-        m  = arr.mean()
-        cv = float(arr.std() / m) if m > 0 else np.nan
+    for name in corr_mul:
+        # Approach B: multiply
+        cv_mul        = _cv(corr_mul[name])
+        ssim_flat_mul = _ssim_vs_flat(corr_mul[name], ssim_fn) if _has_skimage else None
 
-        # Approach B: SSIM vs flat
-        ssim_vs_flat = None
-        if _has_skimage:
-            norm = (arr / m).astype(np.float32)
-            flat = np.ones_like(norm)
-            dr   = float(norm.max() - norm.min())
-            ssim_vs_flat = float(ssim_fn(norm, flat, data_range=dr)) if dr > 0 else 1.0
+        # Approach B: divide
+        cv_div        = _cv(corr_div[name])
+        ssim_flat_div = _ssim_vs_flat(corr_div[name], ssim_fn) if _has_skimage else None
 
-        # Approach A: SSIM between raw accumulation and (transformed) gain
+        # Approach A: raw average vs gain transform
         ssim_vs_raw = None
         if _has_skimage and raw_accum is not None:
             a = _norm01(raw_accum).astype(np.float32)
@@ -304,9 +328,11 @@ def _score(corr_sums, raw_accum, transformed_gains):
             ssim_vs_raw = float(ssim_fn(a, b, data_range=1.0))
 
         scores[name] = {
-            'cv':           cv,
-            'ssim_vs_flat': ssim_vs_flat,
-            'ssim_vs_raw':  ssim_vs_raw,
+            'cv_mul':           cv_mul,
+            'cv_div':           cv_div,
+            'ssim_vs_flat_mul': ssim_flat_mul,
+            'ssim_vs_flat_div': ssim_flat_div,
+            'ssim_vs_raw':      ssim_vs_raw,
         }
 
     return scores
@@ -316,25 +342,95 @@ def _score(corr_sums, raw_accum, transformed_gains):
 # Plotting
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _plot_corrected_averages(corr_sums, scores, best, out_path):
-    fig, axes = plt.subplots(2, 2, figsize=(14, 9))
+def _plot_corrected_averages(corr_mul, corr_div, scores, best, out_path):
+    """
+    Approach B: 2 rows × 4 columns.
+    Top row    = raw × gain  (AreTomo3 convention)
+    Bottom row = raw ÷ gain  (inverse, for comparison)
+    """
+    names = list(corr_mul.keys())
+    fig, axes = plt.subplots(2, 4, figsize=(22, 10))
     fig.patch.set_facecolor('#16213e')
 
-    for ax, (name, arr) in zip(axes.flat, corr_sums.items()):
-        norm = arr / arr.mean()
-        lo, hi = np.percentile(norm, 1), np.percentile(norm, 99)
-        ax.imshow(norm, cmap='gray', vmin=lo, vmax=hi, aspect='auto',
-                  interpolation='nearest')
-
+    for col_i, name in enumerate(names):
         is_best = (name == best)
-        s       = scores[name]
         col     = '#66bb6a' if is_best else '#e0e0e0'
-        best_marker  = '  \u2190 best' if is_best else ''
-        ssim_flat_s  = f"{s['ssim_vs_flat']:.4f}" if s['ssim_vs_flat'] is not None else 'n/a'
-        ssim_raw_s   = f"{s['ssim_vs_raw']:.4f}"  if s['ssim_vs_raw']  is not None else 'n/a'
-        label   = (f'{name}{best_marker}  |  CV={s["cv"]:.4f}  '
-                   f'SSIM-flat={ssim_flat_s}  SSIM-raw={ssim_raw_s}')
-        ax.set_title(label, color=col, fontsize=11,
+        marker  = '  \u2190' if is_best else ''
+
+        for row_i, (arr, cv_key) in enumerate([
+            (corr_mul[name], 'cv_mul'),
+            (corr_div[name], 'cv_div'),
+        ]):
+            ax   = axes[row_i, col_i]
+            norm = arr / arr.mean()
+            lo, hi = np.percentile(norm, 1), np.percentile(norm, 99)
+            ax.imshow(norm, cmap='gray', vmin=lo, vmax=hi,
+                      aspect='auto', interpolation='nearest')
+            cv_s = f"CV={scores[name][cv_key]:.4f}"
+            ax.set_title(f'{name}{marker}  {cv_s}', color=col, fontsize=10,
+                         fontweight='bold' if is_best else 'normal')
+            ax.axis('off')
+            if is_best:
+                for spine in ax.spines.values():
+                    spine.set_edgecolor('#66bb6a')
+                    spine.set_linewidth(3)
+                    spine.set_visible(True)
+
+    # Row labels on the left
+    axes[0, 0].set_ylabel('raw × gain', color='#90caf9', fontsize=11)
+    axes[1, 0].set_ylabel('raw ÷ gain', color='#ef9a9a', fontsize=11)
+    for ax in axes[:, 0]:
+        ax.axis('on')
+        ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+
+    fig.suptitle('Approach B — gain-corrected averages (flat = correct transform)',
+                 color='#90caf9', fontsize=13)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=120, bbox_inches='tight',
+                facecolor=fig.get_facecolor())
+    plt.close(fig)
+
+
+def _plot_raw_vs_gains(raw_accum, n_movies, transformed_gains, scores, best, out_path):
+    """
+    Approach A: raw average (left, large) alongside the 4 candidate gain
+    orientations (right, 2×2).  The correct gain orientation should visually
+    match the raw average pattern.
+    """
+    from matplotlib.gridspec import GridSpec
+
+    fig = plt.figure(figsize=(20, 9))
+    fig.patch.set_facecolor('#16213e')
+    gs  = GridSpec(2, 3, figure=fig, hspace=0.35, wspace=0.12)
+
+    # ── Left: raw average ─────────────────────────────────────────────────────
+    ax_raw  = fig.add_subplot(gs[:, 0])
+    raw_avg = raw_accum / n_movies
+    lo, hi  = np.percentile(raw_avg, 1), np.percentile(raw_avg, 99)
+    ax_raw.imshow(raw_avg, cmap='gray', vmin=lo, vmax=hi,
+                  aspect='auto', interpolation='nearest')
+    ax_raw.set_title(f'Raw average\n({n_movies} movies, no gain applied)',
+                     color='#90caf9', fontsize=11)
+    ax_raw.axis('off')
+
+    # ── Right: 2×2 gain transforms ────────────────────────────────────────────
+    positions = [(0, 1), (0, 2), (1, 1), (1, 2)]
+    for (r, c), name in zip(positions, transformed_gains):
+        ax      = fig.add_subplot(gs[r, c])
+        gain_t  = transformed_gains[name]
+        lo, hi  = np.percentile(gain_t, 1), np.percentile(gain_t, 99)
+        ax.imshow(gain_t, cmap='gray', vmin=lo, vmax=hi,
+                  aspect='auto', interpolation='nearest')
+
+        is_best   = (name == best)
+        col       = '#66bb6a' if is_best else '#e0e0e0'
+        marker    = '  \u2190 best' if is_best else ''
+        ssim_s    = (f"{scores[name]['ssim_vs_raw']:.4f}"
+                     if scores[name]['ssim_vs_raw'] is not None else 'n/a')
+        ax.set_title(f'{name}{marker}\nSSIM vs raw = {ssim_s}',
+                     color=col, fontsize=10,
                      fontweight='bold' if is_best else 'normal')
         ax.axis('off')
         if is_best:
@@ -343,29 +439,28 @@ def _plot_corrected_averages(corr_sums, scores, best, out_path):
                 spine.set_linewidth(3)
                 spine.set_visible(True)
 
-    fig.suptitle('Gain-corrected averages — each transform\n'
-                 '(correct transform produces a flat / uniform image)',
+    fig.suptitle('Approach A — raw average vs candidate gain orientations\n'
+                 '(correct orientation should match the raw average pattern)',
                  color='#90caf9', fontsize=13)
-    plt.tight_layout()
     plt.savefig(out_path, dpi=120, bbox_inches='tight',
                 facecolor=fig.get_facecolor())
     plt.close(fig)
 
 
-def _plot_cv_convergence(cv_history, scores, best, out_path):
+def _plot_cv_convergence(cv_hist_mul, scores, best, out_path):
     fig, ax = plt.subplots(figsize=(10, 5))
     fig.patch.set_facecolor('#16213e')
     ax.set_facecolor('#0d1b2a')
 
-    for name, vals in cv_history.items():
+    for name, vals in cv_hist_mul.items():
         lw    = 2.5 if name == best else 1.5
         col   = _COLOURS.get(name, 'white')
-        label = f'{name}  (final CV = {scores[name]["cv"]:.4f})'
+        label = f'{name}  (final CV = {scores[name]["cv_mul"]:.4f})'
         ax.plot(range(1, len(vals) + 1), vals, label=label, color=col, lw=lw)
 
     ax.set_xlabel('Movies accumulated', color='#e0e0e0')
     ax.set_ylabel('CV  (std / mean)  — lower is flatter', color='#e0e0e0')
-    ax.set_title('Gain correction flatness convergence by transform',
+    ax.set_title('Approach B (raw × gain) — flatness convergence by transform',
                  color='#90caf9', fontsize=12)
     ax.tick_params(colors='#e0e0e0')
     for spine in ax.spines.values():
@@ -390,13 +485,14 @@ def _make_standalone_html(results, out_path):
 
     rows_html = ''
     for name, s in results['scores'].items():
-        marker      = '  \u2190 best' if name == best else ''
-        style       = 'color:#66bb6a;font-weight:bold' if name == best else ''
-        ssim_flat_s = f"{s['ssim_vs_flat']:.4f}" if s.get('ssim_vs_flat') is not None else 'n/a'
-        ssim_raw_s  = f"{s['ssim_vs_raw']:.4f}"  if s.get('ssim_vs_raw')  is not None else 'n/a'
+        marker        = '  \u2190 best' if name == best else ''
+        style         = 'color:#66bb6a;font-weight:bold' if name == best else ''
+        cv_mul_s      = f"{s['cv_mul']:.4f}"          if s.get('cv_mul')           is not None else 'n/a'
+        cv_div_s      = f"{s['cv_div']:.4f}"          if s.get('cv_div')           is not None else 'n/a'
+        ssim_raw_s    = f"{s['ssim_vs_raw']:.4f}"     if s.get('ssim_vs_raw')      is not None else 'n/a'
         rows_html += (
             f'<tr style="{style}"><td>{name}{marker}</td>'
-            f'<td>{s["cv"]:.4f}</td><td>{ssim_flat_s}</td><td>{ssim_raw_s}</td></tr>\n'
+            f'<td>{cv_mul_s}</td><td>{cv_div_s}</td><td>{ssim_raw_s}</td></tr>\n'
         )
 
     tilt_lo, tilt_hi = results['tilt_range_deg']
@@ -452,9 +548,9 @@ def _make_standalone_html(results, out_path):
     <table>
       <tr>
         <th>Transform</th>
-        <th>CV &#x2193; (lower = flatter)</th>
-        <th>SSIM vs flat &#x2191;</th>
-        <th>SSIM vs raw &#x2191;</th>
+        <th>CV &#x2193; raw&#xd7;gain</th>
+        <th>CV &#x2193; raw&#xf7;gain</th>
+        <th>SSIM raw vs gain &#x2191;</th>
       </tr>
       {rows_html}
     </table>
@@ -469,7 +565,8 @@ def _make_standalone_html(results, out_path):
   </div>
 
   <div class="imgs">
-    <img src="corrected_averages.png" alt="Corrected averages per transform">
+    <img src="raw_vs_gains.png" alt="Approach A: raw average vs gain orientations">
+    <img src="corrected_averages.png" alt="Approach B: corrected averages (multiply vs divide)">
     <img src="cv_vs_nmovies.png" alt="CV convergence">
   </div>
 </body>
@@ -583,19 +680,20 @@ def run(args):
 
     # ── Accumulate ────────────────────────────────────────────────────────────
     print('Testing 4 transforms...')
-    corr_sums, raw_accum, cv_history = _accumulate(selected, transformed_gains)
+    corr_mul, corr_div, raw_accum, cv_hist_mul, cv_hist_div = _accumulate(
+        selected, transformed_gains)
     print()
 
     # ── Score ─────────────────────────────────────────────────────────────────
-    scores = _score(corr_sums, raw_accum, transformed_gains)
-    best   = min(scores, key=lambda n: scores[n]['cv'])
+    scores = _score(corr_mul, corr_div, raw_accum, transformed_gains)
+    best   = min(scores, key=lambda n: scores[n]['cv_mul'])
 
-    print(f'  {"Transform":<8}  {"CV":>8}  {"SSIM-flat":>10}  {"SSIM-raw":>10}')
+    print(f'  {"Transform":<8}  {"CV×gain":>8}  {"CV÷gain":>8}  {"SSIM-raw":>10}')
     for name, s in scores.items():
-        marker        = '  <- best' if name == best else ''
-        ssim_flat_str = f"{s['ssim_vs_flat']:.4f}" if s['ssim_vs_flat'] is not None else '       n/a'
-        ssim_raw_str  = f"{s['ssim_vs_raw']:.4f}"  if s['ssim_vs_raw']  is not None else '       n/a'
-        print(f'  {name:<8}  {s["cv"]:>8.4f}  {ssim_flat_str:>10}  {ssim_raw_str:>10}{marker}')
+        marker       = '  <- best' if name == best else ''
+        ssim_raw_str = f"{s['ssim_vs_raw']:.4f}" if s['ssim_vs_raw'] is not None else '       n/a'
+        print(f'  {name:<8}  {s["cv_mul"]:>8.4f}  {s["cv_div"]:>8.4f}  '
+              f'{ssim_raw_str:>10}{marker}')
     print()
 
     rot_gain  = TRANSFORMS[best]['rot_gain']
@@ -604,7 +702,8 @@ def run(args):
     print(f'AreTomo3 flags: -RotGain {rot_gain} -FlipGain {flip_gain}')
     print()
 
-    # ── Save results JSON ─────────────────────────────────────────────────────
+    # ── Build results dict for HTML ────────────────────────────────────────────
+    timestamp = datetime.datetime.now().isoformat(timespec='seconds')
     results = {
         'gain_file':             str(gain_path),
         'frames_dir':            str(frames_dir),
@@ -614,17 +713,21 @@ def run(args):
         'acq_order_threshold':   args.n_acquisitions,
         'acq_range':             [int(acq_min), int(acq_max)],
         'tilt_range_deg':        [float(tilt_min), float(tilt_max)],
-        'best_transform':     best,
-        'aretomo3_rot_gain':  rot_gain,
-        'aretomo3_flip_gain': flip_gain,
-        'scores':             scores,
-        'timestamp':          datetime.datetime.now().isoformat(timespec='seconds'),
+        'best_transform':        best,
+        'aretomo3_rot_gain':     rot_gain,
+        'aretomo3_flip_gain':    flip_gain,
+        'scores':                scores,
+        'timestamp':             timestamp,
     }
+
     # ── Plots ─────────────────────────────────────────────────────────────────
     avg_path = out_dir / 'corrected_averages.png'
+    raw_path = out_dir / 'raw_vs_gains.png'
     cv_path  = out_dir / 'cv_vs_nmovies.png'
-    _plot_corrected_averages(corr_sums, scores, best, str(avg_path))
-    _plot_cv_convergence(cv_history, scores, best, str(cv_path))
+    _plot_corrected_averages(corr_mul, corr_div, scores, best, str(avg_path))
+    _plot_raw_vs_gains(raw_accum, len(selected), transformed_gains,
+                       scores, best, str(raw_path))
+    _plot_cv_convergence(cv_hist_mul, scores, best, str(cv_path))
 
     # ── Standalone HTML ───────────────────────────────────────────────────────
     html_path = out_dir / 'report.html'
@@ -637,7 +740,7 @@ def run(args):
         values     = {
             'command':               ' '.join(sys.argv),
             'args':                  args_to_dict(args),
-            'timestamp':             results['timestamp'],
+            'timestamp':             timestamp,
             'best_transform':        best,
             'aretomo3_rot_gain':     rot_gain,
             'aretomo3_flip_gain':    flip_gain,
@@ -655,8 +758,8 @@ def run(args):
     proj_backup = out_dir / 'aretomo3_project.json'
     print()
     print('Output')
-    print(f'  Results JSON      : aretomo3_project.json  [gain_check section]')
-    print(f'  Corrected averages: {avg_path}')
-    print(f'  CV convergence    : {cv_path}')
-    print(f'  HTML report       : {html_path}')
-    print(f'  Project backup    : {proj_backup}')
+    print(f'  Approach A (raw vs gains): {raw_path}')
+    print(f'  Approach B (×÷ corrected): {avg_path}')
+    print(f'  CV convergence           : {cv_path}')
+    print(f'  HTML report              : {html_path}')
+    print(f'  Project backup           : {proj_backup}')
