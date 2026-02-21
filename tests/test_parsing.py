@@ -19,11 +19,17 @@ from aretomo3_editor.shared.parsers import (
 DATA_DIR = Path('/mnt/McQueen-002/sconnell/TEST-ARETOMO-PARSE/relion')
 RUN001   = DATA_DIR / 'run001'
 FRAMES   = DATA_DIR / 'frames'
+MRC_DIR  = Path('/mnt/McQueen-002/parry/bi38262-21-akinetes/relion/run002')
 TS       = 'ts-001'
 
 skip_if_no_data = pytest.mark.skipif(
     not RUN001.exists(),
     reason='run001 data directory not found',
+)
+
+skip_if_no_mrc = pytest.mark.skipif(
+    not (MRC_DIR / f'{TS}.mrc').exists(),
+    reason='raw MRC stack not found',
 )
 
 
@@ -261,3 +267,34 @@ class TestCrossValidation:
         dark_frame_bs = {df['frame_b'] for df in aln['dark_frames']}
         all_accounted = aligned_secs | dark_frame_bs
         assert all_accounted == set(tlt.keys())
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MRC header sanity check
+# ─────────────────────────────────────────────────────────────────────────────
+
+@skip_if_no_data
+@skip_if_no_mrc
+class TestMrcHeader:
+    @pytest.fixture(scope='class')
+    def aln(self):
+        return parse_aln_file(RUN001 / f'{TS}.aln')
+
+    @pytest.fixture(scope='class')
+    def mrc_header(self):
+        mrcfile = pytest.importorskip('mrcfile')
+        with mrcfile.open(MRC_DIR / f'{TS}.mrc', permissive=True) as m:
+            return {
+                'nx': int(m.header.nx),
+                'ny': int(m.header.ny),
+                'nz': int(m.header.nz),
+            }
+
+    def test_width_matches(self, aln, mrc_header):
+        assert mrc_header['nx'] == aln['width']
+
+    def test_height_matches(self, aln, mrc_header):
+        assert mrc_header['ny'] == aln['height']
+
+    def test_nz_matches_total_frames(self, aln, mrc_header):
+        assert mrc_header['nz'] == aln['total_frames']
