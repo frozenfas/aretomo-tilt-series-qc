@@ -516,7 +516,7 @@ def plot_global_summary(all_ts, threshold, global_ranges, out_path):
       (1,1) Estimated resolution (fit_spacing_A) — all frames
       (1,2) % Overlap — all frames, with threshold vline
       (2,0) Astigmatism (µm) — all frames
-      (2,1) Reconstruction thickness (nm or px) per TS
+      (2,1) Lamella thickness AlignZ (nm or px) per TS
       (2,2) Flagged frames per TS
     """
     ts_names = list(all_ts.keys())
@@ -687,14 +687,14 @@ def plot_global_summary(all_ts, threshold, global_ranges, out_path):
         ax.hist(thickness_list, bins=30, color='slateblue',
                 edgecolor='white', linewidth=0.3)
         _median_vline(ax, thickness_list)
-        ax.set_xlabel(f'Thickness ({thickness_unit})')
+        ax.set_xlabel(f'Lamella Thickness AlignZ ({thickness_unit})')
         ax.set_ylabel('# Tilt series')
         if thickness_unit == 'nm' and thickness_angpix is not None:
-            title = f'Reconstruction Thickness\n(pixel size = {thickness_angpix} Å/px)'
+            title = f'Lamella Thickness AlignZ\n(pixel size = {thickness_angpix} Å/px)'
         elif thickness_unit == 'nm':
-            title = 'Reconstruction Thickness (nm)'
+            title = 'Lamella Thickness AlignZ (nm)'
         else:
-            title = 'Reconstruction Thickness (px)\n(no pixel size — use --angpix)'
+            title = 'Lamella Thickness AlignZ (px)\n(no pixel size — use --angpix)'
         ax.set_title(title)
         ax.legend(fontsize=8)
     else:
