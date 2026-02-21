@@ -516,26 +516,28 @@ def plot_global_summary(all_ts, threshold, global_ranges, out_path):
       (1,1) Estimated resolution (fit_spacing_A) — all frames
       (1,2) % Overlap — all frames, with threshold vline
       (2,0) Astigmatism (µm) — all frames
-      (2,1) CTF CC score — all frames
+      (2,1) Reconstruction thickness (nm or px) per TS
       (2,2) Flagged frames per TS
     """
     ts_names = list(all_ts.keys())
     n_ts = len(ts_names)
 
     # Per-TS accumulators
-    n_total_list   = []
-    n_aligned_list = []
-    n_passing_list = []
-    n_flagged_list = []
-    rot_list        = []
+    n_total_list      = []
+    n_aligned_list    = []
+    n_passing_list    = []
+    n_flagged_list    = []
+    rot_list          = []
     alpha_offset_list = []
+    thickness_list    = []   # in nm if angpix known, else px
+    thickness_unit    = 'px'
+    thickness_angpix  = None
 
     # Per-frame accumulators
     defocus_all = []
     spacing_all = []
     overlap_all = []
     astig_all   = []
-    cc_all      = []
 
     for data in all_ts.values():
         frames = data['frames']
@@ -551,6 +553,13 @@ def plot_global_summary(all_ts, threshold, global_ranges, out_path):
         if data.get('alpha_offset') is not None:
             alpha_offset_list.append(data['alpha_offset'])
 
+        if data.get('thickness_nm') is not None:
+            thickness_list.append(data['thickness_nm'])
+            thickness_unit   = 'nm'
+            thickness_angpix = data.get('angpix')
+        elif data.get('thickness') is not None:
+            thickness_list.append(data['thickness'])
+
         for f in frames:
             overlap_all.append(f['overlap_pct'])
             if f.get('mean_defocus_um') is not None:
@@ -559,8 +568,6 @@ def plot_global_summary(all_ts, threshold, global_ranges, out_path):
                 spacing_all.append(f['fit_spacing_A'])
             if f.get('astig_um') is not None:
                 astig_all.append(f['astig_um'])
-            if f.get('cc') is not None:
-                cc_all.append(f['cc'])
 
     def _median_vline(ax, data, color='steelblue'):
         """Draw a dashed median line; returns label string."""
@@ -674,18 +681,24 @@ def plot_global_summary(all_ts, threshold, global_ranges, out_path):
     else:
         _no_data(ax)
 
-    # ── (2,1) CTF CC score ────────────────────────────────────────────────
+    # ── (2,1) Reconstruction thickness ───────────────────────────────────
     ax = axes[2, 1]
-    if cc_all:
-        ax.hist(cc_all, bins=50, color='gold',
+    if thickness_list:
+        ax.hist(thickness_list, bins=30, color='slateblue',
                 edgecolor='white', linewidth=0.3)
-        _median_vline(ax, cc_all)
-        ax.set_xlabel('CTF CC score')
-        ax.set_ylabel('# Frames')
-        ax.set_title('CTF CC Score Distribution')
+        _median_vline(ax, thickness_list)
+        ax.set_xlabel(f'Thickness ({thickness_unit})')
+        ax.set_ylabel('# Tilt series')
+        if thickness_unit == 'nm' and thickness_angpix is not None:
+            title = f'Reconstruction Thickness\n(pixel size = {thickness_angpix} Å/px)'
+        elif thickness_unit == 'nm':
+            title = 'Reconstruction Thickness (nm)'
+        else:
+            title = 'Reconstruction Thickness (px)\n(no pixel size — use --angpix)'
+        ax.set_title(title)
         ax.legend(fontsize=8)
     else:
-        _no_data(ax)
+        _no_data(ax, 'No thickness data')
 
     # ── (2,2) Flagged frames per TS ───────────────────────────────────────
     ax = axes[2, 2]
