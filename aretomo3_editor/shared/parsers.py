@@ -214,8 +214,9 @@ def parse_mdoc_file(filepath):
     Parse a SerialEM .mdoc file using the mdocfile library.
 
     Returns a dict keyed by ZValue (0-indexed acquisition order):
-        {'sub_frame_path', 'mdoc_defocus', 'target_defocus', 'datetime',
-         'stage_x', 'stage_y', 'stage_z', 'exposure_time', 'num_subframes'}
+        {'tilt_angle', 'sub_frame_path', 'mdoc_defocus', 'target_defocus',
+         'datetime', 'stage_x', 'stage_y', 'stage_z', 'exposure_time',
+         'num_subframes'}
     Returns empty dict if mdocfile is not installed.
     """
     if not _HAS_MDOCFILE:
@@ -229,6 +230,7 @@ def parse_mdoc_file(filepath):
         sub = row.get('SubFramePath', None)
         stage = row.get('StagePosition', None)
         result[z] = {
+            'tilt_angle':     _float_or_none(row.get('TiltAngle')),
             'sub_frame_path': Path(sub).name if sub and not isinstance(sub, float) else None,
             'mdoc_defocus':   _float_or_none(row.get('Defocus')),
             'target_defocus': _float_or_none(row.get('TargetDefocus')),

@@ -216,6 +216,102 @@ def plot_tilt_series(ts_name, data, threshold, out_path, global_ranges):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Sanity / consistency checks
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _validate_ts(data, tlt_data, mdoc_data, mrc_path=None):
+    """
+    Run consistency checks across the parsed data sources for one tilt series.
+
+    Checks performed:
+      1. MRC header nx/ny/nz vs .aln width/height/total_frames
+      2. _TLT.txt nominal_tilt + AlphaOffset ≈ .aln corrected tilt  (per frame)
+      3. Every aligned frame's z_value maps to a key in the mdoc
+      4. _TLT.txt rows are fully covered by aligned SECs ∪ dark frame_bs
+      5. Mdoc TiltAngle ≈ _TLT.txt nominal_tilt  (via z_value linkage)
+
+    Returns a list of warning strings (empty = all OK).
+    """
+    warnings = []
+    alpha = data.get('alpha_offset') or 0.0
+
+    # 1. MRC header
+    if mrc_path is not None and mrc_path.exists():
+        try:
+            import mrcfile
+            with mrcfile.open(mrc_path, permissive=True) as m:
+                nx = int(m.header.nx)
+                ny = int(m.header.ny)
+                nz = int(m.header.nz)
+            if nx != data['width']:
+                warnings.append(f'MRC nx={nx} ≠ .aln width={data["width"]}')
+            if ny != data['height']:
+                warnings.append(f'MRC ny={ny} ≠ .aln height={data["height"]}')
+            if nz != data['total_frames']:
+                warnings.append(
+                    f'MRC nz={nz} ≠ .aln total_frames={data["total_frames"]}')
+        except Exception as e:
+            warnings.append(f'MRC header read failed: {e}')
+
+    # 2. Corrected tilt: TLT nominal + alpha ≈ .aln TILT
+    if tlt_data:
+        bad = []
+        for f in data['frames']:
+            tlt = tlt_data.get(f['sec'])
+            if tlt is None:
+                continue
+            if abs(tlt['nominal_tilt'] + alpha - f['tilt']) > 0.05:
+                bad.append(f['sec'])
+        if bad:
+            warnings.append(
+                f'{len(bad)} frame(s) |TLT nominal+α − .aln tilt| > 0.05°: '
+                f'SEC {bad}')
+
+    # 3. ZValue linkage: every frame's z_value must appear in mdoc
+    if mdoc_data:
+        bad = [f['sec'] for f in data['frames']
+               if f.get('z_value') is not None and f['z_value'] not in mdoc_data]
+        if bad:
+            warnings.append(
+                f'{len(bad)} frame(s) with z_value not found in mdoc: SEC {bad}')
+
+    # 4. TLT row coverage: aligned SECs ∪ dark frame_bs == all TLT rows
+    if tlt_data:
+        aligned_secs  = {f['sec']      for f in data['frames']}
+        dark_frame_bs = {df['frame_b'] for df in data['dark_frames']}
+        accounted     = aligned_secs | dark_frame_bs
+        tlt_keys      = set(tlt_data.keys())
+        missing       = tlt_keys  - accounted
+        extra         = accounted - tlt_keys
+        if missing:
+            warnings.append(
+                f'TLT rows with no matching SEC or dark frame_b: {sorted(missing)}')
+        if extra:
+            warnings.append(
+                f'SECs/dark frame_bs with no matching TLT row: {sorted(extra)}')
+
+    # 5. Mdoc TiltAngle ≈ TLT nominal_tilt
+    if tlt_data and mdoc_data:
+        bad = []
+        for f in data['frames']:
+            tlt  = tlt_data.get(f['sec'])
+            z    = f.get('z_value')
+            if tlt is None or z is None:
+                continue
+            mdoc_tilt = mdoc_data.get(z, {}).get('tilt_angle')
+            if mdoc_tilt is None:
+                continue
+            if abs(mdoc_tilt - tlt['nominal_tilt']) > 0.05:
+                bad.append(f['sec'])
+        if bad:
+            warnings.append(
+                f'{len(bad)} frame(s) |mdoc TiltAngle − TLT nominal_tilt| > 0.05°: '
+                f'SEC {bad}')
+
+    return warnings
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Global summary plot
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -617,6 +713,11 @@ def add_parser(subparsers):
     p.add_argument('--angpix',    '-a', type=float, default=None,
                    help='Pixel size in Å/px — used to convert thickness from '
                         'pixels to nm.  If omitted, read from mdoc PixelSpacing.')
+    p.add_argument('--mrcdir',    '-r', default=None,
+                   help='Directory containing ts-xxx.mrc raw stacks for MRC '
+                        'header sanity checks (nx/ny/nz vs .aln).  '
+                        'Defaults to --input; per-TS check silently skipped '
+                        'if the .mrc file is not found.')
     p.set_defaults(func=run)
     return p
 
@@ -636,6 +737,13 @@ def run(args):
         print('WARNING: mdocfile not installed — mdoc enrichment skipped\n')
     elif not mdoc_dir.exists():
         print(f'WARNING: --mdocdir {mdoc_dir} not found — mdoc enrichment skipped\n')
+
+    # MRC directory: explicit --mrcdir, else same directory as the .aln files.
+    # Per-TS MRC checks are silently skipped if the .mrc file is absent.
+    mrc_dir = Path(args.mrcdir) if args.mrcdir else in_dir
+    if args.mrcdir and not mrc_dir.exists():
+        print(f'WARNING: --mrcdir {mrc_dir} not found — MRC checks skipped\n')
+        mrc_dir = None
 
     angpix_str = f'{args.angpix} Å/px' if args.angpix else 'from mdoc (or None)'
     print(f'Found {len(aln_files)} .aln files  |  threshold = {args.threshold}%  '
@@ -687,9 +795,9 @@ def run(args):
                 cum_dose_by_acq[r['acq_order']] = running
                 running += r['dose_e_per_A2']
 
-        _MDOC_KEYS = ('sub_frame_path', 'mdoc_defocus', 'target_defocus',
-                      'datetime', 'stage_x', 'stage_y', 'stage_z',
-                      'exposure_time', 'num_subframes')
+        _MDOC_KEYS = ('tilt_angle', 'sub_frame_path', 'mdoc_defocus',
+                      'target_defocus', 'datetime', 'stage_x', 'stage_y',
+                      'stage_z', 'exposure_time', 'num_subframes')
 
         for f in data['frames']:
             f['overlap_pct']  = compute_overlap(f['tx'], f['ty'], W, H)
@@ -738,6 +846,10 @@ def run(args):
                 for k in ('nominal_tilt', 'acq_order', 'dose_e_per_A2',
                           'z_value', 'cumulative_dose_e_per_A2', *_MDOC_KEYS):
                     df.setdefault(k, None)
+
+        # Sanity checks
+        mrc_path = (mrc_dir / f'{ts_name}.mrc') if mrc_dir else None
+        data['warnings'] = _validate_ts(data, tlt_data, mdoc_data, mrc_path)
 
         all_ts[ts_name] = data
 
@@ -797,6 +909,8 @@ def run(args):
         print(sep)
         print(f'  {status}  {ts_name}   {n_bad} frame(s) below {args.threshold}%  '
               f'| {len(data["dark_frames"])} dark frame(s)')
+        for w in data.get('warnings', []):
+            print(f'  WARN  {w}')
         if bad_frames:
             print(f'     {"SEC":>4}  {"Tilt (°)":>9}  {"TX (px)":>10}  '
                   f'{"TY (px)":>10}  {"Overlap":>8}')
@@ -873,11 +987,13 @@ def run(args):
     make_html(ts_entries, str(html_path), args.threshold)
 
     # Summary
-    n_ts_bad = sum(1 for e in ts_entries if e['n_bad'] > 0)
+    n_ts_bad  = sum(1 for e in ts_entries if e['n_bad'] > 0)
+    n_ts_warn = sum(1 for d in all_ts.values() if d.get('warnings'))
     print(f'\nSummary')
     print(f'  Tilt series processed : {len(ts_entries)}')
     print(f'  TS with flagged frames: {n_ts_bad}')
     print(f'  Total flagged frames  : {total_flagged}')
+    print(f'  TS with sanity warnings: {n_ts_warn}')
     print(f'\nOutput')
     print(f'  Plots          : {out_dir}/<ts-name>.png')
     print(f'  HTML viewer    : {html_path}')
