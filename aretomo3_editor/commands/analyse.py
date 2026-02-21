@@ -546,7 +546,7 @@ def make_html(ts_entries, out_path, threshold, gain_check=None):
     ts_entries  : list of dicts  (name, png, n_bad, n_frames, n_dark)
     out_path    : str            path to write index.html
     threshold   : float          overlap threshold (%)
-    gain_check  : dict or None   loaded results.json from check-gain-transform;
+    gain_check  : dict or None   gain_check section from aretomo3_project.json;
                                  when provided a 'Gain Transform Check' tab is
                                  added before the tilt-series viewer.
     """
@@ -818,9 +818,10 @@ def add_parser(subparsers):
                         'if the .mrc file is not found.')
     p.add_argument('--gain-check-dir', '-g', default=None,
                    help='Output directory from a previous check-gain-transform '
-                        'run (must contain results.json, corrected_averages.png, '
-                        'cv_vs_nmovies.png).  When provided, a "Gain Transform '
-                        'Check" tab is prepended to the HTML report.')
+                        'run (must contain aretomo3_project.json backup, '
+                        'corrected_averages.png, cv_vs_nmovies.png).  When '
+                        'provided, a "Gain Transform Check" tab is prepended '
+                        'to the HTML report.')
     p.set_defaults(func=run)
     return p
 
@@ -1089,13 +1090,14 @@ def run(args):
     gain_check = None
     if args.gain_check_dir:
         gc_dir = Path(args.gain_check_dir)
-        gc_json = gc_dir / 'results.json'
+        gc_json = gc_dir / 'aretomo3_project.json'
         if not gc_json.exists():
-            print(f'WARNING: --gain-check-dir {gc_dir} has no results.json — '
+            print(f'WARNING: --gain-check-dir {gc_dir} has no aretomo3_project.json — '
                   f'gain check tab skipped\n')
         else:
             with open(gc_json) as fh:
-                gain_check = json.load(fh)
+                proj = json.load(fh)
+            gain_check = proj.get('gain_check')
             # Copy gain-check PNGs into the output directory so the HTML is
             # self-contained (relative src= paths work from any location).
             for png_name in ('corrected_averages.png', 'cv_vs_nmovies.png'):

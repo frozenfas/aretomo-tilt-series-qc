@@ -33,10 +33,10 @@ uniform illumination relative to the gain.  The first N acquisitions
 
 Output
 ------
-  results.json          — best transform, AreTomo3 flags, all scores
   corrected_averages.png — 2×2 grid of normalised corrected images
   cv_vs_nmovies.png     — CV convergence per transform vs movies accumulated
   report.html           — standalone HTML viewer (no server required)
+  aretomo3_project.json  — project state updated (backup copy written here)
 """
 
 import re
@@ -459,7 +459,7 @@ def add_parser(subparsers):
     )
     p.add_argument(
         '--output', '-o', default='gain_check',
-        help='Output directory for results.json, PNGs, and report.html',
+        help='Output directory for PNGs, report.html, and project JSON backup',
     )
     p.add_argument(
         '--n-acquisitions', '-n', type=int, default=12,
@@ -579,10 +579,6 @@ def run(args):
         'scores':             scores,
         'timestamp':          datetime.datetime.now().isoformat(timespec='seconds'),
     }
-    json_path = out_dir / 'results.json'
-    with open(json_path, 'w') as fh:
-        json.dump(results, fh, indent=2)
-
     # ── Plots ─────────────────────────────────────────────────────────────────
     avg_path = out_dir / 'corrected_averages.png'
     cv_path  = out_dir / 'cv_vs_nmovies.png'
@@ -615,9 +611,11 @@ def run(args):
         backup_dir = out_dir,
     )
 
+    proj_backup = out_dir / 'aretomo3_project.json'
     print()
     print('Output')
-    print(f'  Results JSON      : {json_path}')
+    print(f'  Results JSON      : aretomo3_project.json  [gain_check section]')
     print(f'  Corrected averages: {avg_path}')
     print(f'  CV convergence    : {cv_path}')
     print(f'  HTML report       : {html_path}')
+    print(f'  Project backup    : {proj_backup}')
