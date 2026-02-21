@@ -13,3 +13,5 @@ dependencies:
     - mdocfile
     - starfile
     - mrcfile
+    - tifffile
+    - scikit-image

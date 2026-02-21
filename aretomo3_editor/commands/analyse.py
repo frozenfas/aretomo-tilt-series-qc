@@ -4,6 +4,7 @@ a global summary PNG, an HTML viewer, alignment JSON, and flagged TSV.
 """
 
 import json
+import shutil
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
@@ -533,7 +534,19 @@ def plot_global_summary(all_ts, threshold, global_ranges, out_path):
 # HTML viewer
 # ─────────────────────────────────────────────────────────────────────────────
 
-def make_html(ts_entries, out_path, threshold):
+def make_html(ts_entries, out_path, threshold, gain_check=None):
+    """
+    Generate the HTML report.
+
+    Parameters
+    ----------
+    ts_entries  : list of dicts  (name, png, n_bad, n_frames, n_dark)
+    out_path    : str            path to write index.html
+    threshold   : float          overlap threshold (%)
+    gain_check  : dict or None   loaded results.json from check-gain-transform;
+                                 when provided a 'Gain Transform Check' tab is
+                                 added before the tilt-series viewer.
+    """
     options_html = '\n'.join(
         f'    <option value="{i}" data-bad="{e["n_bad"]}">'
         f'{"[!] " if e["n_bad"] > 0 else "      "}'
@@ -549,11 +562,80 @@ def make_html(ts_entries, out_path, threshold):
     ])
     n = len(ts_entries)
 
+    # ── Gain-check tab content (only when gain_check is provided) ─────────────
+    has_gain = gain_check is not None
+    if has_gain:
+        best  = gain_check.get('best_transform', 'unknown')
+        rg    = gain_check.get('aretomo3_rot_gain',  '?')
+        fg    = gain_check.get('aretomo3_flip_gain', '?')
+        flags = f'-RotGain {rg} -FlipGain {fg}'
+        n_mov = gain_check.get('n_movies_tested', '?')
+        acq   = gain_check.get('acq_range', ['?', '?'])
+        tilt  = gain_check.get('tilt_range_deg', ['?', '?'])
+        ts_gc = gain_check.get('timestamp', '')[:10]
+
+        rows_html = ''
+        for name, s in gain_check.get('scores', {}).items():
+            marker = '  \u2190 best' if name == best else ''
+            style  = 'color:#66bb6a;font-weight:bold' if name == best else ''
+            ssim_s = f"{s['ssim']:.4f}" if s.get('ssim') is not None else 'n/a'
+            rows_html += (
+                f'<tr style="{style}"><td>{name}{marker}</td>'
+                f'<td>{s["cv"]:.4f}</td><td>{ssim_s}</td></tr>\n'
+            )
+
+        gain_tab_btn  = '<button class="tab-btn active" onclick="switchTab(\'gain\')">Gain Transform Check</button>'
+        ts_tab_btn    = '<button class="tab-btn" onclick="switchTab(\'ts\')">Tilt Series Analysis</button>'
+        gain_section  = f"""
+  <div id="tab-gain" class="tab-section">
+    <div class="gc-card">
+      <div class="gc-best">Best transform: {best}</div>
+      <div class="gc-flags">{flags}</div>
+      <table class="gc-table">
+        <tr><th>Transform</th><th>CV &#x2193; (lower = flatter)</th><th>SSIM vs flat &#x2191;</th></tr>
+        {rows_html}
+      </table>
+      <div class="gc-meta">
+        Acq &le; {gain_check.get("acq_order_threshold", "?")} filter:
+        {gain_check.get("n_movies_after_filter", "?")} movies &nbsp;|&nbsp;
+        Sampled: {n_mov} &nbsp;|&nbsp;
+        Acq range: {acq[0]:03d}&#x2013;{acq[1]:03d} &nbsp;|&nbsp;
+        Tilt: {tilt[0]:+.2f}&#xb0; &#x2192; {tilt[1]:+.2f}&#xb0; &nbsp;|&nbsp;
+        {ts_gc}
+      </div>
+    </div>
+    <div class="gc-imgs">
+      <img src="corrected_averages.png" alt="Corrected averages per transform">
+      <img src="cv_vs_nmovies.png" alt="CV convergence">
+    </div>
+  </div>"""
+        ts_section_style = 'display:none'
+        tab_bar          = f'<div id="tab-bar">{gain_tab_btn}{ts_tab_btn}</div>'
+        tab_init_js      = "let activeTab = 'gain';"
+    else:
+        gain_section     = ''
+        ts_section_style = ''
+        tab_bar          = ''
+        tab_init_js      = "let activeTab = 'ts';"
+
+    # ── Tab switching JS (only needed when there are two tabs) ────────────────
+    tab_switch_js = """
+    function switchTab(name) {
+      activeTab = name;
+      document.querySelectorAll('.tab-section').forEach(s => {
+        s.style.display = (s.id === 'tab-' + name) ? '' : 'none';
+      });
+      document.querySelectorAll('.tab-btn').forEach(b => {
+        b.classList.toggle('active', b.textContent.toLowerCase().includes(name));
+      });
+    }
+    """ if has_gain else ''
+
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>AreTomo Alignment Analysis</title>
+  <title>AreTomo3 Analysis Report</title>
   <style>
     * {{ box-sizing: border-box; margin: 0; padding: 0; }}
     body {{
@@ -566,104 +648,117 @@ def make_html(ts_entries, out_path, threshold):
       padding: 24px 16px;
       min-height: 100vh;
     }}
-    h1 {{ margin-bottom: 18px; font-size: 1.25em; color: #90caf9; letter-spacing: 0.03em; }}
+    h1 {{ margin-bottom: 14px; font-size: 1.25em; color: #90caf9; letter-spacing: 0.03em; }}
+
+    /* ── Tab bar ── */
+    #tab-bar {{
+      display: flex; gap: 6px; margin-bottom: 20px;
+    }}
+    .tab-btn {{
+      padding: 8px 22px; font-size: 0.95em; border: none; border-radius: 6px;
+      background: #1e2a45; color: #90a4ae; cursor: pointer; transition: all 0.2s;
+    }}
+    .tab-btn.active {{ background: #1565c0; color: white; }}
+    .tab-btn:hover:not(.active) {{ background: #2a3f60; color: #e0e0e0; }}
+
+    /* ── Gain check tab ── */
+    .tab-section {{ width: 100%; max-width: 1380px; }}
+    .gc-card {{
+      background: #1e2a45; border-radius: 10px; padding: 20px 24px;
+      margin-bottom: 20px; max-width: 680px;
+    }}
+    .gc-best {{ color: #66bb6a; font-size: 1.2em; font-weight: bold; }}
+    .gc-flags {{
+      font-family: monospace; font-size: 1em; color: #ffcc80;
+      background: #0d1b2a; padding: 5px 12px; border-radius: 6px;
+      display: inline-block; margin-top: 10px;
+    }}
+    .gc-table {{ border-collapse: collapse; width: 100%; margin-top: 14px; }}
+    .gc-table th, .gc-table td {{
+      padding: 7px 14px; text-align: left; border-bottom: 1px solid #2e3f5c;
+    }}
+    .gc-table th {{ color: #90caf9; font-weight: normal; }}
+    .gc-meta {{ color: #78909c; font-size: 0.82em; margin-top: 12px; }}
+    .gc-imgs {{ display: flex; gap: 20px; flex-wrap: wrap; }}
+    .gc-imgs img {{
+      max-width: 720px; width: 100%; border-radius: 8px; border: 1px solid #2e3f5c;
+    }}
+
+    /* ── TS viewer tab ── */
     #controls {{
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      margin-bottom: 10px;
-      flex-wrap: wrap;
-      justify-content: center;
+      display: flex; align-items: center; gap: 10px;
+      margin-bottom: 10px; flex-wrap: wrap; justify-content: center;
     }}
-    button {{
-      padding: 8px 20px;
-      font-size: 1em;
-      border: none;
-      border-radius: 6px;
-      background: #1565c0;
-      color: white;
-      cursor: pointer;
-      transition: background 0.2s;
+    button.nav-btn {{
+      padding: 8px 20px; font-size: 1em; border: none; border-radius: 6px;
+      background: #1565c0; color: white; cursor: pointer; transition: background 0.2s;
     }}
-    button:hover {{ background: #0d47a1; }}
+    button.nav-btn:hover {{ background: #0d47a1; }}
     select {{
-      padding: 7px 10px;
-      font-size: 0.88em;
-      border-radius: 6px;
-      background: #1e2a45;
-      color: #e0e0e0;
-      border: 1px solid #445;
-      max-width: 380px;
-      cursor: pointer;
+      padding: 7px 10px; font-size: 0.88em; border-radius: 6px;
+      background: #1e2a45; color: #e0e0e0; border: 1px solid #445;
+      max-width: 380px; cursor: pointer;
     }}
     #counter {{ font-size: 0.88em; color: #90a4ae; min-width: 60px; text-align: center; }}
     #title {{
-      font-size: 0.92em;
-      color: #ffcc80;
-      text-align: center;
-      margin-bottom: 10px;
-      min-height: 1.4em;
+      font-size: 0.92em; color: #ffcc80; text-align: center;
+      margin-bottom: 10px; min-height: 1.4em;
     }}
     #img-wrap {{
-      width: 100%;
-      max-width: 1380px;
-      background: #0d1b2a;
-      border-radius: 10px;
-      padding: 12px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
+      width: 100%; max-width: 1380px; background: #0d1b2a;
+      border-radius: 10px; padding: 12px;
+      display: flex; align-items: center; justify-content: center;
     }}
     #main-img {{ max-width: 100%; height: auto; border-radius: 4px; }}
     #hint {{ font-size: 0.75em; color: #546e7a; margin-top: 12px; }}
     #progress {{
-      width: 100%;
-      max-width: 1380px;
-      height: 4px;
-      background: #1e2a45;
-      border-radius: 2px;
-      margin-bottom: 10px;
+      width: 100%; max-width: 1380px; height: 4px;
+      background: #1e2a45; border-radius: 2px; margin-bottom: 10px;
     }}
     #progress-bar {{
-      height: 100%;
-      background: #1565c0;
-      border-radius: 2px;
-      transition: width 0.2s;
+      height: 100%; background: #1565c0; border-radius: 2px; transition: width 0.2s;
     }}
   </style>
 </head>
 <body>
-  <h1>AreTomo Alignment Analysis</h1>
+  <h1>AreTomo3 Analysis Report</h1>
 
-  <div id="controls">
-    <button id="btn-prev">&#8592; Prev</button>
-    <select id="ts-select">
+  {tab_bar}
+{gain_section}
+  <div id="tab-ts" class="tab-section" style="{ts_section_style}">
+    <div id="controls">
+      <button class="nav-btn" id="btn-prev">&#8592; Prev</button>
+      <select id="ts-select">
 {options_html}
-    </select>
-    <button id="btn-next">Next &#8594;</button>
-    <span id="counter">1&nbsp;/&nbsp;{n}</span>
+      </select>
+      <button class="nav-btn" id="btn-next">Next &#8594;</button>
+      <span id="counter">1&nbsp;/&nbsp;{n}</span>
+    </div>
+
+    <div id="progress"><div id="progress-bar"></div></div>
+    <div id="title"></div>
+
+    <div id="img-wrap">
+      <img id="main-img" src="" alt="tilt series plot">
+    </div>
+
+    <p id="hint">Keyboard: &#8592; &#8594; to navigate between tilt series</p>
   </div>
-
-  <div id="progress"><div id="progress-bar"></div></div>
-  <div id="title"></div>
-
-  <div id="img-wrap">
-    <img id="main-img" src="" alt="tilt series plot">
-  </div>
-
-  <p id="hint">Keyboard: &#8592; &#8594; to navigate between tilt series</p>
 
   <script>
+    {tab_init_js}
+    {tab_switch_js}
+
     const images  = {images_js};
     const titles  = {titles_js};
     const n       = images.length;
     let   idx     = 0;
 
-    const img     = document.getElementById('main-img');
-    const sel     = document.getElementById('ts-select');
-    const ctr     = document.getElementById('counter');
-    const ttl     = document.getElementById('title');
-    const pbar    = document.getElementById('progress-bar');
+    const img  = document.getElementById('main-img');
+    const sel  = document.getElementById('ts-select');
+    const ctr  = document.getElementById('counter');
+    const ttl  = document.getElementById('title');
+    const pbar = document.getElementById('progress-bar');
 
     function show(i) {{
       idx = ((i % n) + n) % n;
@@ -718,6 +813,11 @@ def add_parser(subparsers):
                         'header sanity checks (nx/ny/nz vs .aln).  '
                         'Defaults to --input; per-TS check silently skipped '
                         'if the .mrc file is not found.')
+    p.add_argument('--gain-check-dir', '-g', default=None,
+                   help='Output directory from a previous check-gain-transform '
+                        'run (must contain results.json, corrected_averages.png, '
+                        'cv_vs_nmovies.png).  When provided, a "Gain Transform '
+                        'Check" tab is prepended to the HTML report.')
     p.set_defaults(func=run)
     return p
 
@@ -982,9 +1082,30 @@ def run(args):
                 f'{row["tx"]:.3f}\t{row["ty"]:.3f}\t{row["overlap_pct"]:.2f}\n'
             )
 
+    # ── Load gain-check results (optional) ───────────────────────────────────
+    gain_check = None
+    if args.gain_check_dir:
+        gc_dir = Path(args.gain_check_dir)
+        gc_json = gc_dir / 'results.json'
+        if not gc_json.exists():
+            print(f'WARNING: --gain-check-dir {gc_dir} has no results.json — '
+                  f'gain check tab skipped\n')
+        else:
+            with open(gc_json) as fh:
+                gain_check = json.load(fh)
+            # Copy gain-check PNGs into the output directory so the HTML is
+            # self-contained (relative src= paths work from any location).
+            for png_name in ('corrected_averages.png', 'cv_vs_nmovies.png'):
+                src = gc_dir / png_name
+                if src.exists():
+                    shutil.copy2(src, out_dir / png_name)
+                else:
+                    print(f'WARNING: gain-check PNG not found: {src}')
+            print(f'Gain check results loaded from {gc_dir}\n')
+
     # HTML
     html_path = out_dir / 'index.html'
-    make_html(ts_entries, str(html_path), args.threshold)
+    make_html(ts_entries, str(html_path), args.threshold, gain_check)
 
     # Summary
     n_ts_bad  = sum(1 for e in ts_entries if e['n_bad'] > 0)
