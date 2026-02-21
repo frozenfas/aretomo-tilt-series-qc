@@ -1,8 +1,7 @@
-#!/usr/bin/env python3
 """
-trim_imod_files.py  —  For each tilt series write per-variant .tlt / .xtilt
-                        files and newst.com scripts in the analysis directory,
-                        with dark and/or misaligned frames excluded.
+trim-ts subcommand — for each tilt series write per-variant .tlt / .xtilt
+files and newst.com scripts in the analysis directory, with dark and/or
+misaligned frames excluded.
 
 Two variants are produced per tilt series:
 
@@ -12,9 +11,6 @@ Two variants are produced per tilt series:
 Files written to  <output>/ts-xxx_Imod/:
 
     ts-xxx_st.xf    (symlink)           → original full-length transform file
-                                          (.xf must cover the whole stack;
-                                           newstack indexes it by section number
-                                           when SectionsToRead is active)
     ts-xxx_nodark.xtilt / .tlt          trimmed support files for nodark ali
     ts-xxx_clean.xtilt  / .tlt          trimmed support files for clean ali
     ts-xxx_nodark_order_list.csv        acquisition metadata for nodark frames
@@ -24,20 +20,11 @@ Files written to  <output>/ts-xxx_Imod/:
     ts-xxx.mrc  (symlink)               → raw tilt-sorted stack
 
 Requires:
-    parse_aln.py to have been run first  (reads <output>/alignment_data.json)
+    aretomo3-editor analyse to have been run first  (reads alignment_data.json)
     Source _Imod directories present in <input>/ts-xxx_Imod/
-
-Usage:
-    python trim_imod_files.py \\
-        --input    run002 \\
-        --output   run002_analysis \\
-        --mrcdir   /mnt/McQueen-002/parry/bi38262-21-akinetes/relion/run002 \\
-        --threshold 80 \\
-        --bin 8
 """
 
 import json
-import argparse
 from pathlib import Path
 
 
@@ -155,34 +142,38 @@ def write_newst(path, ts_name, xf_name, output_ali, bin_factor, keep_indices):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Main
+# CLI integration
 # ─────────────────────────────────────────────────────────────────────────────
 
-def main():
-    ap = argparse.ArgumentParser(
-        description='Trim IMOD support files for dark/misaligned frame removal.',
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+def add_parser(subparsers):
+    p = subparsers.add_parser(
+        'trim-ts',
+        help='Trim IMOD support files for dark/misaligned frame removal',
+        formatter_class=__import__('argparse').ArgumentDefaultsHelpFormatter,
     )
-    ap.add_argument('--input',     '-i', default='run002',
-                    help='Directory containing ts-xxx_Imod subdirectories')
-    ap.add_argument('--output',    '-o', default='run002_analysis',
-                    help='Analysis output directory (must contain alignment_data.json)')
-    ap.add_argument('--mrcdir',    '-m',
-                    default='/mnt/McQueen-002/parry/bi38262-21-akinetes/relion/run002',
-                    help='Directory containing the ts-xxx.mrc raw stacks')
-    ap.add_argument('--threshold', '-t', type=float, default=80.0,
-                    help='Overlap threshold used in parse_aln.py')
-    ap.add_argument('--bin',       '-b', type=int, default=8,
-                    help='BinByFactor for newstack')
-    args = ap.parse_args()
+    p.add_argument('--input',     '-i', default='run002',
+                   help='Directory containing ts-xxx_Imod subdirectories')
+    p.add_argument('--output',    '-o', default='run002_analysis',
+                   help='Analysis output directory (must contain alignment_data.json)')
+    p.add_argument('--mrcdir',    '-m',
+                   default='/mnt/McQueen-002/parry/bi38262-21-akinetes/relion/run002',
+                   help='Directory containing the ts-xxx.mrc raw stacks')
+    p.add_argument('--threshold', '-t', type=float, default=80.0,
+                   help='Overlap threshold used in the analyse step')
+    p.add_argument('--bin',       '-b', type=int, default=8,
+                   help='BinByFactor for newstack')
+    p.set_defaults(func=run)
+    return p
 
+
+def run(args):
     in_dir  = Path(args.input).resolve()
     out_dir = Path(args.output).resolve()
     mrc_dir = Path(args.mrcdir).resolve()
 
     json_path = out_dir / 'alignment_data.json'
     if not json_path.exists():
-        print(f'ERROR: {json_path} not found — run parse_aln.py first.')
+        print(f'ERROR: {json_path} not found — run "aretomo3-editor analyse" first.')
         return
 
     with open(json_path) as fh:
@@ -209,12 +200,12 @@ def main():
             n_skip += 1
             continue
 
-        # ── Build tilt-sorted section index ──────────────────────────────────
+        # Build tilt-sorted section index
         order_rows  = load_order_list(order_csv)
         sorted_secs = tilt_sorted_sections(order_rows)
         all_sec_idx = {s[0] for s in sorted_secs}
 
-        # ── Identify sections to exclude ──────────────────────────────────────
+        # Identify sections to exclude
         dark_tilts    = [df['tilt'] for df in data.get('dark_frames', [])]
         flagged_tilts = [f['tilt']  for f  in data.get('frames', [])
                          if f.get('is_flagged')]
@@ -230,14 +221,12 @@ def main():
         nodark_keep = sorted(all_sec_idx - dark_secs)
         clean_keep  = sorted(all_sec_idx - dark_secs - flagged_secs)
 
-        # ── Read xtilt (optional) ─────────────────────────────────────────────
         xtilt_lines = read_xtilt(xtilt_src) if xtilt_src.exists() else []
 
-        # ── Create output directory ───────────────────────────────────────────
         ts_out = out_dir / f'{ts_name}_Imod'
         ts_out.mkdir(exist_ok=True)
 
-        # ── Symlink raw stack and full .xf ────────────────────────────────────
+        # Symlink raw stack and full .xf
         mrc_link = ts_out / f'{ts_name}.mrc'
         if not mrc_link.exists():
             mrc_link.symlink_to(mrc_dir / f'{ts_name}.mrc')
@@ -248,7 +237,7 @@ def main():
         if not xf_link.exists():
             xf_link.symlink_to(xf_src)
 
-        # ── Write nodark variant ──────────────────────────────────────────────
+        # Write nodark variant
         write_tlt(ts_out / f'{ts_name}_nodark.tlt', sorted_secs, set(nodark_keep))
         write_order_list(ts_out / f'{ts_name}_nodark_order_list.csv',
                          sorted_secs, set(nodark_keep))
@@ -264,7 +253,7 @@ def main():
             keep_indices = nodark_keep,
         )
 
-        # ── Write clean variant ───────────────────────────────────────────────
+        # Write clean variant
         write_tlt(ts_out / f'{ts_name}_clean.tlt', sorted_secs, set(clean_keep))
         write_order_list(ts_out / f'{ts_name}_clean_order_list.csv',
                          sorted_secs, set(clean_keep))
@@ -280,10 +269,9 @@ def main():
             keep_indices = clean_keep,
         )
 
-        # ── Report ────────────────────────────────────────────────────────────
-        n_total      = len(all_sec_idx)
-        n_dark       = len(dark_secs)
-        n_extra      = len(flagged_secs - dark_secs)
+        n_total  = len(all_sec_idx)
+        n_dark   = len(dark_secs)
+        n_extra  = len(flagged_secs - dark_secs)
         print(f'{sep}')
         print(f'  {ts_name}')
         print(f'    Total sections         : {n_total}')
@@ -303,7 +291,3 @@ def main():
     print(f'\nTo run (from inside each ts-xxx_Imod directory):')
     print(f'  submfg newst_nodark.com')
     print(f'  submfg newst_clean.com')
-
-
-if __name__ == '__main__':
-    main()

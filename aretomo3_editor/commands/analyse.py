@@ -1,15 +1,9 @@
-#!/usr/bin/env python3
 """
-parse_aln.py  —  Parse AreTomo .aln / _CTF.txt files, quantify per-frame
-                  misalignment and produce diagnostic PNG plots + HTML viewer.
-
-Usage:
-    python parse_aln.py --input run001/ --output run001_analysis/ --threshold 80
+analyse subcommand — parse AreTomo .aln files, produce per-TS plots,
+a global summary PNG, an HTML viewer, alignment JSON, and flagged TSV.
 """
 
-import re
 import json
-import argparse
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
@@ -23,291 +17,15 @@ try:
 except ImportError:
     _HAS_MDOCFILE = False
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# .aln parsing
-# ─────────────────────────────────────────────────────────────────────────────
-
-def parse_aln_file(filepath):
-    """
-    Parse one AreTomo .aln file.
-
-    Returns a dict with:
-        width, height, total_frames          – from RawSize header
-        alpha_offset, beta_offset            – stage tilt offsets
-        thickness                            – reconstructed thickness (px)
-        num_patches                          – number of local-alignment patches
-        dark_frames  : list of dicts         – {frame_a, frame_b, tilt}
-        frames       : list of dicts         – {sec, rot, gmag, tx, ty,
-                                                smean, sfit, scale, base, tilt}
-    """
-    width = height = total_frames = None
-    alpha_offset = beta_offset = thickness = num_patches = None
-    dark_frames, frames = [], []
-
-    with open(filepath) as fh:
-        for raw in fh:
-            line = raw.strip()
-            if not line:
-                continue
-
-            if line.startswith('#'):
-                m = re.match(r'#\s*RawSize\s*=\s*(\d+)\s+(\d+)\s+(\d+)', line)
-                if m:
-                    width, height, total_frames = int(m[1]), int(m[2]), int(m[3])
-                    continue
-
-                m = re.match(r'#\s*AlphaOffset\s*=\s*([-\d.]+)', line)
-                if m:
-                    alpha_offset = float(m[1]); continue
-
-                m = re.match(r'#\s*BetaOffset\s*=\s*([-\d.]+)', line)
-                if m:
-                    beta_offset = float(m[1]); continue
-
-                m = re.match(r'#\s*Thickness\s*=\s*(\d+)', line)
-                if m:
-                    thickness = int(m[1]); continue
-
-                m = re.match(r'#\s*NumPatches\s*=\s*(\d+)', line)
-                if m:
-                    num_patches = int(m[1]); continue
-
-                # DarkFrame =  frame_a  frame_b  tilt_angle
-                m = re.match(r'#\s*DarkFrame\s*=\s+(\d+)\s+(\d+)\s+([-\d.]+)', line)
-                if m:
-                    dark_frames.append({
-                        'frame_a': int(m[1]),
-                        'frame_b': int(m[2]),
-                        'tilt':    float(m[3]),
-                    })
-                    continue
-
-            else:
-                # Data row: SEC  ROT  GMAG  TX  TY  SMEAN  SFIT  SCALE  BASE  TILT
-                parts = line.split()
-                if len(parts) == 10:
-                    try:
-                        frames.append({
-                            'sec':   int(parts[0]),
-                            'rot':   float(parts[1]),
-                            'gmag':  float(parts[2]),
-                            'tx':    float(parts[3]),
-                            'ty':    float(parts[4]),
-                            'smean': float(parts[5]),
-                            'sfit':  float(parts[6]),
-                            'scale': float(parts[7]),
-                            'base':  float(parts[8]),
-                            'tilt':  float(parts[9]),
-                        })
-                    except ValueError:
-                        pass  # header row
-
-    return {
-        'width':        width,
-        'height':       height,
-        'total_frames': total_frames,
-        'alpha_offset': alpha_offset,
-        'beta_offset':  beta_offset,
-        'thickness':    thickness,
-        'num_patches':  num_patches,
-        'dark_frames':  dark_frames,
-        'frames':       frames,
-    }
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CTF parsing
-# ─────────────────────────────────────────────────────────────────────────────
-
-def parse_ctf_file(filepath):
-    """
-    Parse an AreTomo *_CTF.txt file.
-
-    Columns: micrograph_number  defocus1_A  defocus2_A  astig_angle_deg
-             phase_shift_rad  cc  fit_spacing_A  dfhand
-
-    Returns a dict keyed by micrograph number (1-indexed).
-    Mean defocus and astigmatism are added in both Å and µm.
-    """
-    ctf = {}
-    with open(filepath) as fh:
-        for raw in fh:
-            line = raw.strip()
-            if not line or line.startswith('#'):
-                continue
-            parts = line.split()
-            if len(parts) == 8:
-                try:
-                    idx = int(parts[0])
-                    d1  = float(parts[1])
-                    d2  = float(parts[2])
-                    ctf[idx] = {
-                        'defocus1_A':       d1,
-                        'defocus2_A':       d2,
-                        'mean_defocus_A':   (d1 + d2) / 2.0,
-                        'mean_defocus_um':  (d1 + d2) / 2.0 / 1e4,
-                        'astig_A':          abs(d1 - d2),
-                        'astig_um':         abs(d1 - d2) / 1e4,
-                        'astig_angle_deg':  float(parts[3]),
-                        'phase_shift_rad':  float(parts[4]),
-                        'cc':               float(parts[5]),
-                        'fit_spacing_A':    float(parts[6]),
-                        'dfhand':           int(parts[7]),
-                    }
-                except ValueError:
-                    pass
-    return ctf
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# _TLT.txt and mdoc parsing
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _float_or_none(v):
-    try:
-        f = float(v)
-        return None if np.isnan(f) else f
-    except (TypeError, ValueError):
-        return None
-
-
-def _int_or_none(v):
-    try:
-        f = float(v)
-        return None if np.isnan(f) else int(f)
-    except (TypeError, ValueError):
-        return None
-
-
-def parse_tlt_file(filepath):
-    """
-    Parse an AreTomo *_TLT.txt file.
-
-    Each row N (1-indexed) corresponds to SEC N in the .aln / _CTF.txt files
-    (tilt-sorted order, including dark frames).
-
-    Returns a dict keyed by 1-indexed row number:
-        {'nominal_tilt': float, 'acq_order': int,
-         'dose_e_per_A2': float, 'z_value': int}
-    where dose_e_per_A2 is the per-frame dose (not cumulative) and
-    z_value = acq_order - 1  (0-indexed = ZValue in the mdoc file).
-    """
-    result = {}
-    with open(filepath) as fh:
-        for i, line in enumerate(fh, start=1):
-            parts = line.split()
-            if len(parts) >= 3:
-                try:
-                    acq_order = int(parts[1])
-                    result[i] = {
-                        'nominal_tilt':  float(parts[0]),
-                        'acq_order':     acq_order,
-                        'dose_e_per_A2': float(parts[2]),
-                        'z_value':       acq_order - 1,
-                    }
-                except ValueError:
-                    pass
-    return result
-
-
-def parse_mdoc_file(filepath):
-    """
-    Parse a SerialEM .mdoc file using the mdocfile library.
-
-    Returns a dict keyed by ZValue (0-indexed acquisition order):
-        {'sub_frame_path', 'mdoc_defocus', 'target_defocus', 'datetime',
-         'stage_x', 'stage_y', 'stage_z', 'exposure_time', 'num_subframes'}
-    Returns empty dict if mdocfile is not installed.
-    """
-    if not _HAS_MDOCFILE:
-        return {}
-    df = _mdocfile.read(filepath)
-    result = {}
-    for _, row in df.iterrows():
-        z = _int_or_none(row.get('ZValue'))
-        if z is None:
-            continue
-        sub = row.get('SubFramePath', None)
-        stage = row.get('StagePosition', None)
-        result[z] = {
-            'sub_frame_path': Path(sub).name if sub and not isinstance(sub, float) else None,
-            'mdoc_defocus':   _float_or_none(row.get('Defocus')),
-            'target_defocus': _float_or_none(row.get('TargetDefocus')),
-            'datetime':       row.get('DateTime') or None,
-            'stage_x':        float(stage[0]) if stage and not isinstance(stage, float) else None,
-            'stage_y':        float(stage[1]) if stage and not isinstance(stage, float) else None,
-            'stage_z':        _float_or_none(row.get('StageZ')),
-            'exposure_time':  _float_or_none(row.get('ExposureTime')),
-            'num_subframes':  _int_or_none(row.get('NumSubFrames')),
-        }
-    return result
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Geometry helpers
-# ─────────────────────────────────────────────────────────────────────────────
-
-def compute_overlap(tx, ty, w, h):
-    """
-    % overlap of a frame shifted by (tx, ty) with the reference frame.
-
-    All frames within a tilt series share the same ROT value, so the
-    relative displacement between any frame and the reference is purely
-    translational in the aligned coordinate system.  The overlap of two
-    identically-rotated, same-sized rectangles separated by (tx, ty) is:
-
-        overlap_x = max(0, W - |tx|) / W
-        overlap_y = max(0, H - |ty|) / H
-        % overlap  = overlap_x * overlap_y * 100
-    """
-    ox = max(0.0, w - abs(tx)) / w
-    oy = max(0.0, h - abs(ty)) / h
-    return ox * oy * 100.0
-
-
-def rotated_rect_corners(cx, cy, w, h, angle_deg):
-    """
-    Return the 4 corners of a W×H rectangle centred at (cx, cy),
-    rotated in-plane by angle_deg.
-    """
-    a = np.radians(angle_deg)
-    ca, sa = np.cos(a), np.sin(a)
-    hw, hh = w / 2.0, h / 2.0
-    local = [(-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh)]
-    return [(cx + ca * x - sa * y, cy + sa * x + ca * y) for x, y in local]
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Colour helpers
-# ─────────────────────────────────────────────────────────────────────────────
-
-# Overlap colourmap: red (0%) → green (100%)
-OVL_CMAP = plt.cm.RdYlGn
-OVL_NORM = plt.Normalize(vmin=0, vmax=100)
-
-
-def _ovl_colour(overlap_pct):
-    return OVL_CMAP(OVL_NORM(overlap_pct))
-
-
-def _ovl_sm():
-    sm = plt.cm.ScalarMappable(cmap=OVL_CMAP, norm=OVL_NORM)
-    sm.set_array([])
-    return sm
-
-
-# Resolution colourmap: green (good/low Å) → red (poor/high Å)
-# fit_spacing_A: lower = better resolution → we want low values to be green
-# Using RdYlGn_r: value=0 → green, value=1 → red; normalise so low Å → 0
-RES_CMAP = plt.cm.RdYlGn_r
-
-
-def _res_sm(vmin, vmax):
-    sm = plt.cm.ScalarMappable(cmap=RES_CMAP,
-                               norm=plt.Normalize(vmin=vmin, vmax=vmax))
-    sm.set_array([])
-    return sm
+from aretomo3_editor.shared.parsers import (
+    parse_aln_file, parse_ctf_file, parse_tlt_file, parse_mdoc_file,
+    _float_or_none,
+)
+from aretomo3_editor.shared.geometry import compute_overlap, rotated_rect_corners
+from aretomo3_editor.shared.colours import (
+    OVL_CMAP, OVL_NORM, RES_CMAP,
+    _ovl_colour, _ovl_sm, _res_sm,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -334,7 +52,7 @@ def plot_tilt_series(ts_name, data, threshold, out_path, global_ranges):
                        global_ranges['fit_spacing_max'])
 
     # Global axis limits (consistent across all tilt series)
-    tilt_xlim   = (global_ranges['tilt_min'],    global_ranges['tilt_max'])
+    tilt_xlim    = (global_ranges['tilt_min'],    global_ranges['tilt_max'])
     defocus_ylim = (global_ranges['defocus_min'], global_ranges['defocus_max'])
 
     fig = plt.figure(figsize=(20, 12))
@@ -418,14 +136,13 @@ def plot_tilt_series(ts_name, data, threshold, out_path, global_ranges):
     # Each frame at corrected tilt θ is a full line through the origin:
     #   A = (-cos θ, -sin θ)  →  B = (cos θ, sin θ)
     # θ = 0° → horizontal line (-1,0)–(1,0); 0° is to the right.
-    # Viewing geometry: X axis = beam direction at 0°, Y axis = vertical.
-    ax3.axhline(0, color='#555555', lw=0.8, zorder=1)   # sample plane at 0°
+    ax3.axhline(0, color='#555555', lw=0.8, zorder=1)
     ax3.axvline(0, color='#888888', lw=0.6, ls=':', zorder=1)
 
     # Dark frames: dashed grey lines through origin
     for dt in dark_tilts:
-        tr  = np.radians(dt)
-        ctr = np.cos(tr)
+        tr   = np.radians(dt)
+        ctr  = np.cos(tr)
         str_ = np.sin(tr)
         ax3.plot([-ctr, ctr], [-str_, str_],
                  color='#bbbbbb', lw=1.0, ls='--', zorder=2)
@@ -441,11 +158,9 @@ def plot_tilt_series(ts_name, data, threshold, out_path, global_ranges):
         mk  = '*' if is_ref[i] else 'o'
         sz  = 110 if is_ref[i] else 35
         ec  = 'black' if is_ref[i] else 'none'
-        # Small dot at right endpoint (cos θ, sin θ) to mark direction
         ax3.scatter(ctr, str_, color=ovl_cols[i],
                     s=sz, marker=mk, edgecolors=ec, linewidths=0.8, zorder=4)
 
-    # Square symmetric limits — endpoints always on unit circle
     lim = 1.18
     ax3.set_aspect('equal', adjustable='box')
     ax3.set_xlim(-lim, lim)
@@ -519,8 +234,7 @@ def plot_global_summary(all_ts, threshold, global_ranges, out_path):
       (2,1) Lamella thickness AlignZ (nm or px) per TS
       (2,2) Flagged frames per TS
     """
-    ts_names = list(all_ts.keys())
-    n_ts = len(ts_names)
+    n_ts = len(all_ts)
 
     # Per-TS accumulators
     n_total_list      = []
@@ -529,7 +243,7 @@ def plot_global_summary(all_ts, threshold, global_ranges, out_path):
     n_flagged_list    = []
     rot_list          = []
     alpha_offset_list = []
-    thickness_list    = []   # in nm if angpix known, else px
+    thickness_list    = []
     thickness_unit    = 'px'
     thickness_angpix  = None
 
@@ -570,7 +284,6 @@ def plot_global_summary(all_ts, threshold, global_ranges, out_path):
                 astig_all.append(f['astig_um'])
 
     def _median_vline(ax, data, color='steelblue'):
-        """Draw a dashed median line; returns label string."""
         if not data:
             return
         med = np.median(data)
@@ -681,7 +394,7 @@ def plot_global_summary(all_ts, threshold, global_ranges, out_path):
     else:
         _no_data(ax)
 
-    # ── (2,1) Reconstruction thickness ───────────────────────────────────
+    # ── (2,1) Lamella Thickness AlignZ ────────────────────────────────────
     ax = axes[2, 1]
     if thickness_list:
         ax.hist(thickness_list, bins=30, color='slateblue',
@@ -883,28 +596,32 @@ def make_html(ts_entries, out_path, threshold):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Main
+# CLI integration
 # ─────────────────────────────────────────────────────────────────────────────
 
-def main():
-    ap = argparse.ArgumentParser(
-        description='Analyse AreTomo .aln alignment files',
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+def add_parser(subparsers):
+    p = subparsers.add_parser(
+        'analyse',
+        help='Parse AreTomo .aln files and produce diagnostic plots and HTML viewer',
+        formatter_class=__import__('argparse').ArgumentDefaultsHelpFormatter,
     )
-    ap.add_argument('--input',     '-i', default='run001',
-                    help='Directory containing .aln files')
-    ap.add_argument('--output',    '-o', default='run001_analysis',
-                    help='Output directory for plots, JSON, TSV, and HTML')
-    ap.add_argument('--threshold', '-t', type=float, default=80.0,
-                    help='%% overlap below which a frame is flagged')
-    ap.add_argument('--mdocdir',   '-m', default='frames',
-                    help='Directory containing per-TS .mdoc files '
-                         '(ts-xxx.mdoc expected; skip enrichment if absent)')
-    ap.add_argument('--angpix',   '-a', type=float, default=None,
-                    help='Pixel size in Å/px — used to convert thickness from '
-                         'pixels to nm.  If omitted, read from mdoc PixelSpacing.')
-    args = ap.parse_args()
+    p.add_argument('--input',     '-i', default='run001',
+                   help='Directory containing .aln files')
+    p.add_argument('--output',    '-o', default='run001_analysis',
+                   help='Output directory for plots, JSON, TSV, and HTML')
+    p.add_argument('--threshold', '-t', type=float, default=80.0,
+                   help='%% overlap below which a frame is flagged')
+    p.add_argument('--mdocdir',   '-m', default='frames',
+                   help='Directory containing per-TS .mdoc files '
+                        '(ts-xxx.mdoc expected; skip enrichment if absent)')
+    p.add_argument('--angpix',    '-a', type=float, default=None,
+                   help='Pixel size in Å/px — used to convert thickness from '
+                        'pixels to nm.  If omitted, read from mdoc PixelSpacing.')
+    p.set_defaults(func=run)
+    return p
 
+
+def run(args):
     in_dir  = Path(args.input)
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -925,7 +642,7 @@ def main():
           f'|  pixel size = {angpix_str}\n')
 
     # ── Pass 1: parse all files, attach overlap + CTF + TLT + mdoc ───────────
-    all_ts = {}   # ts_name → data dict
+    all_ts = {}
 
     for aln_path in aln_files:
         ts_name = aln_path.stem
@@ -937,24 +654,18 @@ def main():
 
         W, H = data['width'], data['height']
 
-        # Load CTF (SEC N → CTF row N, 1-indexed, includes dark frames)
         ctf_path = aln_path.parent / f'{ts_name}_CTF.txt'
         ctf_data = parse_ctf_file(ctf_path) if ctf_path.exists() else {}
 
-        # Load _TLT.txt (row N = SEC N, tilt-sorted, includes dark frames)
         tlt_path = aln_path.parent / f'{ts_name}_TLT.txt'
         tlt_data = parse_tlt_file(tlt_path) if tlt_path.exists() else {}
 
-        # Load mdoc (keyed by ZValue = acq_order - 1)
         mdoc_path = mdoc_dir / f'{ts_name}.mdoc'
         mdoc_data = (parse_mdoc_file(mdoc_path)
                      if _HAS_MDOCFILE and mdoc_path.exists() else {})
 
         # Resolve pixel size: CLI arg → mdoc PixelSpacing → None
         angpix = args.angpix
-        if angpix is None and mdoc_data:
-            first_frame = next(iter(mdoc_data.values()))
-            # PixelSpacing not stored in our mdoc dict; re-read from df if available
         if angpix is None and _HAS_MDOCFILE and mdoc_path.exists():
             try:
                 _df = _mdocfile.read(mdoc_path)
@@ -967,9 +678,7 @@ def main():
         else:
             data['thickness_nm'] = None
 
-        # Cumulative dose per acq_order (RELION convention: prior dose,
-        # so the first acquired frame has cumulative = 0).
-        # Sorted by acq_order; running sum accumulates dose of preceding frames.
+        # Cumulative dose (RELION prior-dose convention: first acquired = 0)
         cum_dose_by_acq = {}
         if tlt_data:
             sorted_by_acq = sorted(tlt_data.values(), key=lambda r: r['acq_order'])
@@ -998,7 +707,6 @@ def main():
             f['cc']              = ctf.get('cc')
             f['fit_spacing_A']   = ctf.get('fit_spacing_A')
 
-            # _TLT.txt enrichment (row N = SEC N, 1-indexed)
             tlt = tlt_data.get(f['sec'], {})
             f['nominal_tilt']             = tlt.get('nominal_tilt')
             f['acq_order']                = tlt.get('acq_order')
@@ -1009,13 +717,11 @@ def main():
                 if tlt.get('acq_order') is not None else None
             )
 
-            # mdoc enrichment (keyed by z_value = acq_order - 1)
             mdoc = mdoc_data.get(f['z_value'], {}) if f['z_value'] is not None else {}
             for k in _MDOC_KEYS:
                 f[k] = mdoc.get(k)
 
-        # Enrich dark frames: DarkFrame col 2 (frame_b) is the 1-indexed row
-        # number in _TLT.txt for that dark frame — direct lookup, no tilt matching.
+        # Dark frame enrichment
         for df in data['dark_frames']:
             tlt = tlt_data.get(df['frame_b'], {})
             if tlt:
@@ -1047,7 +753,6 @@ def main():
 
     tilt_min = min(all_tilts) - 5
     tilt_max = max(all_tilts) + 5
-    abs_tilt_max = max(abs(min(all_tilts)), abs(max(all_tilts)))
 
     if all_defocus:
         defocus_min = max(0.0, float(np.percentile(all_defocus,  2))) - 0.2
@@ -1064,7 +769,6 @@ def main():
     global_ranges = {
         'tilt_min':        tilt_min,
         'tilt_max':        tilt_max,
-        'abs_tilt_max':    abs_tilt_max,
         'defocus_min':     defocus_min,
         'defocus_max':     defocus_max,
         'fit_spacing_min': fit_spacing_min,
@@ -1089,7 +793,6 @@ def main():
         n_bad         = len(bad_frames)
         total_flagged += n_bad
 
-        # Console output
         status = '✗' if n_bad else '✓'
         print(sep)
         print(f'  {status}  {ts_name}   {n_bad} frame(s) below {args.threshold}%  '
@@ -1109,7 +812,6 @@ def main():
                     'overlap_pct': f['overlap_pct'],
                 })
 
-        # Store for JSON
         all_parsed[ts_name] = {
             'file':         str(in_dir / f'{ts_name}.aln'),
             'width':        data['width'],
@@ -1125,7 +827,6 @@ def main():
             'frames':       data['frames'],
         }
 
-        # Plot
         png_name = f'{ts_name}.png'
         plot_tilt_series(ts_name, data, args.threshold,
                          str(out_dir / png_name), global_ranges)
@@ -1182,7 +883,3 @@ def main():
     print(f'  HTML viewer    : {html_path}')
     print(f'  Alignment JSON : {json_path}')
     print(f'  Flagged TSV    : {tsv_path}')
-
-
-if __name__ == '__main__':
-    main()
