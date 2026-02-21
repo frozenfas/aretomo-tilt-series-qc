@@ -887,6 +887,9 @@ def main():
     ap.add_argument('--mdocdir',   '-m', default='frames',
                     help='Directory containing per-TS .mdoc files '
                          '(ts-xxx.mdoc expected; skip enrichment if absent)')
+    ap.add_argument('--angpix',   '-a', type=float, default=None,
+                    help='Pixel size in Å/px — used to convert thickness from '
+                         'pixels to nm.  If omitted, read from mdoc PixelSpacing.')
     args = ap.parse_args()
 
     in_dir  = Path(args.input)
@@ -904,7 +907,9 @@ def main():
     elif not mdoc_dir.exists():
         print(f'WARNING: --mdocdir {mdoc_dir} not found — mdoc enrichment skipped\n')
 
-    print(f'Found {len(aln_files)} .aln files  |  threshold = {args.threshold}%\n')
+    angpix_str = f'{args.angpix} Å/px' if args.angpix else 'from mdoc (or None)'
+    print(f'Found {len(aln_files)} .aln files  |  threshold = {args.threshold}%  '
+          f'|  pixel size = {angpix_str}\n')
 
     # ── Pass 1: parse all files, attach overlap + CTF + TLT + mdoc ───────────
     all_ts = {}   # ts_name → data dict
@@ -932,12 +937,22 @@ def main():
         mdoc_data = (parse_mdoc_file(mdoc_path)
                      if _HAS_MDOCFILE and mdoc_path.exists() else {})
 
-        # Build corrected-tilt → tlt row number map (for dark frame lookup)
-        alpha = data.get('alpha_offset') or 0.0
-        tlt_by_corrected = {}
-        for row_num, tlt_row in tlt_data.items():
-            key = round(tlt_row['nominal_tilt'] + alpha, 2)
-            tlt_by_corrected[key] = row_num
+        # Resolve pixel size: CLI arg → mdoc PixelSpacing → None
+        angpix = args.angpix
+        if angpix is None and mdoc_data:
+            first_frame = next(iter(mdoc_data.values()))
+            # PixelSpacing not stored in our mdoc dict; re-read from df if available
+        if angpix is None and _HAS_MDOCFILE and mdoc_path.exists():
+            try:
+                _df = _mdocfile.read(mdoc_path)
+                angpix = _float_or_none(_df['PixelSpacing'].iloc[0])
+            except Exception:
+                angpix = None
+        data['angpix'] = angpix
+        if data['thickness'] is not None and angpix is not None:
+            data['thickness_nm'] = round(data['thickness'] * angpix / 10.0, 2)
+        else:
+            data['thickness_nm'] = None
 
         # Cumulative dose per acq_order (RELION convention: prior dose,
         # so the first acquired frame has cumulative = 0).
@@ -970,32 +985,33 @@ def main():
             f['cc']              = ctf.get('cc')
             f['fit_spacing_A']   = ctf.get('fit_spacing_A')
 
-            # _TLT.txt enrichment (row index = SEC value)
+            # _TLT.txt enrichment (row N = SEC N, 1-indexed)
             tlt = tlt_data.get(f['sec'], {})
-            f['nominal_tilt']           = tlt.get('nominal_tilt')
-            f['acq_order']              = tlt.get('acq_order')
-            f['dose_e_per_A2']          = tlt.get('dose_e_per_A2')
-            f['z_value']                = tlt.get('z_value')
+            f['nominal_tilt']             = tlt.get('nominal_tilt')
+            f['acq_order']                = tlt.get('acq_order')
+            f['dose_e_per_A2']            = tlt.get('dose_e_per_A2')
+            f['z_value']                  = tlt.get('z_value')
             f['cumulative_dose_e_per_A2'] = (
-                cum_dose_by_acq.get(tlt['acq_order'])
+                round(cum_dose_by_acq[tlt['acq_order']], 2)
                 if tlt.get('acq_order') is not None else None
             )
 
-            # mdoc enrichment (keyed by z_value)
+            # mdoc enrichment (keyed by z_value = acq_order - 1)
             mdoc = mdoc_data.get(f['z_value'], {}) if f['z_value'] is not None else {}
             for k in _MDOC_KEYS:
                 f[k] = mdoc.get(k)
 
-        # Enrich dark frames via corrected-tilt matching
+        # Enrich dark frames: DarkFrame col 2 (frame_b) is the 1-indexed row
+        # number in _TLT.txt for that dark frame — direct lookup, no tilt matching.
         for df in data['dark_frames']:
-            row_num = tlt_by_corrected.get(round(df['tilt'], 2))
-            if row_num is not None:
-                tlt = tlt_data[row_num]
-                df['nominal_tilt']            = tlt['nominal_tilt']
-                df['acq_order']               = tlt['acq_order']
-                df['dose_e_per_A2']           = tlt['dose_e_per_A2']
-                df['z_value']                 = tlt['z_value']
-                df['cumulative_dose_e_per_A2'] = cum_dose_by_acq.get(tlt['acq_order'])
+            tlt = tlt_data.get(df['frame_b'], {})
+            if tlt:
+                df['nominal_tilt']             = tlt['nominal_tilt']
+                df['acq_order']                = tlt['acq_order']
+                df['dose_e_per_A2']            = tlt['dose_e_per_A2']
+                df['z_value']                  = tlt['z_value']
+                df['cumulative_dose_e_per_A2'] = round(
+                    cum_dose_by_acq.get(tlt['acq_order'], 0.0), 2)
                 mdoc = mdoc_data.get(tlt['z_value'], {})
                 for k in _MDOC_KEYS:
                     df[k] = mdoc.get(k)
@@ -1089,6 +1105,8 @@ def main():
             'alpha_offset': data['alpha_offset'],
             'beta_offset':  data['beta_offset'],
             'thickness':    data['thickness'],
+            'thickness_nm': data['thickness_nm'],
+            'angpix':       data['angpix'],
             'num_patches':  data['num_patches'],
             'dark_frames':  data['dark_frames'],
             'frames':       data['frames'],
