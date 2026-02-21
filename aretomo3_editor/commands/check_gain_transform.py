@@ -45,6 +45,8 @@ import json
 import random
 import datetime
 import numpy as np
+
+from aretomo3_editor.shared.project_json import update_section, args_to_dict
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -591,6 +593,29 @@ def run(args):
     html_path = out_dir / 'report.html'
     _make_standalone_html(results, str(html_path))
 
+    # ── Project JSON ──────────────────────────────────────────────────────────
+    print()
+    update_section(
+        section    = 'gain_check',
+        values     = {
+            'command':               ' '.join(sys.argv),
+            'args':                  args_to_dict(args),
+            'timestamp':             results['timestamp'],
+            'best_transform':        best,
+            'aretomo3_rot_gain':     rot_gain,
+            'aretomo3_flip_gain':    flip_gain,
+            'n_movies_after_filter': len(filtered),
+            'n_movies_tested':       len(selected),
+            'acq_order_threshold':   args.n_acquisitions,
+            'acq_range':             [int(acq_min), int(acq_max)],
+            'tilt_range_deg':        [float(tilt_min), float(tilt_max)],
+            'scores':                scores,
+            'output_dir':            str(out_dir),
+        },
+        backup_dir = out_dir,
+    )
+
+    print()
     print('Output')
     print(f'  Results JSON      : {json_path}')
     print(f'  Corrected averages: {avg_path}')

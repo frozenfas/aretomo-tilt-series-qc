@@ -3,8 +3,10 @@ analyse subcommand — parse AreTomo .aln files, produce per-TS plots,
 a global summary PNG, an HTML viewer, alignment JSON, and flagged TSV.
 """
 
+import sys
 import json
 import shutil
+import datetime
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
@@ -18,6 +20,7 @@ try:
 except ImportError:
     _HAS_MDOCFILE = False
 
+from aretomo3_editor.shared.project_json import update_section, args_to_dict
 from aretomo3_editor.shared.parsers import (
     parse_aln_file, parse_ctf_file, parse_tlt_file, parse_mdoc_file,
     _float_or_none,
@@ -1107,9 +1110,26 @@ def run(args):
     html_path = out_dir / 'index.html'
     make_html(ts_entries, str(html_path), args.threshold, gain_check)
 
-    # Summary
+    # ── Project JSON ──────────────────────────────────────────────────────────
     n_ts_bad  = sum(1 for e in ts_entries if e['n_bad'] > 0)
     n_ts_warn = sum(1 for d in all_ts.values() if d.get('warnings'))
+    print()
+    update_section(
+        section    = 'analyse',
+        values     = {
+            'command':              ' '.join(sys.argv),
+            'args':                 args_to_dict(args),
+            'timestamp':            datetime.datetime.now().isoformat(timespec='seconds'),
+            'n_tilt_series':        len(all_ts),
+            'n_flagged_frames':     total_flagged,
+            'n_ts_with_flags':      n_ts_bad,
+            'n_ts_with_warnings':   n_ts_warn,
+            'output_dir':           str(out_dir),
+        },
+        backup_dir = out_dir,
+    )
+
+    # Summary
     print(f'\nSummary')
     print(f'  Tilt series processed : {len(ts_entries)}')
     print(f'  TS with flagged frames: {n_ts_bad}')
