@@ -196,8 +196,9 @@ def _run_square_camera(gain, movies):
 
 def _accumulate(movies, transformed_gains):
     """
-    For each selected movie, sum sub-frames then multiply by each transformed
-    gain.  Accumulates corrected sums in float64 to prevent overflow.
+    For each selected movie, sum sub-frames then:
+      (a) accumulate the raw sum (no gain applied)  — Approach A
+      (b) multiply by each transformed gain and accumulate — Approach B
 
     Parameters
     ----------
@@ -206,7 +207,8 @@ def _accumulate(movies, transformed_gains):
 
     Returns
     -------
-    corr_sums  : dict  name -> float64 ndarray  (accumulated corrected sum)
+    corr_sums  : dict  name -> float64 ndarray  (accumulated gain-corrected sum)
+    raw_accum  : float64 ndarray                (accumulated raw sum, no gain)
     cv_history : dict  name -> list of float     (CV after each movie)
     """
     try:
@@ -217,12 +219,20 @@ def _accumulate(movies, transformed_gains):
 
     names      = list(transformed_gains.keys())
     corr_sums  = {n: None for n in names}
+    raw_accum  = None
     cv_history = {n: []   for n in names}
 
     for i, (path, acq, tilt) in enumerate(movies):
         movie = tifffile.imread(str(path)).astype(np.float64)
         raw_sum = movie.sum(axis=0) if movie.ndim == 3 else movie
 
+        # Approach A: accumulate raw (no gain)
+        if raw_accum is None:
+            raw_accum = raw_sum.copy()
+        else:
+            raw_accum += raw_sum
+
+        # Approach B: accumulate gain-corrected per transform
         for n in names:
             corrected = raw_sum * transformed_gains[n]
             if corr_sums[n] is None:
@@ -237,42 +247,67 @@ def _accumulate(movies, transformed_gains):
               end='\r', flush=True)
 
     print()  # newline after progress line
-    return corr_sums, cv_history
+    return corr_sums, raw_accum, cv_history
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Scoring
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _score(corr_sums):
+def _norm01(arr):
+    """Normalise array to [0, 1] range."""
+    lo, hi = arr.min(), arr.max()
+    return (arr - lo) / (hi - lo) if hi > lo else np.ones_like(arr, dtype=np.float32)
+
+
+def _score(corr_sums, raw_accum, transformed_gains):
     """
-    Compute CV (primary) and SSIM-vs-flat (secondary) for each transform.
+    Compute three metrics for each transform:
 
-    CV = std / mean of the accumulated corrected image.
-    Lower CV → flatter → better gain correction.
+    Approach A — raw sum vs gain (no gain applied):
+      ssim_vs_raw  : SSIM between the accumulated raw sum and the transformed
+                     gain image.  If the gain orientation is correct the raw
+                     accumulated frames converge to the same spatial pattern as
+                     the gain.  Higher → better.
 
-    SSIM is computed between the mean-normalised corrected image and a
-    perfectly uniform (all-ones) reference.  Higher SSIM → better.
+    Approach B — corrected sum vs flat (gain applied):
+      cv           : std / mean of the accumulated gain-corrected image.
+                     Lower → flatter → better.
+      ssim_vs_flat : SSIM between the mean-normalised corrected image and a
+                     perfectly uniform (all-ones) reference.  Higher → better.
     """
     try:
-        from skimage.metrics import structural_similarity as ssim
+        from skimage.metrics import structural_similarity as ssim_fn
         _has_skimage = True
     except ImportError:
         _has_skimage = False
 
     scores = {}
     for name, arr in corr_sums.items():
+        # Approach B: CV
         m  = arr.mean()
         cv = float(arr.std() / m) if m > 0 else np.nan
 
-        ssim_val = None
+        # Approach B: SSIM vs flat
+        ssim_vs_flat = None
         if _has_skimage:
             norm = (arr / m).astype(np.float32)
             flat = np.ones_like(norm)
             dr   = float(norm.max() - norm.min())
-            ssim_val = float(ssim(norm, flat, data_range=dr)) if dr > 0 else 1.0
+            ssim_vs_flat = float(ssim_fn(norm, flat, data_range=dr)) if dr > 0 else 1.0
 
-        scores[name] = {'cv': cv, 'ssim': ssim_val}
+        # Approach A: SSIM between raw accumulation and (transformed) gain
+        ssim_vs_raw = None
+        if _has_skimage and raw_accum is not None:
+            a = _norm01(raw_accum).astype(np.float32)
+            b = _norm01(transformed_gains[name]).astype(np.float32)
+            ssim_vs_raw = float(ssim_fn(a, b, data_range=1.0))
+
+        scores[name] = {
+            'cv':           cv,
+            'ssim_vs_flat': ssim_vs_flat,
+            'ssim_vs_raw':  ssim_vs_raw,
+        }
 
     return scores
 
@@ -292,10 +327,13 @@ def _plot_corrected_averages(corr_sums, scores, best, out_path):
                   interpolation='nearest')
 
         is_best = (name == best)
-        cv      = scores[name]['cv']
+        s       = scores[name]
         col     = '#66bb6a' if is_best else '#e0e0e0'
-        best_marker = '  \u2190 best' if is_best else ''
-        label   = f'{name}{best_marker}  |  CV = {cv:.4f}'
+        best_marker  = '  \u2190 best' if is_best else ''
+        ssim_flat_s  = f"{s['ssim_vs_flat']:.4f}" if s['ssim_vs_flat'] is not None else 'n/a'
+        ssim_raw_s   = f"{s['ssim_vs_raw']:.4f}"  if s['ssim_vs_raw']  is not None else 'n/a'
+        label   = (f'{name}{best_marker}  |  CV={s["cv"]:.4f}  '
+                   f'SSIM-flat={ssim_flat_s}  SSIM-raw={ssim_raw_s}')
         ax.set_title(label, color=col, fontsize=11,
                      fontweight='bold' if is_best else 'normal')
         ax.axis('off')
@@ -352,12 +390,13 @@ def _make_standalone_html(results, out_path):
 
     rows_html = ''
     for name, s in results['scores'].items():
-        marker = '  \u2190 best' if name == best else ''
-        style  = 'color:#66bb6a;font-weight:bold' if name == best else ''
-        ssim_str = f"{s['ssim']:.4f}" if s['ssim'] is not None else 'n/a'
+        marker      = '  \u2190 best' if name == best else ''
+        style       = 'color:#66bb6a;font-weight:bold' if name == best else ''
+        ssim_flat_s = f"{s['ssim_vs_flat']:.4f}" if s.get('ssim_vs_flat') is not None else 'n/a'
+        ssim_raw_s  = f"{s['ssim_vs_raw']:.4f}"  if s.get('ssim_vs_raw')  is not None else 'n/a'
         rows_html += (
             f'<tr style="{style}"><td>{name}{marker}</td>'
-            f'<td>{s["cv"]:.4f}</td><td>{ssim_str}</td></tr>\n'
+            f'<td>{s["cv"]:.4f}</td><td>{ssim_flat_s}</td><td>{ssim_raw_s}</td></tr>\n'
         )
 
     tilt_lo, tilt_hi = results['tilt_range_deg']
@@ -415,6 +454,7 @@ def _make_standalone_html(results, out_path):
         <th>Transform</th>
         <th>CV &#x2193; (lower = flatter)</th>
         <th>SSIM vs flat &#x2191;</th>
+        <th>SSIM vs raw &#x2191;</th>
       </tr>
       {rows_html}
     </table>
@@ -543,18 +583,19 @@ def run(args):
 
     # ── Accumulate ────────────────────────────────────────────────────────────
     print('Testing 4 transforms...')
-    corr_sums, cv_history = _accumulate(selected, transformed_gains)
+    corr_sums, raw_accum, cv_history = _accumulate(selected, transformed_gains)
     print()
 
     # ── Score ─────────────────────────────────────────────────────────────────
-    scores = _score(corr_sums)
+    scores = _score(corr_sums, raw_accum, transformed_gains)
     best   = min(scores, key=lambda n: scores[n]['cv'])
 
-    print(f'  {"Transform":<8}  {"CV":>8}  {"SSIM":>8}')
+    print(f'  {"Transform":<8}  {"CV":>8}  {"SSIM-flat":>10}  {"SSIM-raw":>10}')
     for name, s in scores.items():
-        marker   = '  <- best' if name == best else ''
-        ssim_str = f"{s['ssim']:.4f}" if s['ssim'] is not None else '   n/a'
-        print(f'  {name:<8}  {s["cv"]:>8.4f}  {ssim_str:>8}{marker}')
+        marker        = '  <- best' if name == best else ''
+        ssim_flat_str = f"{s['ssim_vs_flat']:.4f}" if s['ssim_vs_flat'] is not None else '       n/a'
+        ssim_raw_str  = f"{s['ssim_vs_raw']:.4f}"  if s['ssim_vs_raw']  is not None else '       n/a'
+        print(f'  {name:<8}  {s["cv"]:>8.4f}  {ssim_flat_str:>10}  {ssim_raw_str:>10}{marker}')
     print()
 
     rot_gain  = TRANSFORMS[best]['rot_gain']

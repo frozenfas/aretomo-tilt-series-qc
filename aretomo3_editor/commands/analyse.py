@@ -579,12 +579,13 @@ def make_html(ts_entries, out_path, threshold, gain_check=None):
 
         rows_html = ''
         for name, s in gain_check.get('scores', {}).items():
-            marker = '  \u2190 best' if name == best else ''
-            style  = 'color:#66bb6a;font-weight:bold' if name == best else ''
-            ssim_s = f"{s['ssim']:.4f}" if s.get('ssim') is not None else 'n/a'
+            marker      = '  \u2190 best' if name == best else ''
+            style       = 'color:#66bb6a;font-weight:bold' if name == best else ''
+            ssim_flat_s = f"{s['ssim_vs_flat']:.4f}" if s.get('ssim_vs_flat') is not None else 'n/a'
+            ssim_raw_s  = f"{s['ssim_vs_raw']:.4f}"  if s.get('ssim_vs_raw')  is not None else 'n/a'
             rows_html += (
                 f'<tr style="{style}"><td>{name}{marker}</td>'
-                f'<td>{s["cv"]:.4f}</td><td>{ssim_s}</td></tr>\n'
+                f'<td>{s["cv"]:.4f}</td><td>{ssim_flat_s}</td><td>{ssim_raw_s}</td></tr>\n'
             )
 
         gain_tab_btn  = '<button class="tab-btn active" onclick="switchTab(\'gain\')">Gain Transform Check</button>'
@@ -595,7 +596,7 @@ def make_html(ts_entries, out_path, threshold, gain_check=None):
       <div class="gc-best">Best transform: {best}</div>
       <div class="gc-flags">{flags}</div>
       <table class="gc-table">
-        <tr><th>Transform</th><th>CV &#x2193; (lower = flatter)</th><th>SSIM vs flat &#x2191;</th></tr>
+        <tr><th>Transform</th><th>CV &#x2193; (lower = flatter)</th><th>SSIM vs flat &#x2191;</th><th>SSIM vs raw &#x2191;</th></tr>
         {rows_html}
       </table>
       <div class="gc-meta">
