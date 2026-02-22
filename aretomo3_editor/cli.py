@@ -1,7 +1,7 @@
 """CLI entry point for aretomo3-editor."""
 
 import argparse
-from aretomo3_editor.commands import analyse, trim_ts, check_gain_transform
+from aretomo3_editor.commands import analyse, trim_ts, check_gain_transform, validate_mdoc
 
 
 def main():
@@ -13,6 +13,7 @@ def main():
     sub.required = True
 
     check_gain_transform.add_parser(sub)
+    validate_mdoc.add_parser(sub)
     analyse.add_parser(sub)
     trim_ts.add_parser(sub)
 
