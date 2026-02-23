@@ -457,6 +457,7 @@ def validate_file(path, fix_dose=False, fix_subframes=None, dose=4.16):
         failure=failure,
         issues=scan['issues'],
         missing_dose_sections=scan['missing_dose_sections'],
+        n_sections=scan['n_sections'],
         fixed=False,
         fix_type=None,
         n_injected=0,
@@ -596,6 +597,7 @@ def run(args):
     fix_dose = args.fix_dose
     fix_subframes = args.fix_subframes
     n_pass = n_fail = n_fixed = 0
+    n_fail_dose = n_fail_short = 0
     col_w = max(len(Path(p).name) for p in paths)
 
     print()
@@ -618,6 +620,10 @@ def run(args):
         else:
             status = 'FAIL'
             n_fail += 1
+            if r.get('n_sections', _MIN_TILTS) < _MIN_TILTS:
+                n_fail_short += 1
+            elif r.get('failure') == 'missing_exposuredose':
+                n_fail_dose += 1
 
         note_parts = []
         if r['failure'] and not r['fixed']:
@@ -652,11 +658,20 @@ def run(args):
             n_pass, n_fail, len(paths)))
 
         if n_fail > 0:
-            print()
-            print('To fix files with missing ExposureDose:')
-            print('  aretomo3-preprocess validate-mdoc <files> --fix-dose')
-            print('To rebuild too-short mdocs from a SubFramePaths directory:')
-            print('  aretomo3-preprocess validate-mdoc <files> --fix-subframes <dir>')
+            if n_fail_dose:
+                print('  {:3d} missing ExposureDose  → fix with --fix-dose'.format(
+                    n_fail_dose))
+            if n_fail_short:
+                print('  {:3d} too short (< {} sections)'.format(
+                    n_fail_short, _MIN_TILTS))
+                print()
+                print('  NOTE: short mdocs may result from a restarted data collection')
+                print('  where the acquisition ran to completion but the mdoc was')
+                print('  overwritten with only a few sections.  If the movie files')
+                print('  exist on disk, the mdoc can be rebuilt:')
+                print('    aretomo3-preprocess validate-mdoc <files> --fix-subframes <dir>')
+                print('  where <dir> contains a .txt file per mdoc listing the correct')
+                print('  fraction filenames (one per line).')
     print()
 
 
