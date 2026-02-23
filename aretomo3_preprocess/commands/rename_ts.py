@@ -9,12 +9,22 @@ For multi-session datasets, use --start to offset numbering and avoid
 collisions (e.g. session 2: --start 100).
 """
 
+import csv
 import sys
 import datetime
 from pathlib import Path
 import argparse
 
 from aretomo3_preprocess.shared.project_json import update_section, args_to_dict
+
+
+def _write_csv(lookup: dict, path: Path):
+    with open(path, 'w', newline='') as fh:
+        writer = csv.writer(fh)
+        writer.writerow(['ts_name', 'original_path'])
+        for ts_name, orig_path in lookup.items():
+            writer.writerow([ts_name, orig_path])
+    print(f'Lookup CSV written : {path}')
 
 
 def add_parser(subparsers):
@@ -74,6 +84,9 @@ def run(args):
     print(f'{prefix}{n} symlinks {"would be " if args.dry_run else ""}created.')
 
     if not args.dry_run:
+        _write_csv(lookup, in_dir / 'ts_rename_lookup.csv')
+        _write_csv(lookup, Path.cwd() / 'ts_rename_lookup.csv')
+
         update_section(
             section='rename_ts',
             values={
