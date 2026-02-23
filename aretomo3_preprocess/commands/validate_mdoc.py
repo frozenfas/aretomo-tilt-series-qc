@@ -304,26 +304,148 @@ def _inject_dose(lines, dose_value):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Fix: rebuild mdoc from a SubFramePaths file (too-short / restarted series)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_SFNAME_RE = re.compile(
+    r'^(.+_(\d{3})_([-\d.]+)_\d{8}_\d{6}_fractions\.tiff)\s*$',
+    re.IGNORECASE,
+)
+
+
+def _parse_subframes_file(path):
+    """
+    Read a SubFramePaths .txt file (one filename per line).
+    Returns a list of (acq_order, tilt_angle, filename) sorted by acq_order.
+    Filename format: <PositionName>_NNN_TILT_DATE_TIME_fractions.tiff
+    """
+    entries = []
+    for line in Path(path).read_text(encoding='latin-1').splitlines():
+        m = _SFNAME_RE.match(line.strip())
+        if m:
+            entries.append((int(m.group(2)), float(m.group(3)), m.group(1)))
+    entries.sort(key=lambda x: x[0])
+    return entries
+
+
+def _extract_template_section(lines):
+    """Return lines of the first ZValue block (excluding the [ZValue = N] header)."""
+    in_section = False
+    template = []
+    for line in lines:
+        if _extract_val_z(line) >= 0:
+            if in_section:
+                break
+            in_section = True
+            continue
+        if in_section:
+            template.append(line)
+    return template
+
+
+def _extract_subframe_prefix(lines):
+    """Extract the Windows/UNC path prefix from the first SubFramePath field."""
+    for line in lines:
+        p = _extract_frame_path(line)
+        if p:
+            idx = max(p.rfind('\\'), p.rfind('/'))
+            return p[:idx + 1] if idx >= 0 else ''
+    return ''
+
+
+def _build_section(template_lines, zval, tilt, full_subframe_path, dose):
+    """
+    Build one mdoc section by cloning the template and substituting
+    ZValue, TiltAngle, ExposureDose, and SubFramePath.
+    ExposureDose is always written immediately after TiltAngle.
+    """
+    out = ['[ZValue = {}]\n'.format(zval)]
+    dose_written = False
+    for line in template_lines:
+        key = line.split('=')[0].strip()
+        if key == 'TiltAngle':
+            out.append('TiltAngle = {:.2f}\n'.format(tilt))
+            out.append('ExposureDose = {}\n'.format(dose))
+            dose_written = True
+        elif key == 'ExposureDose':
+            pass  # already written after TiltAngle
+        elif key == 'SubFramePath':
+            out.append('SubFramePath = {}\n'.format(full_subframe_path))
+        else:
+            out.append(line)
+    if not dose_written:
+        out.insert(1, 'ExposureDose = {}\n'.format(dose))
+    return out
+
+
+def _rebuild_from_subframes(lines, subframes_path, dose):
+    """
+    Rebuild an mdoc using a SubFramePaths .txt file.
+
+    Extracts the header and first section as a template for all per-section
+    metadata (StagePosition, Defocus, etc.).  ZValue, TiltAngle, ExposureDose,
+    and SubFramePath are set from the SubFramePaths file.
+
+    Returns (new_lines, n_sections, warnings).
+    """
+    entries = _parse_subframes_file(subframes_path)
+    if not entries:
+        raise ValueError('No valid filenames found in {}'.format(subframes_path))
+
+    # Sanity check: acq_order in filename should equal ZValue + 1
+    warnings = []
+    for zval, (acq, tilt, fname) in enumerate(entries):
+        if acq != zval + 1:
+            warnings.append(
+                'Sanity check: {} has acq={}, expected {} (ZValue {}+1)'.format(
+                    fname, acq, zval + 1, zval)
+            )
+
+    template = _extract_template_section(lines)
+    if not template:
+        raise ValueError('Could not extract template section from existing mdoc')
+
+    prefix = _extract_subframe_prefix(lines)
+
+    # Collect header lines (everything before the first [ZValue])
+    header = []
+    for line in lines:
+        if _extract_val_z(line) >= 0:
+            break
+        header.append(line)
+
+    new_lines = list(header)
+    for zval, (acq, tilt, fname) in enumerate(entries):
+        new_lines.extend(_build_section(template, zval, tilt, prefix + fname, dose))
+
+    return new_lines, len(entries), warnings
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Validate (and optionally fix) a single file
 # ─────────────────────────────────────────────────────────────────────────────
 
-def validate_file(path, fix=False, dose=None):
+def validate_file(path, fix_dose=False, fix_subframes=None, dose=4.16):
     """
-    Validate one mdoc file.  Optionally apply the ExposureDose fix.
+    Validate one mdoc file.  Optionally apply fixes.
+
+    fix_dose      — inject missing ExposureDose (--fix-dose)
+    fix_subframes — path to a directory of SubFramePaths .txt files;
+                    used to rebuild mdocs that are too short (--fix-subframes)
 
     Returns a dict with keys:
-      path, success, n_tilts, failure, issues, fixed, n_injected, backed_up
+      path, success, n_tilts, failure, issues, fixed, fix_type,
+      n_injected, backed_up
     """
     try:
         raw = Path(path).read_bytes()
     except OSError as e:
         return dict(path=path, success=False, n_tilts=0,
-                    failure=str(e), issues=[], fixed=False,
+                    failure=str(e), issues=[], fixed=False, fix_type=None,
                     n_injected=0, backed_up=False)
 
     text = raw.decode('latin-1', errors='replace')
-    lines = [l + '\n' for l in text.splitlines()]  # normalise endings
-    # (AreTomo3 uses fgets which works line-by-line; we keep \n on each line)
+    lines = [l + '\n' for l in text.splitlines()]
 
     n_tilts, failure = _simulate_aretomo3(lines)
     scan = _scan_fields(lines)
@@ -336,48 +458,90 @@ def validate_file(path, fix=False, dose=None):
         issues=scan['issues'],
         missing_dose_sections=scan['missing_dose_sections'],
         fixed=False,
+        fix_type=None,
         n_injected=0,
         backed_up=False,
     )
 
-    if not fix or failure is None:
+    if failure is None:
+        return result  # already valid
+
+    # ── Fix subframes (too-short / restarted series) ────────────────────────
+    if fix_subframes is not None and scan['n_sections'] < _MIN_TILTS:
+        stem = Path(path).stem
+        sf_path = Path(fix_subframes) / '{}.txt'.format(stem)
+        if not sf_path.exists():
+            result['issues'].append(
+                '--fix-subframes: no SubFramePaths file at {}'.format(sf_path)
+            )
+            return result
+
+        bak_path = Path(str(path) + '.original.bak')
+        if not bak_path.exists():
+            shutil.copy2(path, bak_path)
+            result['backed_up'] = True
+
+        try:
+            new_lines, n_sections, warnings = _rebuild_from_subframes(
+                lines, sf_path, dose)
+        except ValueError as e:
+            result['issues'].append('Subframe rebuild failed: {}'.format(e))
+            return result
+
+        result['issues'].extend(warnings)
+
+        n_after, failure_after = _simulate_aretomo3(new_lines)
+        if failure_after is not None:
+            result['issues'].append(
+                'Rebuilt mdoc still fails AreTomo3 simulation ({}) '
+                '— file NOT written'.format(failure_after)
+            )
+            return result
+
+        Path(path).write_text(''.join(new_lines), encoding='latin-1')
+        result['fixed'] = True
+        result['fix_type'] = 'subframes'
+        result['n_injected'] = n_sections
+        result['success'] = True
+        result['n_tilts'] = n_after
+        result['failure'] = None
         return result
 
-    # ── Apply fix ──────────────────────────────────────────────────────────
-    if failure != 'missing_exposuredose':
-        result['issues'].append(
-            'Cannot auto-fix failure type "{}"; '
-            '--fix only repairs missing ExposureDose'.format(failure)
-        )
-        return result
+    # ── Fix dose (missing ExposureDose) ─────────────────────────────────────
+    if fix_dose:
+        if failure != 'missing_exposuredose':
+            result['issues'].append(
+                'Cannot auto-fix failure type "{}"; '
+                '--fix-dose only repairs missing ExposureDose'.format(failure)
+            )
+            return result
 
-    # Backup
-    bak_path = Path(str(path) + '.original.bak')
-    if not bak_path.exists():
-        shutil.copy2(path, bak_path)
-        result['backed_up'] = True
-    else:
-        result['issues'].append(
-            'Backup already exists at {}; skipping backup'.format(bak_path)
-        )
+        bak_path = Path(str(path) + '.original.bak')
+        if not bak_path.exists():
+            shutil.copy2(path, bak_path)
+            result['backed_up'] = True
+        else:
+            result['issues'].append(
+                'Backup already exists at {}; skipping backup'.format(bak_path)
+            )
 
-    new_lines, n_injected = _inject_dose(lines, dose)
+        new_lines, n_injected = _inject_dose(lines, dose)
 
-    # Verify the fix works
-    n_after, failure_after = _simulate_aretomo3(new_lines)
-    if failure_after is not None:
-        result['issues'].append(
-            'Fix did not resolve parse failure ({}) — file NOT written'.format(
-                failure_after)
-        )
-        return result
+        n_after, failure_after = _simulate_aretomo3(new_lines)
+        if failure_after is not None:
+            result['issues'].append(
+                'Fix did not resolve parse failure ({}) — file NOT written'.format(
+                    failure_after)
+            )
+            return result
 
-    Path(path).write_text(''.join(new_lines), encoding='latin-1')
-    result['fixed'] = True
-    result['n_injected'] = n_injected
-    result['success'] = True
-    result['n_tilts'] = n_after
-    result['failure'] = None
+        Path(path).write_text(''.join(new_lines), encoding='latin-1')
+        result['fixed'] = True
+        result['fix_type'] = 'dose'
+        result['n_injected'] = n_injected
+        result['success'] = True
+        result['n_tilts'] = n_after
+        result['failure'] = None
 
     return result
 
@@ -399,15 +563,25 @@ def add_parser(subparsers):
         help='One or more .mdoc files to validate (glob expansion handled by shell)',
     )
     p.add_argument(
-        '--fix', action='store_true', default=False,
-        help='Apply ExposureDose fix to failing files (requires --dose)',
+        '--fix-dose', action='store_true', default=False,
+        help='Inject missing ExposureDose into failing files.',
+    )
+    p.add_argument(
+        '--fix-subframes', metavar='DIR', default=None,
+        help='Rebuild mdocs that are too short (restarted collections) using '
+             'SubFramePaths .txt files in DIR.  For each failing mdoc, '
+             'DIR/<stem>.txt must list the correct fraction filenames '
+             '(one per line).  Tilt and acquisition order are parsed from '
+             'the filenames; all other metadata is copied from the existing '
+             'mdoc.  ExposureDose is also injected using --dose.',
     )
     p.add_argument(
         '--dose', type=float, default=4.16, metavar='DOSE',
         help='ExposureDose value to inject (e⁻/Å² per tilt; '
              'total dose for the whole exposure, not per frame). '
              'Default: 4.16 (8 sub-frames × 0.52 e⁻/Å² per frame, '
-             'typical for K3 TIFF tilt series).',
+             'typical for K3 TIFF tilt series).  Used by both --fix-dose '
+             'and --fix-subframes.',
     )
     p.set_defaults(func=run)
     return p
@@ -415,7 +589,9 @@ def add_parser(subparsers):
 
 def run(args):
     paths = args.mdoc_files
-    n_pass = n_fail = n_fixed = n_unfixable = 0
+    fix_dose = args.fix_dose
+    fix_subframes = args.fix_subframes
+    n_pass = n_fail = n_fixed = 0
     col_w = max(len(Path(p).name) for p in paths)
 
     print()
@@ -425,7 +601,8 @@ def run(args):
 
     for path in paths:
         fname = Path(path).name
-        r = validate_file(path, fix=args.fix, dose=args.dose)
+        r = validate_file(path, fix_dose=fix_dose,
+                          fix_subframes=fix_subframes, dose=args.dose)
 
         if r['success'] and not r.get('fixed'):
             status = 'PASS'
@@ -442,11 +619,17 @@ def run(args):
         if r['failure'] and not r['fixed']:
             note_parts.append(_failure_message(r['failure'], r))
         if r['fixed']:
-            note_parts.append(
-                'injected ExposureDose={} into {} section(s); '
-                'backup: {}.original.bak'.format(
-                    args.dose, r['n_injected'], fname)
-            )
+            if r.get('fix_type') == 'subframes':
+                note_parts.append(
+                    'rebuilt from SubFramePaths ({} sections); '
+                    'backup: {}.original.bak'.format(r['n_injected'], fname)
+                )
+            else:
+                note_parts.append(
+                    'injected ExposureDose={} into {} section(s); '
+                    'backup: {}.original.bak'.format(
+                        args.dose, r['n_injected'], fname)
+                )
         note = '; '.join(note_parts) if note_parts else ''
 
         print('{:<{w}}  {:6}  {:5d}  {}'.format(
@@ -456,7 +639,7 @@ def run(args):
             print('  {:<{w}}         └─ {}'.format('', issue, w=col_w))
 
     print()
-    if args.fix:
+    if fix_dose or fix_subframes:
         print('Summary: {} already valid, {} fixed, {} could not be fixed  '
               '(out of {} files)'.format(
                   n_pass - n_fixed, n_fixed, n_fail, len(paths)))
@@ -467,8 +650,9 @@ def run(args):
         if n_fail > 0:
             print()
             print('To fix files with missing ExposureDose:')
-            print('  aretomo3-preprocess validate-mdoc <files> --fix --dose <value>')
-            print('  (default dose: 4.16 e⁻/Å² — 8 frames × 0.52 e⁻/Å² per frame)')
+            print('  aretomo3-preprocess validate-mdoc <files> --fix-dose')
+            print('To rebuild too-short mdocs from a SubFramePaths directory:')
+            print('  aretomo3-preprocess validate-mdoc <files> --fix-subframes <dir>')
     print()
 
 
