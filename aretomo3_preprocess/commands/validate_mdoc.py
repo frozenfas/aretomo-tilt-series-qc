@@ -351,12 +351,6 @@ def validate_file(path, fix=False, dose=None):
         )
         return result
 
-    if dose is None:
-        result['issues'].append(
-            'Specify --dose <value> (e⁻/Å² per tilt) to apply fix'
-        )
-        return result
-
     # Backup
     bak_path = Path(str(path) + '.original.bak')
     if not bak_path.exists():
@@ -409,21 +403,17 @@ def add_parser(subparsers):
         help='Apply ExposureDose fix to failing files (requires --dose)',
     )
     p.add_argument(
-        '--dose', type=float, default=None, metavar='DOSE',
+        '--dose', type=float, default=4.16, metavar='DOSE',
         help='ExposureDose value to inject (e⁻/Å² per tilt; '
              'total dose for the whole exposure, not per frame). '
-             'Required when --fix is specified.',
+             'Default: 4.16 (8 sub-frames × 0.52 e⁻/Å² per frame, '
+             'typical for K3 TIFF tilt series).',
     )
     p.set_defaults(func=run)
     return p
 
 
 def run(args):
-    if args.fix and args.dose is None:
-        print('ERROR: --fix requires --dose <value>  '
-              '(ExposureDose in e⁻/Å² per tilt)')
-        sys.exit(1)
-
     paths = args.mdoc_files
     n_pass = n_fail = n_fixed = n_unfixable = 0
     col_w = max(len(Path(p).name) for p in paths)
@@ -478,14 +468,7 @@ def run(args):
             print()
             print('To fix files with missing ExposureDose:')
             print('  aretomo3-preprocess validate-mdoc <files> --fix --dose <value>')
-            print()
-            print('ExposureDose is the total dose for the entire tilt exposure')
-            print('(all sub-frames combined), in e⁻/Å².  It is NOT the per-frame')
-            print('dose.  Typical values: 0.3–2.0 e⁻/Å² per tilt.')
-            print()
-            print('To estimate the dose:')
-            print('  • From a working mdoc:  grep ExposureDose <working>.mdoc | head -1')
-            print('  • From FrameDosesAndNumber: dose_per_frame × NumSubFrames')
+            print('  (default dose: 4.16 e⁻/Å² — 8 frames × 0.52 e⁻/Å² per frame)')
     print()
 
 
