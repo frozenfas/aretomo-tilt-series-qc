@@ -1,4 +1,4 @@
-name: aretomo3-editor
+name: aretomo3-preprocess
 channels:
   - conda-forge
   - defaults

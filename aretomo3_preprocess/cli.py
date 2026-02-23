@@ -1,12 +1,12 @@
-"""CLI entry point for aretomo3-editor."""
+"""CLI entry point for aretomo3-preprocess."""
 
 import argparse
-from aretomo3_editor.commands import analyse, trim_ts, check_gain_transform, validate_mdoc
+from aretomo3_preprocess.commands import analyse, trim_ts, check_gain_transform, validate_mdoc
 
 
 def main():
     ap = argparse.ArgumentParser(
-        prog='aretomo3-editor',
+        prog='aretomo3-preprocess',
         description='AreTomo3 tilt-series quality control and editing toolkit',
     )
     sub = ap.add_subparsers(dest='command', metavar='COMMAND')

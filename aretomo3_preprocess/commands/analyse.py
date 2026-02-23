@@ -20,13 +20,13 @@ try:
 except ImportError:
     _HAS_MDOCFILE = False
 
-from aretomo3_editor.shared.project_json import update_section, args_to_dict
-from aretomo3_editor.shared.parsers import (
+from aretomo3_preprocess.shared.project_json import update_section, args_to_dict
+from aretomo3_preprocess.shared.parsers import (
     parse_aln_file, parse_ctf_file, parse_tlt_file, parse_mdoc_file,
     _float_or_none,
 )
-from aretomo3_editor.shared.geometry import compute_overlap, rotated_rect_corners
-from aretomo3_editor.shared.colours import (
+from aretomo3_preprocess.shared.geometry import compute_overlap, rotated_rect_corners
+from aretomo3_preprocess.shared.colours import (
     OVL_CMAP, OVL_NORM, RES_CMAP,
     _ovl_colour, _ovl_sm, _res_sm,
 )

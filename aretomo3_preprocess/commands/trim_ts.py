@@ -20,7 +20,7 @@ Files written to  <output>/ts-xxx_Imod/:
     ts-xxx.mrc  (symlink)               → raw tilt-sorted stack
 
 Requires:
-    aretomo3-editor analyse to have been run first  (reads alignment_data.json)
+    aretomo3-preprocess analyse to have been run first  (reads alignment_data.json)
     Source _Imod directories present in <input>/ts-xxx_Imod/
 """
 
@@ -173,7 +173,7 @@ def run(args):
 
     json_path = out_dir / 'alignment_data.json'
     if not json_path.exists():
-        print(f'ERROR: {json_path} not found — run "aretomo3-editor analyse" first.')
+        print(f'ERROR: {json_path} not found — run "aretomo3-preprocess analyse" first.')
         return
 
     with open(json_path) as fh:

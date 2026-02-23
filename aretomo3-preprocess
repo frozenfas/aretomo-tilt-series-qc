@@ -5,5 +5,5 @@ from pathlib import Path
 # Allow running from the repo root without installing
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from aretomo3_editor.cli import main
+from aretomo3_preprocess.cli import main
 main()

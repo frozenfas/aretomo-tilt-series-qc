@@ -13,14 +13,14 @@ Run `check-gain-transform` **before** `analyse`.  The results are saved to
 Typical pipeline:
 
 ```
-aretomo3-editor check-gain-transform \
+aretomo3-preprocess check-gain-transform \
     --gain  relion/gain_20260213T101027.mrc \
     --frames relion/frames/ \
     --output relion/gain_check/
 
 # → inspect gain_check/report.html, note the recommended flags
 
-aretomo3-editor analyse \
+aretomo3-preprocess analyse \
     --input  relion/run001/ \
     --output relion/run001_analysis/ \
     --gain-check-dir relion/gain_check/
@@ -202,7 +202,7 @@ stably.  If the curves are close together or noisy, consider increasing
 Pass the output directory to `analyse --gain-check-dir`:
 
 ```bash
-aretomo3-editor analyse \
+aretomo3-preprocess analyse \
     --input  run001/ \
     --output run001_analysis/ \
     --gain-check-dir gain_check/

@@ -29,14 +29,14 @@ per-frame dose ≈ 0.065 e⁻/Å², consistent with low-dose K3 tilt series.
 Usage
 -----
   # Validate only — report issues and suggest fix command:
-  aretomo3-editor validate-mdoc frames/ts-128.mdoc frames/ts-129.mdoc
-  aretomo3-editor validate-mdoc frames/ts-*.mdoc
+  aretomo3-preprocess validate-mdoc frames/ts-128.mdoc frames/ts-129.mdoc
+  aretomo3-preprocess validate-mdoc frames/ts-*.mdoc
 
   # Apply fix — inject ExposureDose into sections where it is missing:
-  aretomo3-editor validate-mdoc frames/ts-128.mdoc --fix --dose 0.52
+  aretomo3-preprocess validate-mdoc frames/ts-128.mdoc --fix --dose 0.52
 
   # Fix all failing files at once:
-  aretomo3-editor validate-mdoc frames/ts-*.mdoc --fix --dose 0.52
+  aretomo3-preprocess validate-mdoc frames/ts-*.mdoc --fix --dose 0.52
 
 Backup
 ------
@@ -477,7 +477,7 @@ def run(args):
         if n_fail > 0:
             print()
             print('To fix files with missing ExposureDose:')
-            print('  aretomo3-editor validate-mdoc <files> --fix --dose <value>')
+            print('  aretomo3-preprocess validate-mdoc <files> --fix --dose <value>')
             print()
             print('ExposureDose is the total dose for the entire tilt exposure')
             print('(all sub-frames combined), in e⁻/Å².  It is NOT the per-frame')

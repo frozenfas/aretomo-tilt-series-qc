@@ -50,7 +50,7 @@ import random
 import datetime
 import numpy as np
 
-from aretomo3_editor.shared.project_json import update_section, args_to_dict
+from aretomo3_preprocess.shared.project_json import update_section, args_to_dict
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt

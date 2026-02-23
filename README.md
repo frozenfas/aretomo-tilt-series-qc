@@ -1,4 +1,4 @@
-# aretomo3-editor
+# aretomo3-preprocess
 
 Quality-control diagnostics and editing tools for [AreTomo3](https://github.com/czimaginginstitute/AreTomo3) cryo-ET tilt series.
 
@@ -34,7 +34,7 @@ pip install -e .
 
 ```bash
 # 1. Determine correct gain correction parameters
-aretomo3-editor check-gain-transform \
+aretomo3-preprocess check-gain-transform \
     --gain   gain_20260213T101027.mrc \
     --frames frames/ \
     --output gain_check/
@@ -46,7 +46,7 @@ aretomo3-editor check-gain-transform \
 #    AreTomo3 ... -RotGain 0 -FlipGain 1 ...
 
 # 3. Analyse alignment results
-aretomo3-editor analyse \
+aretomo3-preprocess analyse \
     --input          run001/ \
     --output         run001_analysis/ \
     --gain-check-dir gain_check/
@@ -140,7 +140,7 @@ Both commands maintain `aretomo3_project.json` in the **working directory** — 
 {
   "project": { "working_dir": "...", "created": "...", "last_updated": "..." },
   "gain_check": {
-    "command":   "aretomo3-editor check-gain-transform --gain ...",
+    "command":   "aretomo3-preprocess check-gain-transform --gain ...",
     "args":      { "gain": "...", "n_acquisitions": 12, ... },
     "best_transform": "flipud",
     "aretomo3_rot_gain": 0,
@@ -148,7 +148,7 @@ Both commands maintain `aretomo3_project.json` in the **working directory** — 
     ...
   },
   "analyse": {
-    "command":        "aretomo3-editor analyse --input run001 ...",
+    "command":        "aretomo3-preprocess analyse --input run001 ...",
     "n_tilt_series":  146,
     "n_flagged_frames": 23,
     ...
@@ -169,8 +169,8 @@ Running from the wrong directory is detected automatically — the command abort
 ## Package structure
 
 ```
-aretomo3_editor/
-  cli.py                        entry point (aretomo3-editor)
+aretomo3_preprocess/
+  cli.py                        entry point (aretomo3-preprocess)
   commands/
     check_gain_transform.py     check-gain-transform subcommand
     analyse.py                  analyse subcommand

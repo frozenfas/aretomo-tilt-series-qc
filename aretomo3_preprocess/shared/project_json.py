@@ -10,7 +10,7 @@ providing a restore point if the live file is accidentally edited or corrupted.
 
 Usage (from a command's run() function)
 -----------------------------------------
-    from aretomo3_editor.shared.project_json import update_section, args_to_dict
+    from aretomo3_preprocess.shared.project_json import update_section, args_to_dict
 
     update_section(
         section    = 'gain_check',
