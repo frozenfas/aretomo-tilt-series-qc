@@ -20,6 +20,12 @@ try:
 except ImportError:
     _HAS_MDOCFILE = False
 
+try:
+    from sklearn.cluster import KMeans as _KMeans
+    _HAS_SKLEARN = True
+except ImportError:
+    _HAS_SKLEARN = False
+
 from aretomo3_preprocess.shared.project_json import update_section, args_to_dict
 from aretomo3_preprocess.shared.parsers import (
     parse_aln_file, parse_ctf_file, parse_tlt_file, parse_mdoc_file,
@@ -791,6 +797,132 @@ def make_html(ts_entries, out_path, threshold, gain_check=None):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Stage position scatter plot
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _base_position_label(original_path_str):
+    """
+    Extract the base Position label from an original mdoc path.
+    e.g. '/frames/Position_6_2.mdoc' → 'Position_6'
+         '/frames/Position_21_10.mdoc' → 'Position_21'
+         '/frames/Position_1.mdoc' → 'Position_1'
+    """
+    stem = Path(original_path_str).stem   # Position_6_2
+    parts = stem.split('_')               # ['Position', '6', '2']
+    if len(parts) >= 2:
+        return f'{parts[0]}_{parts[1]}'   # Position_6
+    return stem
+
+
+def plot_stage_positions(all_ts, out_path, n_lamellae=None, lookup=None):
+    """
+    Scatter plot of stage X-Y positions from mdoc data.
+
+    Parameters
+    ----------
+    all_ts      : dict  ts_name → data dict (frames have stage_x, stage_y)
+    out_path    : str   output PNG path
+    n_lamellae  : int or None   number of K-means clusters; no clustering if None
+    lookup      : dict or None  ts_name → original_path (from rename_ts section)
+    """
+    from collections import defaultdict
+
+    ts_names, xs, ys = [], [], []
+
+    for ts_name, data in all_ts.items():
+        sx_vals = [f['stage_x'] for f in data['frames']
+                   if f.get('stage_x') is not None]
+        sy_vals = [f['stage_y'] for f in data['frames']
+                   if f.get('stage_y') is not None]
+        if not sx_vals or not sy_vals:
+            continue
+        ts_names.append(ts_name)
+        xs.append(float(np.mean(sx_vals)))
+        ys.append(float(np.mean(sy_vals)))
+
+    n = len(ts_names)
+    if n == 0:
+        print('  Stage positions: no stage coordinate data found — skipped')
+        return
+
+    X = np.column_stack([xs, ys])
+
+    # Build base-position labels
+    if lookup:
+        labels = [
+            _base_position_label(lookup.get(f'{ts}.mdoc', ts))
+            for ts in ts_names
+        ]
+    else:
+        labels = ts_names
+
+    # K-means clustering
+    cluster_ids = np.zeros(n, dtype=int)
+    n_clusters  = 1
+    if n_lamellae is not None and n_lamellae > 1 and n >= n_lamellae:
+        if _HAS_SKLEARN:
+            import warnings
+            km = _KMeans(n_clusters=n_lamellae, random_state=42, n_init=20)
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                cluster_ids = km.fit_predict(X)
+            n_clusters = n_lamellae
+        else:
+            print('  WARNING: scikit-learn not installed — K-means clustering skipped')
+
+    cmap    = plt.colormaps.get_cmap('tab10')
+    colours = [cmap(c % 10) for c in cluster_ids]
+
+    fig, ax = plt.subplots(figsize=(10, 9))
+
+    ax.scatter(xs, ys, c=colours, s=60,
+               edgecolors='white', linewidths=0.5, zorder=3)
+
+    # Label each unique base-position at its centroid
+    label_groups = defaultdict(lambda: {'x': [], 'y': [], 'cluster': []})
+    for i, lbl in enumerate(labels):
+        label_groups[lbl]['x'].append(xs[i])
+        label_groups[lbl]['y'].append(ys[i])
+        label_groups[lbl]['cluster'].append(cluster_ids[i])
+
+    for base_lbl, grp in label_groups.items():
+        cx = float(np.mean(grp['x']))
+        cy = float(np.mean(grp['y']))
+        c_id = int(np.bincount(np.array(grp['cluster'])).argmax())
+        short = base_lbl.replace('Position_', 'P')
+        ax.annotate(
+            short, xy=(cx, cy), xytext=(4, 4), textcoords='offset points',
+            fontsize=6.5, color=cmap(c_id % 10),
+            fontweight='bold', zorder=5,
+        )
+
+    ax.set_xlabel('Stage X (µm)')
+    ax.set_ylabel('Stage Y (µm)')
+    cluster_str = (f', {n_clusters} clusters' if n_lamellae is not None
+                   else ', no clustering')
+    ax.set_title(
+        f'Stage Positions  ({n} tilt series{cluster_str})',
+        fontsize=12, fontweight='bold',
+    )
+    ax.set_aspect('equal', adjustable='datalim')
+    ax.grid(True, lw=0.4, alpha=0.4)
+
+    if n_clusters > 1:
+        from matplotlib.patches import Patch
+        handles = [
+            Patch(facecolor=cmap(i % 10), edgecolor='white',
+                  label=f'Cluster {i+1}')
+            for i in range(n_clusters)
+        ]
+        ax.legend(handles=handles, fontsize=8, loc='best', framealpha=0.8)
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=130, bbox_inches='tight')
+    plt.close(fig)
+    print(f'  Stage positions : {out_path}')
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # CLI integration
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -823,6 +955,11 @@ def add_parser(subparsers):
                         'corrected_averages.png, cv_vs_nmovies.png).  When '
                         'provided, a "Gain Transform Check" tab is prepended '
                         'to the HTML report.')
+    p.add_argument('--n-lamellae', '-n', type=int, default=None,
+                   help='Expected number of lamellae on the grid.  When set, '
+                        'K-means clustering is applied to the stage X-Y '
+                        'positions and lamella groups are colour-coded in the '
+                        'stage position scatter plot (requires scikit-learn).')
     p.set_defaults(func=run)
     return p
 
@@ -1072,6 +1209,33 @@ def run(args):
         'n_dark':   0,
     })
 
+    # ── Stage positions scatter plot ──────────────────────────────────────────
+    # Load ts-name → original-path lookup from project JSON if available
+    stage_lookup = {}
+    proj_json = Path('aretomo3_project.json')
+    if proj_json.exists():
+        try:
+            with open(proj_json) as fh:
+                proj = json.load(fh)
+            stage_lookup = proj.get('rename_ts', {}).get('lookup', {})
+        except Exception:
+            pass
+
+    stage_png = 'stage_positions.png'
+    plot_stage_positions(
+        all_ts,
+        out_path   = str(out_dir / stage_png),
+        n_lamellae = args.n_lamellae,
+        lookup     = stage_lookup or None,
+    )
+    ts_entries.insert(1, {
+        'name':     '[Summary] Stage Positions',
+        'png':      stage_png,
+        'n_bad':    0,
+        'n_frames': sum(len(d['frames']) for d in all_ts.values()),
+        'n_dark':   0,
+    })
+
     # JSON
     json_path = out_dir / 'alignment_data.json'
     with open(json_path, 'w') as fh:
@@ -1116,30 +1280,40 @@ def run(args):
     # ── Project JSON ──────────────────────────────────────────────────────────
     n_ts_bad  = sum(1 for e in ts_entries if e['n_bad'] > 0)
     n_ts_warn = sum(1 for d in all_ts.values() if d.get('warnings'))
+
+    # Compute recommended tilt axis = median ROT across all TS
+    rot_list = [d['frames'][0]['rot'] for d in all_ts.values() if d['frames']]
+    recommended_tilt_axis = round(float(np.median(rot_list)), 2) if rot_list else None
+
     print()
     update_section(
         section    = 'analyse',
         values     = {
-            'command':              ' '.join(sys.argv),
-            'args':                 args_to_dict(args),
-            'timestamp':            datetime.datetime.now().isoformat(timespec='seconds'),
-            'n_tilt_series':        len(all_ts),
-            'n_flagged_frames':     total_flagged,
-            'n_ts_with_flags':      n_ts_bad,
-            'n_ts_with_warnings':   n_ts_warn,
-            'output_dir':           str(out_dir),
+            'command':                ' '.join(sys.argv),
+            'args':                   args_to_dict(args),
+            'timestamp':              datetime.datetime.now().isoformat(timespec='seconds'),
+            'n_tilt_series':          len(all_ts),
+            'n_flagged_frames':       total_flagged,
+            'n_ts_with_flags':        n_ts_bad,
+            'n_ts_with_warnings':     n_ts_warn,
+            'output_dir':             str(out_dir),
+            'recommended_tilt_axis':  recommended_tilt_axis,
         },
         backup_dir = out_dir,
     )
 
     # Summary
     print(f'\nSummary')
-    print(f'  Tilt series processed : {len(ts_entries)}')
+    print(f'  Tilt series processed : {len(all_ts)}')
     print(f'  TS with flagged frames: {n_ts_bad}')
     print(f'  Total flagged frames  : {total_flagged}')
     print(f'  TS with sanity warnings: {n_ts_warn}')
+    if recommended_tilt_axis is not None:
+        print(f'  Recommended tilt axis : {recommended_tilt_axis}°  '
+              f'(median ROT, use as --tilt-axis for run002)')
     print(f'\nOutput')
     print(f'  Plots          : {out_dir}/<ts-name>.png')
+    print(f'  Stage positions: {out_dir / stage_png}')
     print(f'  HTML viewer    : {html_path}')
     print(f'  Alignment JSON : {json_path}')
     print(f'  Flagged TSV    : {tsv_path}')
