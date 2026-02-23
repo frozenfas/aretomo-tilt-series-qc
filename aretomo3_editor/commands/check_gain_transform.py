@@ -33,8 +33,11 @@ uniform illumination relative to the gain.  The first N acquisitions
 
 Output
 ------
-  corrected_averages.png    — 4-row grid: image + residual for ×gain and ÷gain
-  cv_vs_nmovies.png         — CV convergence per transform (solid=×, dashed=÷)
+  gain_image.png            — gain reference image (greyscale, for inspection)
+  corrected_averages.png    — 2-row grid: raw×gain image + residual per transform
+                              (4 rows if --include-divide is set)
+  cv_vs_nmovies.png         — CV convergence per transform
+                              (dashed ÷gain lines only with --include-divide)
   residual_progression.png  — best transform's residual at log-spaced checkpoints
   report.html               — standalone HTML viewer (no server required)
   aretomo3_project.json     — project state updated (backup copy written here)
@@ -211,11 +214,11 @@ def _downsample(arr, factor=4):
     return arr[::factor, ::factor].astype(np.float32)
 
 
-def _accumulate(movies, transformed_gains):
+def _accumulate(movies, transformed_gains, compute_div=False):
     """
-    For each selected movie, sum sub-frames then accumulate two versions:
-      multiply: raw × gain  (AreTomo3 convention)
-      divide:   raw ÷ gain  (for comparison — should be worse)
+    For each selected movie, sum sub-frames then accumulate:
+      multiply: raw × gain  (AreTomo3 convention — always computed)
+      divide:   raw ÷ gain  (only when compute_div=True)
 
     At log-spaced checkpoints the normalised residual (arr/mean - 1) is
     saved at 1/4 resolution for the progression plot.
@@ -224,13 +227,14 @@ def _accumulate(movies, transformed_gains):
     ----------
     movies : list of (Path, acq_order, tilt_angle)
     transformed_gains : dict  name -> float64 ndarray
+    compute_div : bool  also accumulate raw÷gain (default False)
 
     Returns
     -------
     corr_mul      : dict  name -> float64 ndarray
-    corr_div      : dict  name -> float64 ndarray
+    corr_div      : dict  name -> float64 ndarray  (values are None if compute_div=False)
     cv_hist_mul   : dict  name -> list of float
-    cv_hist_div   : dict  name -> list of float
+    cv_hist_div   : dict  name -> list of float     (empty lists if compute_div=False)
     checkpoints   : list of (n_movies_so_far,
                              {name: resid_downsampled_float32})
     """
@@ -264,15 +268,16 @@ def _accumulate(movies, transformed_gains):
             m = corr_mul[n].mean()
             cv_hist_mul[n].append(corr_mul[n].std() / m if m > 0 else np.nan)
 
-            # divide: raw ÷ gain (guard against zero/negative)
-            safe_g = np.where(g > 0, g, np.nan)
-            c = np.nan_to_num(raw_sum / safe_g, nan=0.0)
-            if corr_div[n] is None:
-                corr_div[n] = c.copy()
-            else:
-                corr_div[n] += c
-            m = corr_div[n].mean()
-            cv_hist_div[n].append(corr_div[n].std() / m if m > 0 else np.nan)
+            # divide: raw ÷ gain (optional)
+            if compute_div:
+                safe_g = np.where(g > 0, g, np.nan)
+                c = np.nan_to_num(raw_sum / safe_g, nan=0.0)
+                if corr_div[n] is None:
+                    corr_div[n] = c.copy()
+                else:
+                    corr_div[n] += c
+                m = corr_div[n].mean()
+                cv_hist_div[n].append(corr_div[n].std() / m if m > 0 else np.nan)
 
         # Save checkpoint (1-based count)
         step = i + 1
@@ -303,12 +308,13 @@ def _score(corr_mul, corr_div):
     """
     scores = {}
     for name in corr_mul:
-        m_mul = corr_mul[name].mean()
-        m_div = corr_div[name].mean()
-        scores[name] = {
-            'cv_mul': float(corr_mul[name].std() / m_mul) if m_mul > 0 else np.nan,
-            'cv_div': float(corr_div[name].std() / m_div) if m_div > 0 else np.nan,
-        }
+        m_mul  = corr_mul[name].mean()
+        cv_mul = float(corr_mul[name].std() / m_mul) if m_mul > 0 else np.nan
+        cv_div = None
+        if corr_div.get(name) is not None:
+            m_div  = corr_div[name].mean()
+            cv_div = float(corr_div[name].std() / m_div) if m_div > 0 else np.nan
+        scores[name] = {'cv_mul': cv_mul, 'cv_div': cv_div}
     return scores
 
 
@@ -316,33 +322,40 @@ def _score(corr_mul, corr_div):
 # Plotting
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _plot_corrected_averages(corr_mul, corr_div, scores, best, out_path):
+def _plot_corrected_averages(corr_mul, corr_div, scores, best, out_path,
+                             include_div=False):
     """
-    Approach B: 4 rows × 4 columns.
-    Row 0: raw × gain          — greyscale, mean-normalised
-    Row 1: residual of row 0   — diverging RdBu_r (arr/mean - 1)
-    Row 2: raw ÷ gain          — greyscale, mean-normalised
-    Row 3: residual of row 2   — diverging RdBu_r
+    2 rows × 4 columns  (default, multiply-only):
+      Row 0: raw × gain  — greyscale, mean-normalised
+      Row 1: residual    — diverging RdBu_r (arr/mean - 1)
+
+    4 rows × 4 columns  (with include_div=True):
+      Row 0: raw × gain, Row 1: residual (×)
+      Row 2: raw ÷ gain, Row 3: residual (÷)
+
     Correct transform → flat grey in residual rows.
     """
     names  = list(corr_mul.keys())
     ny, nx = corr_mul[names[0]].shape
     pan_w  = 5.0
     pan_h  = pan_w * ny / nx
-    fig_h  = pan_h * 4 + 3.0
-    fig, axes = plt.subplots(4, 4, figsize=(pan_w * 4, fig_h))
+    n_rows = 4 if include_div else 2
+    fig_h  = pan_h * n_rows + 3.0
+    fig, axes = plt.subplots(n_rows, 4, figsize=(pan_w * 4, fig_h))
+    if n_rows == 1:
+        axes = axes[np.newaxis, :]   # keep 2-D indexing consistent
     fig.patch.set_facecolor('#16213e')
 
-    n_rows = 4
     for col_i, name in enumerate(names):
         is_best = (name == best)
         col     = '#66bb6a' if is_best else '#e0e0e0'
         marker  = '  \u2190' if is_best else ''
 
-        for arr, cv_key, row_img, row_resid in [
-            (corr_mul[name], 'cv_mul', 0, 1),
-            (corr_div[name], 'cv_div', 2, 3),
-        ]:
+        iter_pairs = [(corr_mul[name], 'cv_mul', 0, 1)]
+        if include_div and corr_div.get(name) is not None:
+            iter_pairs.append((corr_div[name], 'cv_div', 2, 3))
+
+        for arr, cv_key, row_img, row_resid in iter_pairs:
             norm  = arr / arr.mean()
             resid = norm - 1.0
             lo, hi = np.percentile(norm, 1), np.percentile(norm, 99)
@@ -352,10 +365,11 @@ def _plot_corrected_averages(corr_mul, corr_div, scores, best, out_path):
             ax = axes[row_img, col_i]
             ax.imshow(norm, cmap='gray', vmin=lo, vmax=hi,
                       aspect='equal', interpolation='nearest')
+            cv_val = scores[name][cv_key]
+            cv_str = f'{cv_val:.4f}' if cv_val is not None else 'n/a'
             title_col = col if row_img == 0 else '#e0e0e0'
-            title_txt = (f'{name}{marker}  CV={scores[name][cv_key]:.4f}'
-                         if row_img == 0 else
-                         f'CV={scores[name][cv_key]:.4f}')
+            title_txt = (f'{name}{marker}  CV={cv_str}'
+                         if row_img == 0 else f'CV={cv_str}')
             ax.set_title(title_txt, color=title_col, fontsize=10,
                          fontweight='bold' if (is_best and row_img == 0) else 'normal')
             ax.axis('off')
@@ -380,8 +394,14 @@ def _plot_corrected_averages(corr_mul, corr_div, scores, best, out_path):
                     labelleft=False, labelbottom=False)
 
     # Row labels on left
-    row_labels  = ['raw \u00d7 gain', 'residual (\u00d7)', 'raw \u00f7 gain', 'residual (\u00f7)']
-    row_colours = ['#90caf9', '#ce93d8', '#ef9a9a', '#ffcc80']
+    if include_div:
+        row_labels  = ['raw \u00d7 gain', 'residual (\u00d7)',
+                       'raw \u00f7 gain', 'residual (\u00f7)']
+        row_colours = ['#90caf9', '#ce93d8', '#ef9a9a', '#ffcc80']
+    else:
+        row_labels  = ['raw \u00d7 gain', 'residual']
+        row_colours = ['#90caf9', '#ce93d8']
+
     for row_i, (label, rcol) in enumerate(zip(row_labels, row_colours)):
         axes[row_i, 0].set_ylabel(label, color=rcol, fontsize=10)
         axes[row_i, 0].axis('on')
@@ -401,7 +421,8 @@ def _plot_corrected_averages(corr_mul, corr_div, scores, best, out_path):
 
 
 
-def _plot_cv_convergence(cv_hist_mul, cv_hist_div, scores, best, out_path):
+def _plot_cv_convergence(cv_hist_mul, cv_hist_div, scores, best, out_path,
+                         include_div=False):
     fig, ax = plt.subplots(figsize=(10, 5))
     fig.patch.set_facecolor('#16213e')
     ax.set_facecolor('#0d1b2a')
@@ -409,16 +430,21 @@ def _plot_cv_convergence(cv_hist_mul, cv_hist_div, scores, best, out_path):
     for name in cv_hist_mul:
         lw  = 2.5 if name == best else 1.5
         col = _COLOURS.get(name, 'white')
+        cv_mul = scores[name]['cv_mul']
         ax.plot(range(1, len(cv_hist_mul[name]) + 1), cv_hist_mul[name],
-                label=f'{name} ×  (CV={scores[name]["cv_mul"]:.4f})',
+                label=f'{name} ×  (CV={cv_mul:.4f})',
                 color=col, lw=lw, linestyle='-')
-        ax.plot(range(1, len(cv_hist_div[name]) + 1), cv_hist_div[name],
-                label=f'{name} ÷  (CV={scores[name]["cv_div"]:.4f})',
-                color=col, lw=lw * 0.7, linestyle='--', alpha=0.6)
+        if include_div and cv_hist_div.get(name):
+            cv_div = scores[name]['cv_div']
+            cv_div_s = f'{cv_div:.4f}' if cv_div is not None else 'n/a'
+            ax.plot(range(1, len(cv_hist_div[name]) + 1), cv_hist_div[name],
+                    label=f'{name} ÷  (CV={cv_div_s})',
+                    color=col, lw=lw * 0.7, linestyle='--', alpha=0.6)
 
     ax.set_xlabel('Movies accumulated', color='#e0e0e0')
     ax.set_ylabel('CV  (std / mean)  — lower is flatter', color='#e0e0e0')
-    ax.set_title('Flatness convergence — solid = raw×gain, dashed = raw÷gain',
+    title_suffix = ', dashed = raw÷gain' if include_div else ''
+    ax.set_title(f'Flatness convergence — solid = raw×gain{title_suffix}',
                  color='#90caf9', fontsize=12)
     ax.tick_params(colors='#e0e0e0')
     for spine in ax.spines.values():
@@ -474,11 +500,41 @@ def _plot_residual_progression(checkpoints, best, out_path):
     plt.close(fig)
 
 
+def _plot_gain_image(gain, gain_path, out_path):
+    """
+    Save a greyscale view of the gain reference for visual inspection.
+    Colour scale clipped to 1st–99th percentile; stats annotated in title.
+    """
+    vlo = float(np.percentile(gain, 1))
+    vhi = float(np.percentile(gain, 99))
+    ny, nx = gain.shape
+    fig_w = 14.0
+    fig_h = fig_w * ny / nx
+
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h + 0.8))
+    fig.patch.set_facecolor('#16213e')
+    im = ax.imshow(gain, cmap='gray', vmin=vlo, vmax=vhi,
+                   aspect='equal', interpolation='bilinear', origin='lower')
+    cb = plt.colorbar(im, ax=ax, fraction=0.02, pad=0.02)
+    cb.set_label('Gain value', color='#e0e0e0')
+    cb.ax.yaxis.set_tick_params(color='#e0e0e0', labelcolor='#e0e0e0')
+    ax.axis('off')
+    ax.set_title(
+        f'{Path(gain_path).name}   {nx}\u00d7{ny}   '
+        f'mean={gain.mean():.4f}   min={gain.min():.4f}   max={gain.max():.4f}',
+        color='#90caf9', fontsize=11,
+    )
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=100, bbox_inches='tight',
+                facecolor=fig.get_facecolor())
+    plt.close(fig)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Standalone HTML report
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _make_standalone_html(results, out_path):
+def _make_standalone_html(results, out_path, include_div=False):
     best  = results['best_transform']
     flags = (f"-RotGain {results['aretomo3_rot_gain']} "
              f"-FlipGain {results['aretomo3_flip_gain']}")
@@ -488,11 +544,15 @@ def _make_standalone_html(results, out_path):
         marker   = '  \u2190 best' if name == best else ''
         style    = 'color:#66bb6a;font-weight:bold' if name == best else ''
         cv_mul_s = f"{s['cv_mul']:.4f}" if s.get('cv_mul') is not None else 'n/a'
-        cv_div_s = f"{s['cv_div']:.4f}" if s.get('cv_div') is not None else 'n/a'
-        rows_html += (
-            f'<tr style="{style}"><td>{name}{marker}</td>'
-            f'<td>{cv_mul_s}</td><td>{cv_div_s}</td></tr>\n'
-        )
+        row = (f'<tr style="{style}"><td>{name}{marker}</td>'
+               f'<td>{cv_mul_s}</td>')
+        if include_div:
+            cv_div_s = f"{s['cv_div']:.4f}" if s.get('cv_div') is not None else 'n/a'
+            row += f'<td>{cv_div_s}</td>'
+        row += '</tr>\n'
+        rows_html += row
+
+    div_header = '<th>CV &#x2193; raw&#xf7;gain</th>' if include_div else ''
 
     tilt_lo, tilt_hi = results['tilt_range_deg']
     acq_lo,  acq_hi  = results['acq_range']
@@ -548,7 +608,7 @@ def _make_standalone_html(results, out_path):
       <tr>
         <th>Transform</th>
         <th>CV &#x2193; raw&#xd7;gain</th>
-        <th>CV &#x2193; raw&#xf7;gain</th>
+        {div_header}
       </tr>
       {rows_html}
     </table>
@@ -563,7 +623,8 @@ def _make_standalone_html(results, out_path):
   </div>
 
   <div class="imgs">
-    <img src="corrected_averages.png" alt="Corrected averages (multiply vs divide)">
+    <img src="gain_image.png" alt="Gain reference image">
+    <img src="corrected_averages.png" alt="Corrected averages">
     <img src="cv_vs_nmovies.png" alt="CV convergence">
     <img src="residual_progression.png" alt="Residual progression vs movies accumulated">
   </div>
@@ -606,6 +667,12 @@ def add_parser(subparsers):
         '--n-movies', '-N', type=int, default=150,
         help='Number of movies to randomly sample from the filtered set '
              'and accumulate. 100–200 is sufficient for convergence.',
+    )
+    p.add_argument(
+        '--include-divide', action='store_true', default=False,
+        help='Also test raw÷gain for each transform and include it in the '
+             'plots and report.  By default only raw×gain is computed '
+             '(AreTomo3 convention).',
     )
     p.set_defaults(func=run)
     return p
@@ -677,19 +744,29 @@ def run(args):
     }
 
     # ── Accumulate ────────────────────────────────────────────────────────────
-    print('Testing 4 transforms...')
+    include_div = getattr(args, 'include_divide', False)
+    n_tested = len(TRANSFORMS)
+    div_note = ' (+ ÷gain)' if include_div else ''
+    print(f'Testing {n_tested} transforms{div_note}...')
     corr_mul, corr_div, cv_hist_mul, cv_hist_div, checkpoints = _accumulate(
-        selected, transformed_gains)
+        selected, transformed_gains, compute_div=include_div)
     print()
 
     # ── Score ─────────────────────────────────────────────────────────────────
     scores = _score(corr_mul, corr_div)
     best   = min(scores, key=lambda n: scores[n]['cv_mul'])
 
-    print(f'  {"Transform":<8}  {"CV×gain":>8}  {"CV÷gain":>8}')
+    if include_div:
+        print(f'  {"Transform":<8}  {"CV×gain":>8}  {"CV÷gain":>8}')
+    else:
+        print(f'  {"Transform":<8}  {"CV×gain":>8}')
     for name, s in scores.items():
         marker = '  <- best' if name == best else ''
-        print(f'  {name:<8}  {s["cv_mul"]:>8.4f}  {s["cv_div"]:>8.4f}{marker}')
+        if include_div:
+            cv_div_s = f'{s["cv_div"]:8.4f}' if s['cv_div'] is not None else '     n/a'
+            print(f'  {name:<8}  {s["cv_mul"]:>8.4f}  {cv_div_s}{marker}')
+        else:
+            print(f'  {name:<8}  {s["cv_mul"]:>8.4f}{marker}')
     print()
 
     rot_gain  = TRANSFORMS[best]['rot_gain']
@@ -717,16 +794,20 @@ def run(args):
     }
 
     # ── Plots ─────────────────────────────────────────────────────────────────
-    avg_path  = out_dir / 'corrected_averages.png'
-    cv_path   = out_dir / 'cv_vs_nmovies.png'
-    prog_path = out_dir / 'residual_progression.png'
-    _plot_corrected_averages(corr_mul, corr_div, scores, best, str(avg_path))
-    _plot_cv_convergence(cv_hist_mul, cv_hist_div, scores, best, str(cv_path))
+    gain_img_path = out_dir / 'gain_image.png'
+    avg_path      = out_dir / 'corrected_averages.png'
+    cv_path       = out_dir / 'cv_vs_nmovies.png'
+    prog_path     = out_dir / 'residual_progression.png'
+    _plot_gain_image(gain, str(gain_path), str(gain_img_path))
+    _plot_corrected_averages(corr_mul, corr_div, scores, best, str(avg_path),
+                             include_div=include_div)
+    _plot_cv_convergence(cv_hist_mul, cv_hist_div, scores, best, str(cv_path),
+                         include_div=include_div)
     _plot_residual_progression(checkpoints, best, str(prog_path))
 
     # ── Standalone HTML ───────────────────────────────────────────────────────
     html_path = out_dir / 'report.html'
-    _make_standalone_html(results, str(html_path))
+    _make_standalone_html(results, str(html_path), include_div=include_div)
 
     # ── Project JSON ──────────────────────────────────────────────────────────
     print()
@@ -753,7 +834,9 @@ def run(args):
     proj_backup = out_dir / 'aretomo3_project.json'
     print()
     print('Output')
-    print(f'  Corrected averages (×÷)  : {avg_path}')
+    print(f'  Gain image               : {gain_img_path}')
+    avg_label = 'Corrected averages (×÷)' if include_div else 'Corrected averages (×)'
+    print(f'  {avg_label:<24} : {avg_path}')
     print(f'  CV convergence           : {cv_path}')
     print(f'  Residual progression     : {prog_path}')
     print(f'  HTML report              : {html_path}')
