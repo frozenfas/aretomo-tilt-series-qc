@@ -468,8 +468,11 @@ def validate_file(path, fix_dose=False, fix_subframes=None, dose=4.16):
 
     # ── Fix subframes (too-short / restarted series) ────────────────────────
     if fix_subframes is not None and scan['n_sections'] < _MIN_TILTS:
-        stem = Path(path).stem
-        sf_path = Path(fix_subframes) / '{}.txt'.format(stem)
+        sf_arg = Path(fix_subframes)
+        if sf_arg.is_file():
+            sf_path = sf_arg
+        else:
+            sf_path = sf_arg / '{}.txt'.format(Path(path).stem)
         if not sf_path.exists():
             result['issues'].append(
                 '--fix-subframes: no SubFramePaths file at {}'.format(sf_path)
@@ -568,12 +571,13 @@ def add_parser(subparsers):
     )
     p.add_argument(
         '--fix-subframes', metavar='DIR', default=None,
-        help='Rebuild mdocs that are too short (restarted collections) using '
-             'SubFramePaths .txt files in DIR.  For each failing mdoc, '
-             'DIR/<stem>.txt must list the correct fraction filenames '
-             '(one per line).  Tilt and acquisition order are parsed from '
-             'the filenames; all other metadata is copied from the existing '
-             'mdoc.  ExposureDose is also injected using --dose.',
+        help='Rebuild mdocs that are too short (restarted collections). '
+             'Can be a directory (DIR/<stem>.txt is used for each mdoc) '
+             'or a single .txt file (used directly, for one mdoc at a time). '
+             'The .txt file lists the correct fraction filenames one per line; '
+             'tilt and acquisition order are parsed from the filenames and '
+             'all other metadata is copied from the existing mdoc. '
+             'ExposureDose is also injected using --dose.',
     )
     p.add_argument(
         '--dose', type=float, default=4.16, metavar='DOSE',
