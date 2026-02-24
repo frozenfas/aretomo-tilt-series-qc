@@ -20,11 +20,6 @@ try:
 except ImportError:
     _HAS_MDOCFILE = False
 
-try:
-    from sklearn.cluster import KMeans as _KMeans
-    _HAS_SKLEARN = True
-except ImportError:
-    _HAS_SKLEARN = False
 
 from aretomo3_preprocess.shared.project_json import update_section, args_to_dict
 from aretomo3_preprocess.shared.parsers import (
@@ -860,14 +855,15 @@ def plot_stage_positions(all_ts, out_path, n_lamellae=None, lookup=None):
     cluster_ids = np.zeros(n, dtype=int)
     n_clusters  = 1
     if n_lamellae is not None and n_lamellae > 1 and n >= n_lamellae:
-        if _HAS_SKLEARN:
+        try:
+            from sklearn.cluster import KMeans
             import warnings
-            km = _KMeans(n_clusters=n_lamellae, random_state=42, n_init=20)
+            km = KMeans(n_clusters=n_lamellae, random_state=42, n_init=10)
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore')
                 cluster_ids = km.fit_predict(X)
             n_clusters = n_lamellae
-        else:
+        except ImportError:
             print('  WARNING: scikit-learn not installed — K-means clustering skipped')
 
     cmap    = plt.colormaps.get_cmap('tab10')
