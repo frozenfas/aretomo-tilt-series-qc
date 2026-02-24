@@ -809,20 +809,29 @@ def _base_position_label(original_path_str):
     return stem
 
 
-def plot_stage_positions(all_ts, out_path, n_lamellae=None, lookup=None):
+def plot_stage_positions(all_ts, out_dir, n_lamellae=None, lookup=None):
     """
-    Scatter plot of stage X-Y positions from mdoc data.
+    Scatter plots of stage X-Y positions from mdoc data.
+
+    Produces an overview plot (all lamellae, colour-coded) and one focused
+    plot per lamella with positions labelled and markers coloured by n_tilts.
 
     Parameters
     ----------
     all_ts      : dict  ts_name → data dict (frames have stage_x, stage_y)
-    out_path    : str   output PNG path
+    out_dir     : Path  output directory
     n_lamellae  : int or None   number of K-means clusters; no clustering if None
     lookup      : dict or None  ts_name → original_path (from rename_ts section)
+
+    Returns
+    -------
+    list of (viewer_label, png_filename) for insertion into the HTML viewer
     """
     from collections import defaultdict
+    from matplotlib.patches import Patch
 
-    ts_names, xs, ys = [], [], []
+    out_dir = Path(out_dir)
+    ts_names, xs, ys, n_tilts_list = [], [], [], []
 
     for ts_name, data in all_ts.items():
         sx_vals = [f['stage_x'] for f in data['frames']
@@ -834,11 +843,12 @@ def plot_stage_positions(all_ts, out_path, n_lamellae=None, lookup=None):
         ts_names.append(ts_name)
         xs.append(float(np.mean(sx_vals)))
         ys.append(float(np.mean(sy_vals)))
+        n_tilts_list.append(len(data['frames']))
 
     n = len(ts_names)
     if n == 0:
         print('  Stage positions: no stage coordinate data found — skipped')
-        return
+        return []
 
     X = np.column_stack([xs, ys])
 
@@ -857,65 +867,105 @@ def plot_stage_positions(all_ts, out_path, n_lamellae=None, lookup=None):
     if n_lamellae is not None and n_lamellae > 1 and n >= n_lamellae:
         try:
             from sklearn.cluster import KMeans
-            import warnings
+            import warnings as _warnings
             km = KMeans(n_clusters=n_lamellae, random_state=42, n_init=10)
-            with warnings.catch_warnings():
-                warnings.simplefilter('ignore')
+            with _warnings.catch_warnings():
+                _warnings.simplefilter('ignore')
                 cluster_ids = km.fit_predict(X)
             n_clusters = n_lamellae
         except ImportError:
             print('  WARNING: scikit-learn not installed — K-means clustering skipped')
 
-    cmap    = plt.colormaps.get_cmap('tab10')
+    cmap = plt.colormaps.get_cmap('tab10')
+
+    # Per-cluster: sorted unique base-position labels (for legend)
+    cluster_pos_labels = defaultdict(set)
+    for i, lbl in enumerate(labels):
+        cluster_pos_labels[cluster_ids[i]].add(lbl)
+    cluster_pos_labels = {
+        c: sorted(v, key=lambda s: int(s.split('_')[1]) if s.split('_')[1].isdigit() else 0)
+        for c, v in cluster_pos_labels.items()
+    }
+
+    output_entries = []
+
+    # ── Overview plot ──────────────────────────────────────────────────────
     colours = [cmap(c % 10) for c in cluster_ids]
-
     fig, ax = plt.subplots(figsize=(10, 9))
-
     ax.scatter(xs, ys, c=colours, s=60,
                edgecolors='white', linewidths=0.5, zorder=3)
 
-    # Label each unique base-position at its centroid
-    label_groups = defaultdict(lambda: {'x': [], 'y': [], 'cluster': []})
-    for i, lbl in enumerate(labels):
-        label_groups[lbl]['x'].append(xs[i])
-        label_groups[lbl]['y'].append(ys[i])
-        label_groups[lbl]['cluster'].append(cluster_ids[i])
-
-    for base_lbl, grp in label_groups.items():
-        cx = float(np.mean(grp['x']))
-        cy = float(np.mean(grp['y']))
-        c_id = int(np.bincount(np.array(grp['cluster'])).argmax())
-        short = base_lbl.replace('Position_', 'P')
-        ax.annotate(
-            short, xy=(cx, cy), xytext=(4, 4), textcoords='offset points',
-            fontsize=6.5, color=cmap(c_id % 10),
-            fontweight='bold', zorder=5,
-        )
-
+    cluster_str = (f', {n_clusters} lamellae' if n_clusters > 1 else '')
+    ax.set_title(f'Stage Positions  ({n} tilt series{cluster_str})',
+                 fontsize=12, fontweight='bold')
     ax.set_xlabel('Stage X (µm)')
     ax.set_ylabel('Stage Y (µm)')
-    cluster_str = (f', {n_clusters} clusters' if n_lamellae is not None
-                   else ', no clustering')
-    ax.set_title(
-        f'Stage Positions  ({n} tilt series{cluster_str})',
-        fontsize=12, fontweight='bold',
-    )
     ax.set_aspect('equal', adjustable='datalim')
     ax.grid(True, lw=0.4, alpha=0.4)
 
-    if n_clusters > 1:
-        from matplotlib.patches import Patch
-        handles = [
-            Patch(facecolor=cmap(i % 10), edgecolor='white',
-                  label=f'Cluster {i+1}')
-            for i in range(n_clusters)
-        ]
-        ax.legend(handles=handles, fontsize=8, loc='best', framealpha=0.8)
+    # Legend: "Lamella N: P_1, P_2, ..."
+    handles = []
+    for c in range(n_clusters):
+        pos_list = [lbl.replace('Position_', 'P')
+                    for lbl in cluster_pos_labels.get(c, [])]
+        pos_str  = ', '.join(pos_list)
+        if len(pos_str) > 55:
+            pos_str = pos_str[:52] + '...'
+        lbl_text = (f'Lamella {c+1}: {pos_str}' if n_clusters > 1
+                    else f'All: {pos_str}')
+        handles.append(Patch(facecolor=cmap(c % 10), edgecolor='white',
+                             label=lbl_text))
+    ax.legend(handles=handles, fontsize=7, loc='best', framealpha=0.85)
 
     fig.tight_layout()
-    fig.savefig(out_path, dpi=130, bbox_inches='tight')
+    overview_png = 'stage_positions.png'
+    fig.savefig(out_dir / overview_png, dpi=130, bbox_inches='tight')
     plt.close(fig)
-    print(f'  Stage positions : {out_path}')
+    print(f'  Stage overview  : {out_dir / overview_png}')
+    output_entries.append(('[Summary] Stage Positions', overview_png))
+
+    # ── Per-lamella focused plots ──────────────────────────────────────────
+    if n_clusters > 1:
+        n_tilts_arr = np.array(n_tilts_list)
+        vmin = int(n_tilts_arr.min())
+        vmax = int(n_tilts_arr.max())
+
+        for c in range(n_clusters):
+            idx = [i for i, ci in enumerate(cluster_ids) if ci == c]
+            if not idx:
+                continue
+
+            lx   = [xs[i]            for i in idx]
+            ly   = [ys[i]            for i in idx]
+            lnt  = [n_tilts_list[i]  for i in idx]
+            llbl = [labels[i].replace('Position_', 'P') for i in idx]
+
+            fig, ax = plt.subplots(figsize=(8, 7))
+            sc = ax.scatter(lx, ly, c=lnt, cmap='viridis',
+                            vmin=vmin, vmax=vmax,
+                            s=90, edgecolors='white', linewidths=0.6, zorder=3)
+            plt.colorbar(sc, ax=ax, label='# aligned tilts')
+
+            for px, py, plbl in zip(lx, ly, llbl):
+                ax.annotate(plbl, xy=(px, py), xytext=(5, 5),
+                            textcoords='offset points',
+                            fontsize=8, fontweight='bold', zorder=5)
+
+            ax.set_title(f'Lamella {c+1}  ({len(idx)} tilt series)',
+                         fontsize=12, fontweight='bold')
+            ax.set_xlabel('Stage X (µm)')
+            ax.set_ylabel('Stage Y (µm)')
+            ax.set_aspect('equal', adjustable='datalim')
+            ax.grid(True, lw=0.4, alpha=0.4)
+
+            fig.tight_layout()
+            lam_png = f'stage_positions_lamella_{c+1:02d}.png'
+            fig.savefig(out_dir / lam_png, dpi=130, bbox_inches='tight')
+            plt.close(fig)
+            print(f'  Lamella {c+1:2d}       : {out_dir / lam_png}')
+            output_entries.append((f'[Lamella {c+1}] Stage Positions', lam_png))
+
+    return output_entries
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1217,20 +1267,21 @@ def run(args):
         except Exception:
             pass
 
-    stage_png = 'stage_positions.png'
-    plot_stage_positions(
+    stage_entries = plot_stage_positions(
         all_ts,
-        out_path   = str(out_dir / stage_png),
+        out_dir    = out_dir,
         n_lamellae = args.n_lamellae,
         lookup     = stage_lookup or None,
     )
-    ts_entries.insert(1, {
-        'name':     '[Summary] Stage Positions',
-        'png':      stage_png,
-        'n_bad':    0,
-        'n_frames': sum(len(d['frames']) for d in all_ts.values()),
-        'n_dark':   0,
-    })
+    total_frames = sum(len(d['frames']) for d in all_ts.values())
+    for i, (entry_name, entry_png) in enumerate(stage_entries):
+        ts_entries.insert(1 + i, {
+            'name':     entry_name,
+            'png':      entry_png,
+            'n_bad':    0,
+            'n_frames': total_frames,
+            'n_dark':   0,
+        })
 
     # JSON
     json_path = out_dir / 'alignment_data.json'
@@ -1309,7 +1360,7 @@ def run(args):
               f'(median ROT, use as --tilt-axis for run002)')
     print(f'\nOutput')
     print(f'  Plots          : {out_dir}/<ts-name>.png')
-    print(f'  Stage positions: {out_dir / stage_png}')
+    print(f'  Stage positions: {out_dir}/stage_positions*.png')
     print(f'  HTML viewer    : {html_path}')
     print(f'  Alignment JSON : {json_path}')
     print(f'  Flagged TSV    : {tsv_path}')
