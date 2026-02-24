@@ -156,10 +156,11 @@ def _build_cmd(args) -> list:
     if args.in_skips is not None:
         cmd += ['-InSkips'] + list(args.in_skips)
 
-    cmd += ['-OutDir',   args.output]
-    cmd += ['-Gain',     args.gain]
-    cmd += ['-FlipGain', _num(args.flip_gain)]
-    cmd += ['-RotGain',  _num(args.rot_gain)]
+    cmd += ['-OutDir', args.output]
+    if args.gain is not None:
+        cmd += ['-Gain',     args.gain]
+        cmd += ['-FlipGain', _num(args.flip_gain)]
+        cmd += ['-RotGain',  _num(args.rot_gain)]
 
     cmd += ['-Gpu'] + [_num(g) for g in args.gpu]
     cmd += ['-Cmd',    _num(args.cmd)]
@@ -170,7 +171,8 @@ def _build_cmd(args) -> list:
     cmd += ['-Cs',          _num(args.cs)]
     cmd += ['-AmpContrast', _num(args.amp_contrast)]
 
-    cmd += ['-FmDose',  _num(args.fm_dose)]
+    if args.fm_dose is not None:
+        cmd += ['-FmDose', _num(args.fm_dose)]
     cmd += ['-McBin',   _num(args.mc_bin)]
     cmd += ['-McPatch'] + [_num(v) for v in args.mc_patch]
     cmd += ['-FmInt',   _num(args.fm_int)]
@@ -242,9 +244,15 @@ def _validate(args) -> tuple:
     errors   = []
     warnings = []
 
-    # ── 1. Gain file exists ────────────────────────────────────────────────
-    if not Path(args.gain).exists():
-        errors.append(f'Gain file not found: {args.gain!r}')
+    # ── 1. Gain / fm-dose (only needed for cmd 0 = full pipeline) ─────────
+    if args.gain is not None:
+        if not Path(args.gain).exists():
+            errors.append(f'Gain file not found: {args.gain!r}')
+    elif args.cmd == 0:
+        errors.append('--gain is required for --cmd 0 (motion correction mode)')
+
+    if args.fm_dose is None and args.cmd == 0:
+        errors.append('--fm-dose is required for --cmd 0 (motion correction mode)')
 
     # ── 2. Input files found ───────────────────────────────────────────────
     in_dir, pattern, mdoc_files = _find_input_files(args.in_prefix, args.in_suffix)
@@ -259,14 +267,16 @@ def _validate(args) -> tuple:
         print(f'  Input files     : {len(mdoc_files)} .{args.in_suffix} files '
               f'found ({in_dir}/{pattern})')
 
-    # ── 3. Gain transform vs gain_check JSON ──────────────────────────────
+    # ── 3. Gain transform vs gain_check JSON (only if gain provided) ──────
     try:
         project = load_or_create()
         gc = project.get('gain_check', {})
     except SystemExit:
         gc = {}
 
-    if gc:
+    if args.gain is None:
+        print('  Gain check      : skipped (no gain — cmd != 0)')
+    elif gc:
         rec_rot  = gc.get('aretomo3_rot_gain')
         rec_flip = gc.get('aretomo3_flip_gain')
         rec_best = gc.get('best_transform', '?')
@@ -332,12 +342,16 @@ def add_parser(subparsers):
     req = p.add_argument_group('required arguments')
     req.add_argument('--output', '-o', required=True,
                      help='Output directory for AreTomo3 results (-OutDir)')
-    req.add_argument('--gain', '-g', required=True,
-                     help='Gain reference file (.mrc or .gain) (-Gain)')
+    req.add_argument('--gain', '-g', default=None,
+                     help='Gain reference file (.mrc or .gain) (-Gain). '
+                          'Required for --cmd 0 (motion correction); '
+                          'not needed for --cmd 1+ (alignment/recon only).')
     req.add_argument('--apix', '-a', type=float, required=True,
                      help='Pixel size of input movies in Å/px (-PixSize)')
-    req.add_argument('--fm-dose', '-d', type=float, required=True,
-                     help='Electron dose per raw frame in e⁻/Å² (-FmDose)')
+    req.add_argument('--fm-dose', '-d', type=float, default=None,
+                     help='Electron dose per raw frame in e⁻/Å² (-FmDose). '
+                          'Required for --cmd 0 (motion correction); '
+                          'not needed for --cmd 1+ (alignment/recon only).')
     req.add_argument('--gpu', '-G', type=int, nargs='+', required=True,
                      metavar='ID',
                      help='GPU ID(s) to use (-Gpu)')

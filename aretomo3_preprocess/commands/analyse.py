@@ -332,7 +332,7 @@ def plot_global_summary(all_ts, threshold, global_ranges, out_path):
       (1,1) Estimated resolution (fit_spacing_A) — all frames
       (1,2) % Overlap — all frames, with threshold vline
       (2,0) Astigmatism (µm) — all frames
-      (2,1) Lamella thickness AlignZ (nm or px) per TS
+      (2,1) Lamella thickness AlignZ (px) per TS
       (2,2) Flagged frames per TS
     """
     n_ts = len(all_ts)
@@ -345,7 +345,6 @@ def plot_global_summary(all_ts, threshold, global_ranges, out_path):
     rot_list          = []
     alpha_offset_list = []
     thickness_list    = []
-    thickness_unit    = 'px'
     thickness_angpix  = None
 
     # Per-frame accumulators
@@ -368,12 +367,10 @@ def plot_global_summary(all_ts, threshold, global_ranges, out_path):
         if data.get('alpha_offset') is not None:
             alpha_offset_list.append(data['alpha_offset'])
 
-        if data.get('thickness_nm') is not None:
-            thickness_list.append(data['thickness_nm'])
-            thickness_unit   = 'nm'
-            thickness_angpix = data.get('angpix')
-        elif data.get('thickness') is not None:
+        if data.get('thickness') is not None:
             thickness_list.append(data['thickness'])
+            if thickness_angpix is None and data.get('angpix') is not None:
+                thickness_angpix = data['angpix']
 
         for f in frames:
             overlap_all.append(f['overlap_pct'])
@@ -501,14 +498,12 @@ def plot_global_summary(all_ts, threshold, global_ranges, out_path):
         ax.hist(thickness_list, bins=30, color='slateblue',
                 edgecolor='white', linewidth=0.3)
         _median_vline(ax, thickness_list)
-        ax.set_xlabel(f'Lamella Thickness AlignZ ({thickness_unit})')
+        ax.set_xlabel('Lamella Thickness — AlignZ (px)')
         ax.set_ylabel('# Tilt series')
-        if thickness_unit == 'nm' and thickness_angpix is not None:
-            title = f'Lamella Thickness AlignZ\n(pixel size = {thickness_angpix} Å/px)'
-        elif thickness_unit == 'nm':
-            title = 'Lamella Thickness AlignZ (nm)'
+        if thickness_angpix is not None:
+            title = f'Lamella Thickness — AlignZ (px)\n(angpix = {thickness_angpix} Å/px from run)'
         else:
-            title = 'Lamella Thickness AlignZ (px)\n(no pixel size — use --angpix)'
+            title = 'Lamella Thickness — AlignZ (px)'
         ax.set_title(title)
         ax.legend(fontsize=8)
     else:
@@ -813,8 +808,12 @@ def plot_stage_positions(all_ts, out_dir, n_lamellae=None, lookup=None):
     """
     Scatter plots of stage X-Y positions from mdoc data.
 
-    Produces an overview plot (all lamellae, colour-coded) and one focused
-    plot per lamella with positions labelled and markers coloured by n_tilts.
+    Produces:
+      - Overview plot: all lamellae colour-coded, legend with position names
+      - Per-lamella plot: scatter (one marker per base Position, labelled with
+        ts-XXX, coloured by mean n_tilts) + 2×3 histogram panels showing
+        per-lamella statistics with suggested (median) values
+      - lamella_positions.csv: ts_name, original_path, base_position, lamella
 
     Parameters
     ----------
@@ -827,6 +826,7 @@ def plot_stage_positions(all_ts, out_dir, n_lamellae=None, lookup=None):
     -------
     list of (viewer_label, png_filename) for insertion into the HTML viewer
     """
+    import csv
     from collections import defaultdict
     from matplotlib.patches import Patch
 
@@ -848,18 +848,21 @@ def plot_stage_positions(all_ts, out_dir, n_lamellae=None, lookup=None):
     n = len(ts_names)
     if n == 0:
         print('  Stage positions: no stage coordinate data found — skipped')
-        return []
+        return [], {}
 
     X = np.column_stack([xs, ys])
 
     # Build base-position labels
     if lookup:
-        labels = [
+        base_labels = [
             _base_position_label(lookup.get(f'{ts}.mdoc', ts))
             for ts in ts_names
         ]
     else:
-        labels = ts_names
+        base_labels = ts_names
+
+    original_paths = {ts: lookup.get(f'{ts}.mdoc', '') for ts in ts_names} \
+        if lookup else {}
 
     # K-means clustering
     cluster_ids = np.zeros(n, dtype=int)
@@ -880,12 +883,24 @@ def plot_stage_positions(all_ts, out_dir, n_lamellae=None, lookup=None):
 
     # Per-cluster: sorted unique base-position labels (for legend)
     cluster_pos_labels = defaultdict(set)
-    for i, lbl in enumerate(labels):
+    for i, lbl in enumerate(base_labels):
         cluster_pos_labels[cluster_ids[i]].add(lbl)
     cluster_pos_labels = {
-        c: sorted(v, key=lambda s: int(s.split('_')[1]) if s.split('_')[1].isdigit() else 0)
+        c: sorted(v, key=lambda s: int(s.split('_')[1])
+                  if len(s.split('_')) > 1 and s.split('_')[1].isdigit() else 0)
         for c, v in cluster_pos_labels.items()
     }
+
+    # ── Write CSV: ts_name, original_path, base_position, lamella ─────────
+    csv_path = out_dir / 'lamella_positions.csv'
+    with open(csv_path, 'w', newline='') as fh:
+        writer = csv.writer(fh)
+        writer.writerow(['ts_name', 'original_path', 'base_position', 'lamella'])
+        rows = sorted(zip(ts_names, base_labels, cluster_ids),
+                      key=lambda r: (int(r[2]), r[0]))
+        for ts, base, c in rows:
+            writer.writerow([ts, original_paths.get(ts, ''), base, int(c) + 1])
+    print(f'  Lamella CSV     : {csv_path}')
 
     output_entries = []
 
@@ -896,14 +911,24 @@ def plot_stage_positions(all_ts, out_dir, n_lamellae=None, lookup=None):
                edgecolors='white', linewidths=0.5, zorder=3)
 
     cluster_str = (f', {n_clusters} lamellae' if n_clusters > 1 else '')
-    ax.set_title(f'Stage Positions  ({n} tilt series{cluster_str})',
+    ax.set_title(f'Lamella position on stage  ({n} tilt series{cluster_str})',
                  fontsize=12, fontweight='bold')
     ax.set_xlabel('Stage X (µm)')
     ax.set_ylabel('Stage Y (µm)')
     ax.set_aspect('equal', adjustable='datalim')
     ax.grid(True, lw=0.4, alpha=0.4)
 
-    # Legend: "Lamella N: P_1, P_2, ..."
+    # Annotate one representative ts-XXX per base Position
+    seen_base_ov = {}
+    for i in sorted(range(n), key=lambda i: ts_names[i]):
+        blbl = base_labels[i]
+        if blbl not in seen_base_ov:
+            seen_base_ov[blbl] = i
+    for i in seen_base_ov.values():
+        ax.annotate(ts_names[i], xy=(xs[i], ys[i]), xytext=(4, 4),
+                    textcoords='offset points', fontsize=5.5,
+                    color=cmap(cluster_ids[i] % 10), zorder=5)
+
     handles = []
     for c in range(n_clusters):
         pos_list = [lbl.replace('Position_', 'P')
@@ -925,47 +950,153 @@ def plot_stage_positions(all_ts, out_dir, n_lamellae=None, lookup=None):
     output_entries.append(('[Summary] Stage Positions', overview_png))
 
     # ── Per-lamella focused plots ──────────────────────────────────────────
-    if n_clusters > 1:
-        n_tilts_arr = np.array(n_tilts_list)
-        vmin = int(n_tilts_arr.min())
-        vmax = int(n_tilts_arr.max())
+    if n_clusters <= 1:
+        return output_entries, {}
 
-        for c in range(n_clusters):
-            idx = [i for i, ci in enumerate(cluster_ids) if ci == c]
-            if not idx:
+    n_tilts_arr = np.array(n_tilts_list)
+    vmin = int(n_tilts_arr.min())
+    vmax = int(n_tilts_arr.max())
+
+    def _hist_panel(ax, data, xlabel, color, fmt='.1f', unit='',
+                    show_suggested=True):
+        """Draw a histogram with a dashed median line.
+
+        If show_suggested is True (default), the axes title shows
+        'Suggested: <median>'.  Set False for informational panels
+        (n_tilts, n_flagged, resolution) where the median is descriptive
+        rather than a recommended input parameter.
+        """
+        clean = [v for v in data if v is not None and not np.isnan(v)]
+        if not clean:
+            ax.text(0.5, 0.5, 'No data', ha='center', va='center',
+                    transform=ax.transAxes, fontsize=9, color='grey')
+            ax.set_axis_off()
+            return
+        med = float(np.median(clean))
+        ax.hist(clean, bins=min(12, max(3, len(clean))),
+                color=color, edgecolor='white', linewidth=0.3)
+        ax.axvline(med, color='steelblue', lw=1.8, ls='--',
+                   label=f'median = {med:{fmt}}{unit}')
+        ax.set_xlabel(xlabel, fontsize=8)
+        ax.set_ylabel('# TS', fontsize=8)
+        ax.tick_params(labelsize=7)
+        if show_suggested:
+            ax.set_title(f'Suggested: {med:{fmt}}{unit}',
+                         fontsize=8, color='steelblue', fontweight='bold')
+        ax.legend(fontsize=7)
+
+    lamella_stats = {}
+
+    for c in range(n_clusters):
+        idx = [i for i, ci in enumerate(cluster_ids) if ci == c]
+        if not idx:
+            continue
+
+        ts_in_cluster = [ts_names[i] for i in idx]
+
+        # ── Deduplicate to first ts-XXX per base Position ─────────────
+        seen_base = {}
+        for i in sorted(idx, key=lambda i: ts_names[i]):
+            blbl = base_labels[i]
+            if blbl not in seen_base:
+                seen_base[blbl] = i
+        rep_idx = list(seen_base.values())
+
+        rep_x   = [xs[i]           for i in rep_idx]
+        rep_y   = [ys[i]           for i in rep_idx]
+        rep_lbl = [ts_names[i]     for i in rep_idx]  # ts-XXX label
+
+        # Colour by mean n_tilts across all sub-TS of that base Position
+        base_to_nts = defaultdict(list)
+        for i in idx:
+            base_to_nts[base_labels[i]].append(n_tilts_list[i])
+        rep_nt = [float(np.mean(base_to_nts[base_labels[i]])) for i in rep_idx]
+
+        # ── Collect per-TS stats for histograms ───────────────────────
+        rots, alphas, n_tilts_c, n_flagged_c, resolutions = [], [], [], [], []
+        thicknesses = []
+        cluster_angpix = None
+        for ts in ts_in_cluster:
+            d = all_ts[ts]
+            frames = d['frames']
+            if not frames:
                 continue
+            rots.append(frames[0].get('rot'))
+            alphas.append(d.get('alpha_offset'))
+            n_tilts_c.append(len(frames))
+            n_flagged_c.append(sum(1 for f in frames if f.get('is_flagged', False)))
+            res_vals = [f['fit_spacing_A'] for f in frames
+                        if f.get('fit_spacing_A') is not None]
+            resolutions.append(float(np.median(res_vals)) if res_vals else None)
+            if d.get('thickness') is not None:
+                thicknesses.append(d['thickness'])
+            if cluster_angpix is None and d.get('angpix') is not None:
+                cluster_angpix = d['angpix']
 
-            lx   = [xs[i]            for i in idx]
-            ly   = [ys[i]            for i in idx]
-            lnt  = [n_tilts_list[i]  for i in idx]
-            llbl = [labels[i].replace('Position_', 'P') for i in idx]
+        # ── Figure: scatter (left, full height) + 2×3 histograms (right) ─
+        fig = plt.figure(figsize=(18, 9), constrained_layout=True)
+        gs  = fig.add_gridspec(2, 4, width_ratios=[2, 1, 1, 1])
+        ax_s  = fig.add_subplot(gs[:, 0])
+        ax_h  = [fig.add_subplot(gs[r, col]) for r in range(2) for col in range(1, 4)]
 
-            fig, ax = plt.subplots(figsize=(8, 7))
-            sc = ax.scatter(lx, ly, c=lnt, cmap='viridis',
-                            vmin=vmin, vmax=vmax,
-                            s=90, edgecolors='white', linewidths=0.6, zorder=3)
-            plt.colorbar(sc, ax=ax, label='# aligned tilts')
+        fig.suptitle(f'Lamella {c+1}  —  {len(ts_in_cluster)} tilt series',
+                     fontsize=13, fontweight='bold')
 
-            for px, py, plbl in zip(lx, ly, llbl):
-                ax.annotate(plbl, xy=(px, py), xytext=(5, 5),
-                            textcoords='offset points',
-                            fontsize=8, fontweight='bold', zorder=5)
+        # Scatter
+        sc = ax_s.scatter(rep_x, rep_y, c=rep_nt, cmap='viridis',
+                          vmin=vmin, vmax=vmax,
+                          s=100, edgecolors='white', linewidths=0.6, zorder=3)
+        plt.colorbar(sc, ax=ax_s, label='mean # aligned tilts')
+        for px, py, plbl in zip(rep_x, rep_y, rep_lbl):
+            ax_s.annotate(plbl, xy=(px, py), xytext=(5, 5),
+                          textcoords='offset points',
+                          fontsize=8, fontweight='bold', zorder=5)
+        ax_s.set_title('Lamella position on stage', fontsize=10)
+        ax_s.set_xlabel('Stage X (µm)')
+        ax_s.set_ylabel('Stage Y (µm)')
+        ax_s.set_aspect('equal', adjustable='datalim')
+        ax_s.grid(True, lw=0.4, alpha=0.4)
 
-            ax.set_title(f'Lamella {c+1}  ({len(idx)} tilt series)',
-                         fontsize=12, fontweight='bold')
-            ax.set_xlabel('Stage X (µm)')
-            ax.set_ylabel('Stage Y (µm)')
-            ax.set_aspect('equal', adjustable='datalim')
-            ax.grid(True, lw=0.4, alpha=0.4)
+        # Histograms
+        _hist_panel(ax_h[0], rots,        'ROT (°)',                    'mediumpurple', '.2f', '°')
+        _hist_panel(ax_h[1], alphas,       'AlphaOffset (°)',            'teal',         '.2f', '°')
+        _hist_panel(ax_h[2], thicknesses,  'AlignZ (px)', 'slateblue', '.0f', ' px')
+        if cluster_angpix is not None and thicknesses:
+            cur = ax_h[2].get_title()
+            ax_h[2].set_title(cur + f'\n(angpix = {cluster_angpix} Å/px)',
+                              fontsize=7, color='steelblue', fontweight='bold')
+        _hist_panel(ax_h[3], n_tilts_c,   '# aligned tilts',
+                    'darkorange', '.0f', '', show_suggested=False)
+        _hist_panel(ax_h[4], n_flagged_c, '# flagged frames',
+                    'tomato',     '.0f', '', show_suggested=False)
+        _hist_panel(ax_h[5], resolutions, 'Resolution — fit spacing (Å)',
+                    'goldenrod',  '.1f', ' Å', show_suggested=False)
 
-            fig.tight_layout()
-            lam_png = f'stage_positions_lamella_{c+1:02d}.png'
-            fig.savefig(out_dir / lam_png, dpi=130, bbox_inches='tight')
-            plt.close(fig)
-            print(f'  Lamella {c+1:2d}       : {out_dir / lam_png}')
-            output_entries.append((f'[Lamella {c+1}] Stage Positions', lam_png))
+        lam_png = f'stage_positions_lamella_{c+1:02d}.png'
+        fig.savefig(out_dir / lam_png, dpi=130, bbox_inches='tight')
+        plt.close(fig)
+        print(f'  Lamella {c+1:2d}       : {out_dir / lam_png}')
+        output_entries.append((f'[Lamella {c+1}] Stage Positions', lam_png))
 
-    return output_entries
+        # Accumulate per-lamella suggested values
+        def _safe_median(vals):
+            clean = [v for v in vals if v is not None]
+            return round(float(np.median(clean)), 2) if clean else None
+
+        align_z_px  = int(round(np.median([t for t in thicknesses if t is not None]))) \
+                      if any(t is not None for t in thicknesses) else None
+        align_z_nm  = round(align_z_px * cluster_angpix / 10, 1) \
+                      if (align_z_px is not None and cluster_angpix is not None) else None
+        lamella_stats[str(c + 1)] = {
+            'rot_deg':          _safe_median(rots),
+            'alpha_offset_deg': _safe_median(alphas),
+            'align_z_px':       align_z_px,
+            'align_z_nm':       align_z_nm,
+            'angpix':           cluster_angpix,
+            'n_ts':             len(ts_in_cluster),
+        }
+
+    return output_entries, lamella_stats
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1267,7 +1398,7 @@ def run(args):
         except Exception:
             pass
 
-    stage_entries = plot_stage_positions(
+    stage_entries, lamella_stats = plot_stage_positions(
         all_ts,
         out_dir    = out_dir,
         n_lamellae = args.n_lamellae,
@@ -1328,9 +1459,32 @@ def run(args):
     n_ts_bad  = sum(1 for e in ts_entries if e['n_bad'] > 0)
     n_ts_warn = sum(1 for d in all_ts.values() if d.get('warnings'))
 
-    # Compute recommended tilt axis = median ROT across all TS
-    rot_list = [d['frames'][0]['rot'] for d in all_ts.values() if d['frames']]
-    recommended_tilt_axis = round(float(np.median(rot_list)), 2) if rot_list else None
+    # ── Compute global suggested values ───────────────────────────────────────
+    all_rots        = [d['frames'][0]['rot']   for d in all_ts.values() if d['frames']]
+    all_alphas      = [d['alpha_offset']        for d in all_ts.values()
+                       if d.get('alpha_offset') is not None]
+    all_thicknesses = [d['thickness']           for d in all_ts.values()
+                       if d.get('thickness') is not None]
+    all_angpix_vals = [d['angpix']             for d in all_ts.values()
+                       if d.get('angpix') is not None]
+
+    from collections import Counter as _Counter
+    angpix_global = (float(_Counter(all_angpix_vals).most_common(1)[0][0])
+                     if all_angpix_vals else None)
+
+    def _gmed(vals):
+        return round(float(np.median(vals)), 2) if vals else None
+
+    global_align_z_px = int(round(np.median(all_thicknesses))) if all_thicknesses else None
+    global_suggested = {
+        'rot_deg':          _gmed(all_rots),
+        'alpha_offset_deg': _gmed(all_alphas),
+        'align_z_px':       global_align_z_px,
+        'align_z_nm':       (round(global_align_z_px * angpix_global / 10, 1)
+                             if (global_align_z_px and angpix_global) else None),
+        'angpix':           angpix_global,
+    }
+    recommended_tilt_axis = global_suggested['rot_deg']
 
     print()
     update_section(
@@ -1345,6 +1499,8 @@ def run(args):
             'n_ts_with_warnings':     n_ts_warn,
             'output_dir':             str(out_dir),
             'recommended_tilt_axis':  recommended_tilt_axis,
+            'global_suggested':       global_suggested,
+            'lamella_suggested':      lamella_stats,
         },
         backup_dir = out_dir,
     )
@@ -1358,6 +1514,14 @@ def run(args):
     if recommended_tilt_axis is not None:
         print(f'  Recommended tilt axis : {recommended_tilt_axis}°  '
               f'(median ROT, use as --tilt-axis for run002)')
+    if global_suggested.get('align_z_px') is not None:
+        apx_note = (f'  [{global_suggested["align_z_nm"]} nm at {global_suggested["angpix"]} Å/px]'
+                    if global_suggested.get('align_z_nm') else '')
+        print(f'  Recommended AlignZ    : {global_suggested["align_z_px"]} px'
+              f'{apx_note}  (use as --align-z for run002)')
+    if global_suggested.get('alpha_offset_deg') is not None:
+        print(f'  Median AlphaOffset    : {global_suggested["alpha_offset_deg"]}°  '
+              f'(informational; AreTomo3 estimates this automatically)')
     print(f'\nOutput')
     print(f'  Plots          : {out_dir}/<ts-name>.png')
     print(f'  Stage positions: {out_dir}/stage_positions*.png')
