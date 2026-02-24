@@ -501,9 +501,12 @@ def run(args):
 
     # ── Surface warnings/errors from log ──────────────────────────────────
     _WARN_KEYWORDS = ('warning', 'error', 'fail', 'abort', 'fatal', 'segfault')
+    # AreTomo3 reports alignment residuals as "Iteration  N  Error: X.XX" — not an error
+    _IGNORE_PATTERNS = ('iteration', )
     flagged = [
         l.rstrip() for l in log_lines
         if any(kw in l.lower() for kw in _WARN_KEYWORDS)
+        and not any(ig in l.lower() for ig in _IGNORE_PATTERNS)
     ]
     if flagged:
         print(f'\n{len(flagged)} line(s) with potential issues '
