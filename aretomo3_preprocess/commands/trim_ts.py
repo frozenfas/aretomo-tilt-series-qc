@@ -24,8 +24,25 @@ Requires:
     Source _Imod directories present in <input>/ts-xxx_Imod/
 """
 
+import csv
 import json
+import math
 from pathlib import Path
+
+
+def _calc_output_size(w, h, rot_deg):
+    """
+    Output image dimensions (pixels) needed to fully contain a W×H image
+    rotated in-plane by rot_deg degrees, without clipping.
+    Rounded up to the nearest even number for IMOD compatibility.
+    """
+    a  = math.radians(rot_deg)
+    ca, sa = abs(math.cos(a)), abs(math.sin(a))
+    out_x = math.ceil(w * ca + h * sa)
+    out_y = math.ceil(w * sa + h * ca)
+    out_x += out_x % 2   # round up to even
+    out_y += out_y % 2
+    return out_x, out_y
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -116,21 +133,29 @@ def write_order_list(path, sorted_secs, keep_set):
     Path(path).write_text('\n'.join(lines) + '\n')
 
 
-def write_newst(path, ts_name, xf_name, output_ali, bin_factor, keep_indices):
+def write_newst(path, ts_name, xf_name, output_ali, bin_factor, keep_indices,
+                out_x=None, out_y=None):
     """
     Write a newst.com that uses the trimmed xf file.
 
     SectionsToRead (0-indexed) tells newstack which sections to pull from the
-    full raw .mrc.  The trimmed xf has exactly one transform per kept section
-    in the same order, so the two are consistent.
+    full raw .mrc.  IMOD newstack uses section-number indexing for the xf
+    (verified experimentally), so the full unmodified xf is safe to use.
+
+    out_x / out_y: output image size in pixels (before binning).  When the xf
+    includes a large in-plane rotation, specifying a larger output size avoids
+    clipping the image content at the top/bottom.  Calculated from the ROT
+    angle by _calc_output_size() if not supplied.
     """
     sections_str = ','.join(str(i) for i in keep_indices)
+    size_line = f'OutputSizeXandY\t{out_x},{out_y}\n' if (out_x and out_y) else ''
     content = (
         f'$newstack -StandardInput\n'
         f'InputFile\t{ts_name}.mrc\n'
         f'OutputFile\t{output_ali}\n'
         f'TransformFile\t{xf_name}\n'
         f'SectionsToRead\t{sections_str}\n'
+        f'{size_line}'
         f'TaperAtFill     1,0\n'
         f'AdjustOrigin\n'
         f'OffsetsInXandY  0.0,0.0\n'
@@ -162,6 +187,18 @@ def add_parser(subparsers):
                    help='Overlap threshold used in the analyse step')
     p.add_argument('--bin',       '-b', type=int, default=8,
                    help='BinByFactor for newstack')
+    p.add_argument('--ratings',   '-R', default=None,
+                   help='Path to ts_ratings.csv exported from the HTML viewer.  '
+                        'When provided, only TS with rating >= --min-rating are processed.')
+    p.add_argument('--min-rating', type=int, default=1,
+                   help='Minimum star rating (1–5) required to process a TS.  '
+                        'Unrated TS are treated as 0 and skipped when this is >= 1.')
+    p.add_argument('--best-n', type=int, default=None,
+                   help='Keep only the N best-ranked tilt series (applied after '
+                        '--ratings filter).  Ranking metric set by --rank-by.')
+    p.add_argument('--rank-by', choices=['overlap', 'frames', 'both'], default='both',
+                   help='Metric for --best-n: "overlap" = mean %% overlap, '
+                        '"frames" = clean frame count, "both" = combined rank (default).')
     p.set_defaults(func=run)
     return p
 
@@ -178,6 +215,57 @@ def run(args):
 
     with open(json_path) as fh:
         all_parsed = json.load(fh)
+
+    # ── Ratings filter ────────────────────────────────────────────────────────
+    if args.ratings:
+        ratings_path = Path(args.ratings)
+        if not ratings_path.exists():
+            print(f'WARNING: --ratings {ratings_path} not found — processing all TS')
+        else:
+            ratings = {}
+            with open(ratings_path, newline='') as fh:
+                for row in csv.DictReader(fh):
+                    ratings[row['ts_name']] = int(row['rating'])
+            min_r     = args.min_rating
+            n_before  = len(all_parsed)
+            all_parsed = {k: v for k, v in all_parsed.items()
+                          if ratings.get(k, 0) >= min_r}
+            print(f'Rating filter (>= {min_r} ★): '
+                  f'{len(all_parsed)}/{n_before} TS kept')
+
+    # ── Best-N filter ─────────────────────────────────────────────────────────
+    if args.best_n is not None and args.best_n < len(all_parsed):
+        def _ts_score(ts_name):
+            frames   = all_parsed[ts_name].get('frames', [])
+            mean_ovl = (sum(f['overlap_pct'] for f in frames) / len(frames)
+                        if frames else 0.0)
+            n_clean  = sum(1 for f in frames if not f.get('is_flagged', False))
+            return mean_ovl, n_clean
+
+        ts_list   = list(all_parsed.keys())
+        scores    = {t: _ts_score(t) for t in ts_list}
+        by_ovl    = sorted(ts_list, key=lambda t: scores[t][0], reverse=True)
+        by_frames = sorted(ts_list, key=lambda t: scores[t][1], reverse=True)
+        rank_ovl    = {t: i for i, t in enumerate(by_ovl)}
+        rank_frames = {t: i for i, t in enumerate(by_frames)}
+
+        if args.rank_by == 'overlap':
+            final_rank = rank_ovl
+        elif args.rank_by == 'frames':
+            final_rank = rank_frames
+        else:  # both
+            final_rank = {t: (rank_ovl[t] + rank_frames[t]) / 2.0 for t in ts_list}
+
+        kept      = sorted(ts_list, key=lambda t: final_rank[t])[:args.best_n]
+        kept_set  = set(kept)
+        n_before  = len(all_parsed)
+        all_parsed = {k: v for k, v in all_parsed.items() if k in kept_set}
+
+        worst = kept[-1]
+        w_ovl, w_clean = scores[worst]
+        print(f'Best-N filter ({args.rank_by}, N={args.best_n}): '
+              f'{len(all_parsed)}/{n_before} TS kept')
+        print(f'  Worst kept — mean overlap: {w_ovl:.1f}%,  clean frames: {w_clean}')
 
     print(f'Trimming IMOD support files into : {out_dir}')
     print(f'Source _Imod directories         : {in_dir}')
@@ -223,6 +311,12 @@ def run(args):
 
         xtilt_lines = read_xtilt(xtilt_src) if xtilt_src.exists() else []
 
+        # Output size: expand to avoid clipping the in-plane rotation
+        rot = data['frames'][0]['rot'] if data.get('frames') else 0.0
+        W   = data.get('width',  0)
+        H   = data.get('height', 0)
+        out_x, out_y = _calc_output_size(W, H, rot) if (W and H and rot) else (None, None)
+
         ts_out = out_dir / f'{ts_name}_Imod'
         ts_out.mkdir(exist_ok=True)
 
@@ -251,6 +345,8 @@ def run(args):
             output_ali   = f'{ts_name}_nodark.ali',
             bin_factor   = args.bin,
             keep_indices = nodark_keep,
+            out_x        = out_x,
+            out_y        = out_y,
         )
 
         # Write clean variant
@@ -267,6 +363,8 @@ def run(args):
             output_ali   = f'{ts_name}_clean.ali',
             bin_factor   = args.bin,
             keep_indices = clean_keep,
+            out_x        = out_x,
+            out_y        = out_y,
         )
 
         n_total  = len(all_sec_idx)

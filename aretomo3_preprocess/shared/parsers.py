@@ -12,8 +12,10 @@ import numpy as np
 from pathlib import Path
 
 try:
+    import logging as _logging
     import mdocfile as _mdocfile
     _HAS_MDOCFILE = True
+    _logging.getLogger('mdocfile').setLevel(_logging.ERROR)
 except ImportError:
     _HAS_MDOCFILE = False
 
@@ -213,15 +215,23 @@ def parse_mdoc_file(filepath):
     """
     Parse a SerialEM .mdoc file using the mdocfile library.
 
-    Returns a dict keyed by ZValue (0-indexed acquisition order):
-        {'tilt_angle', 'sub_frame_path', 'mdoc_defocus', 'target_defocus',
-         'datetime', 'stage_x', 'stage_y', 'stage_z', 'exposure_time',
-         'num_subframes'}
-    Returns empty dict if mdocfile is not installed.
+    Returns a tuple (frames, pixel_spacing) where:
+      frames        — dict keyed by ZValue (0-indexed acquisition order):
+                        {'tilt_angle', 'sub_frame_path', 'mdoc_defocus',
+                         'target_defocus', 'datetime', 'stage_x/y/z',
+                         'exposure_time', 'num_subframes'}
+      pixel_spacing — float (Å/px) from the first row's PixelSpacing field,
+                        or None if not present.
+    Returns ({}, None) if mdocfile is not installed.
     """
     if not _HAS_MDOCFILE:
-        return {}
+        return {}, None
     df = _mdocfile.read(filepath)
+    # Extract global PixelSpacing from first row (same value repeated in all rows)
+    try:
+        pixel_spacing = _float_or_none(df['PixelSpacing'].iloc[0])
+    except Exception:
+        pixel_spacing = None
     result = {}
     for _, row in df.iterrows():
         z = _int_or_none(row.get('ZValue'))
@@ -241,4 +251,4 @@ def parse_mdoc_file(filepath):
             'exposure_time':  _float_or_none(row.get('ExposureTime')),
             'num_subframes':  _int_or_none(row.get('NumSubFrames')),
         }
-    return result
+    return result, pixel_spacing

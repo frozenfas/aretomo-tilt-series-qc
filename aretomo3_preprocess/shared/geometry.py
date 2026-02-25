@@ -3,22 +3,35 @@
 import numpy as np
 
 
-def compute_overlap(tx, ty, w, h):
+def compute_overlap(tx, ty, w, h, rot_deg=0.0):
     """
     % overlap of a frame shifted by (tx, ty) with the reference frame.
 
-    All frames within a tilt series share the same ROT value, so the
-    relative displacement between any frame and the reference is purely
-    translational in the aligned coordinate system.  The overlap of two
-    identically-rotated, same-sized rectangles separated by (tx, ty) is:
+    TX and TY in the AreTomo .aln file are in the *aligned* coordinate system
+    (i.e. after in-plane rotation by ROT degrees).  To compare the shift
+    against the original image dimensions (W × H), the displacement must be
+    rotated back to the local frame:
 
-        overlap_x = max(0, W - |tx|) / W
-        overlap_y = max(0, H - |ty|) / H
-        % overlap  = overlap_x * overlap_y * 100
+        local_x = cos(ROT)*TX + sin(ROT)*TY   → compare vs W
+        local_y = −sin(ROT)*TX + cos(ROT)*TY  → compare vs H
+
+    For ROT ≈ 85° (typical AreTomo tilt axis) the dominant terms are
+    local_x ≈ TY and local_y ≈ −TX, so naïvely comparing TX vs W and TY vs H
+    gives the wrong answer.
+
+    Parameters
+    ----------
+    tx, ty   : floats   in-plane translation in the *aligned* frame (px)
+    w, h     : floats   original image width and height (px)
+    rot_deg  : float    in-plane rotation angle ROT from the .aln file (degrees)
     """
+    if rot_deg != 0.0:
+        a  = np.radians(rot_deg)
+        ca, sa = float(np.cos(a)), float(np.sin(a))
+        tx, ty = ca * tx + sa * ty, -sa * tx + ca * ty
     ox = max(0.0, w - abs(tx)) / w
     oy = max(0.0, h - abs(ty)) / h
-    return ox * oy * 100.0
+    return float(ox * oy * 100.0)
 
 
 def rotated_rect_corners(cx, cy, w, h, angle_deg):

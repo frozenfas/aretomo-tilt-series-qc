@@ -169,7 +169,8 @@ class TestParseMdoc:
     @pytest.fixture(scope='class')
     def mdoc(self):
         pytest.importorskip('mdocfile')
-        return parse_mdoc_file(FRAMES / f'{TS}.mdoc')
+        frames, _ = parse_mdoc_file(FRAMES / f'{TS}.mdoc')
+        return frames
 
     def test_frame_count(self, mdoc):
         assert len(mdoc) == 29
@@ -200,9 +201,9 @@ class TestCrossValidation:
     @pytest.fixture(scope='class')
     def all_data(self):
         pytest.importorskip('mdocfile')
-        aln  = parse_aln_file(RUN001 / f'{TS}.aln')
-        tlt  = parse_tlt_file(RUN001 / f'{TS}_TLT.txt')
-        mdoc = parse_mdoc_file(FRAMES / f'{TS}.mdoc')
+        aln       = parse_aln_file(RUN001 / f'{TS}.aln')
+        tlt       = parse_tlt_file(RUN001 / f'{TS}_TLT.txt')
+        mdoc, _   = parse_mdoc_file(FRAMES / f'{TS}.mdoc')
         return aln, tlt, mdoc
 
     def test_sec_row_corrected_tilt_matches_aln(self, all_data):

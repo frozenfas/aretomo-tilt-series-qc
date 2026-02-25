@@ -4,6 +4,8 @@ a global summary PNG, an HTML viewer, alignment JSON, and flagged TSV.
 """
 
 import sys
+import csv
+import time
 import json
 import shutil
 import datetime
@@ -15,8 +17,12 @@ from matplotlib.lines import Line2D
 from pathlib import Path
 
 try:
+    import logging as _logging
     import mdocfile as _mdocfile
     _HAS_MDOCFILE = True
+    # mdocfile uses logging.warning() (not warnings.warn) for every key-name
+    # remap (e.g. FrameDosesAndNumber → FrameDosesAndNumbers); silence it.
+    _logging.getLogger('mdocfile').setLevel(_logging.ERROR)
 except ImportError:
     _HAS_MDOCFILE = False
 
@@ -37,7 +43,8 @@ from aretomo3_preprocess.shared.colours import (
 # Per-tilt-series plot  (2 × 2 panels)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def plot_tilt_series(ts_name, data, threshold, out_path, global_ranges):
+def plot_tilt_series(ts_name, data, threshold, out_path, global_ranges,
+                     prev_data=None, vol_path=None):
     frames      = data['frames']
     W, H        = data['width'], data['height']
     dark_frames = data['dark_frames']
@@ -60,12 +67,48 @@ def plot_tilt_series(ts_name, data, threshold, out_path, global_ranges):
     tilt_xlim    = (global_ranges['tilt_min'],    global_ranges['tilt_max'])
     defocus_ylim = (global_ranges['defocus_min'], global_ranges['defocus_max'])
 
-    fig = plt.figure(figsize=(20, 12))
-    gs  = fig.add_gridspec(2, 2, hspace=0.42, wspace=0.38)
-    ax1 = fig.add_subplot(gs[0, 0])
-    ax2 = fig.add_subplot(gs[0, 1])
-    ax3 = fig.add_subplot(gs[1, 0])
-    ax4 = fig.add_subplot(gs[1, 1])
+    # ── Try to load tomogram volume for projections ──────────────────────────
+    vol_projs = None   # None if unavailable, else dict with xy, xz, yz, vox, slab_a
+    if vol_path is not None and Path(vol_path).exists():
+        try:
+            import mrcfile as _mrcfile
+            with _mrcfile.open(vol_path, permissive=True) as mrc:
+                vol  = np.asarray(mrc.data, dtype=np.float32)
+                vox  = float(mrc.voxel_size.x) or 1.0
+            nz, ny, nx = vol.shape
+            hp = max(1, int(round(150.0 / vox)))          # half-slab in px
+            zc, yc, xc = nz // 2, ny // 2, nx // 2
+            zs, ze = max(0, zc - hp), min(nz, zc + hp)
+            ys, ye = max(0, yc - hp), min(ny, yc + hp)
+            xs, xe = max(0, xc - hp), min(nx, xc + hp)
+            vol_projs = {
+                'xy':    vol[zs:ze].mean(axis=0),              # (ny, nx)
+                'xz':    vol[:, ys:ye, :].mean(axis=1),        # (nz, nx)
+                'yz':    vol[:, :, xs:xe].mean(axis=2),        # (nz, ny)
+                'vox':   vox,
+                'slab_a': (ze - zs) * vox,
+            }
+        except Exception:
+            pass
+
+    # ── Create figure layout ─────────────────────────────────────────────────
+    if vol_projs is not None:
+        # Left: XY projection  |  Right: 2×2 analysis panels
+        fig   = plt.figure(figsize=(24, 12))
+        outer = fig.add_gridspec(1, 2, width_ratios=[1, 2.5], wspace=0.35)
+        right = outer[1].subgridspec(2, 2, hspace=0.42, wspace=0.38)
+        ax_xy = fig.add_subplot(outer[0])
+        ax1   = fig.add_subplot(right[0, 0])   # overlap
+        ax2   = fig.add_subplot(right[0, 1])   # frame position
+        ax4   = fig.add_subplot(right[1, 0])   # defocus      (lower-left)
+        ax3   = fig.add_subplot(right[1, 1])   # tilt coverage (lower-right)
+    else:
+        fig = plt.figure(figsize=(20, 12))
+        gs  = fig.add_gridspec(2, 2, hspace=0.42, wspace=0.38)
+        ax1 = fig.add_subplot(gs[0, 0])   # overlap
+        ax2 = fig.add_subplot(gs[0, 1])   # frame position
+        ax4 = fig.add_subplot(gs[1, 0])   # defocus      (lower-left)
+        ax3 = fig.add_subplot(gs[1, 1])   # tilt coverage (lower-right)
 
     fig.suptitle(
         f'{ts_name}   |   {len(frames)} aligned frames   |   '
@@ -75,6 +118,20 @@ def plot_tilt_series(ts_name, data, threshold, out_path, global_ranges):
     )
 
     # ── Panel 1 : Overlap % vs tilt angle ────────────────────────────────────
+    # Corrected tilt = nominal + alpha_offset.  When comparing across runs the
+    # alpha_offset may differ, so we re-express the previous tilts in the
+    # current run's alpha space:  prev_tilt - prev_alpha + current_alpha
+    curr_alpha = data.get('alpha_offset') or 0.0
+    if prev_data is not None:
+        prev_alpha  = prev_data.get('alpha_offset') or 0.0
+        prev_frames = prev_data.get('frames', [])
+        if prev_frames:
+            alpha_delta   = curr_alpha - prev_alpha
+            prev_tilts    = [f['tilt'] + alpha_delta for f in prev_frames]
+            prev_overlaps = [f['overlap_pct']        for f in prev_frames]
+            ax1.scatter(prev_tilts, prev_overlaps, color='#aaaaaa', s=25,
+                        marker='o', alpha=0.5, zorder=2, label='previous run')
+
     for i in range(len(frames)):
         mk = '*' if is_ref[i] else 'o'
         sz = 160 if is_ref[i] else 55
@@ -216,6 +273,21 @@ def plot_tilt_series(ts_name, data, threshold, out_path, global_ranges):
                  fontsize=10, color='grey')
         ax4.set_axis_off()
 
+    # ── XY tomogram projection (central 300 Å slab) ─────────────────────────
+    if vol_projs is not None:
+        img  = vol_projs['xy']
+        p1   = np.percentile(img, 1)
+        p99  = np.percentile(img, 99)
+        ax_xy.imshow(img, cmap='gray', vmin=p1, vmax=p99,
+                     aspect='equal', origin='lower', interpolation='nearest')
+        slab = vol_projs['slab_a']
+        vox  = vol_projs['vox']
+        ax_xy.set_title(f'XY projection\ncentral {slab:.0f} Å slab  ({vox:.1f} Å/px)',
+                        fontsize=9)
+        ax_xy.set_xlabel('X (px)', fontsize=8)
+        ax_xy.set_ylabel('Y (px)', fontsize=8)
+        ax_xy.tick_params(labelsize=7)
+
     fig.savefig(out_path, dpi=130, bbox_inches='tight')
     plt.close(fig)
 
@@ -320,7 +392,7 @@ def _validate_ts(data, tlt_data, mdoc_data, mrc_path=None):
 # Global summary plot
 # ─────────────────────────────────────────────────────────────────────────────
 
-def plot_global_summary(all_ts, threshold, global_ranges, out_path):
+def plot_global_summary(all_ts, threshold, global_ranges, out_path, prev_ts=None):
     """
     Produce a 3×3 grid of histograms summarising all tilt series.
 
@@ -454,12 +526,26 @@ def plot_global_summary(all_ts, threshold, global_ranges, out_path):
     # ── (1,1) Estimated resolution ────────────────────────────────────────
     ax = axes[1, 1]
     if spacing_all:
-        ax.hist(spacing_all, bins=50, color='darkorange',
-                edgecolor='white', linewidth=0.3)
-        _median_vline(ax, spacing_all)
+        # Clip x-axis to 2nd–98th percentile so extreme outliers don't
+        # compress the histogram into an uninformative spike.
+        p2  = float(np.percentile(spacing_all,  2))
+        p98 = float(np.percentile(spacing_all, 98))
+        clipped = [v for v in spacing_all if p2 <= v <= p98]
+        if prev_ts is not None:
+            prev_spacing = [f['fit_spacing_A'] for d in prev_ts.values()
+                            for f in d['frames'] if f.get('fit_spacing_A') is not None]
+            if prev_spacing:
+                prev_clipped = [v for v in prev_spacing if p2 <= v <= p98]
+                ax.hist(prev_clipped, bins=50, color='#aaaaaa', alpha=0.5,
+                        edgecolor='none', label='previous run', zorder=1)
+        ax.hist(clipped, bins=50, color='darkorange',
+                edgecolor='white', linewidth=0.3, label='current run', zorder=2)
+        _median_vline(ax, spacing_all)   # median of full data for accuracy
+        ax.set_xlim(p2, p98)
         ax.set_xlabel('Fit spacing (Å)')
         ax.set_ylabel('# Frames')
-        ax.set_title('Estimated Resolution (fit_spacing_A)')
+        ax.set_title('Estimated Resolution (fit_spacing_A)\n'
+                     '(x-axis clipped to 2nd–98th percentile)')
         ax.legend(fontsize=8)
     else:
         _no_data(ax)
@@ -467,8 +553,13 @@ def plot_global_summary(all_ts, threshold, global_ranges, out_path):
     # ── (1,2) % Overlap ───────────────────────────────────────────────────
     ax = axes[1, 2]
     if overlap_all:
+        if prev_ts is not None:
+            prev_ovl = [f['overlap_pct'] for d in prev_ts.values() for f in d['frames']]
+            if prev_ovl:
+                ax.hist(prev_ovl, bins=50, color='#aaaaaa', alpha=0.5,
+                        edgecolor='none', label='previous run', zorder=1)
         ax.hist(overlap_all, bins=50, color='mediumseagreen',
-                edgecolor='white', linewidth=0.3)
+                edgecolor='white', linewidth=0.3, label='current run', zorder=2)
         ax.axvline(threshold, color='red', lw=1.5, ls='-.',
                    label=f'threshold = {threshold:.0f}%')
         _median_vline(ax, overlap_all)
@@ -631,6 +722,14 @@ def make_html(ts_entries, out_path, threshold, gain_check=None):
     }
     """ if has_gain else ''
 
+    # ts_name for each entry (None for summary/lamella overview entries)
+    ts_names_for_rating = [
+        None if e['name'].startswith('[') else e['name']
+        for e in ts_entries
+    ]
+    ts_names_js = json.dumps(ts_names_for_rating)
+    session_key = Path(out_path).parent.name or 'aretomo'
+
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -718,6 +817,19 @@ def make_html(ts_entries, out_path, threshold, gain_check=None):
     #progress-bar {{
       height: 100%; background: #1565c0; border-radius: 2px; transition: width 0.2s;
     }}
+
+    /* ── Star ratings ── */
+    #rating-bar {{
+      display: flex; align-items: center; gap: 12px;
+      margin-bottom: 8px; width: 100%; max-width: 1380px;
+    }}
+    .star {{
+      font-size: 1.9em; cursor: pointer; color: #37474f;
+      transition: color 0.10s; user-select: none; line-height: 1;
+    }}
+    .star.on {{ color: #ffc107; }}
+    #rating-label {{ font-size: 0.84em; color: #78909c; min-width: 82px; }}
+    #btn-export {{ margin-left: auto; padding: 6px 18px; font-size: 0.84em; }}
   </style>
 </head>
 <body>
@@ -737,6 +849,18 @@ def make_html(ts_entries, out_path, threshold, gain_check=None):
 
     <div id="progress"><div id="progress-bar"></div></div>
     <div id="title"></div>
+
+    <div id="rating-bar">
+      <span id="stars">
+        <span class="star" data-val="1">&#9733;</span>
+        <span class="star" data-val="2">&#9733;</span>
+        <span class="star" data-val="3">&#9733;</span>
+        <span class="star" data-val="4">&#9733;</span>
+        <span class="star" data-val="5">&#9733;</span>
+      </span>
+      <span id="rating-label">&#8212;</span>
+      <button class="nav-btn" id="btn-export">Export ratings CSV</button>
+    </div>
 
     <div id="img-wrap">
       <img id="main-img" src="" alt="tilt series plot">
@@ -767,6 +891,7 @@ def make_html(ts_entries, out_path, threshold, gain_check=None):
       ctr.innerHTML    = (idx + 1) + '&nbsp;/&nbsp;' + n;
       sel.value        = idx;
       pbar.style.width = ((idx + 1) / n * 100).toFixed(1) + '%';
+      showRating(idx);
     }}
 
     document.getElementById('btn-prev').onclick = () => show(idx - 1);
@@ -775,6 +900,71 @@ def make_html(ts_entries, out_path, threshold, gain_check=None):
     document.addEventListener('keydown', e => {{
       if (e.key === 'ArrowLeft')  show(idx - 1);
       if (e.key === 'ArrowRight') show(idx + 1);
+    }});
+
+    // ── Star ratings ──────────────────────────────────────────────────────
+    const tsNames    = {ts_names_js};
+    const storageKey = 'aretomo_ratings_{session_key}';
+    let   ratings    = JSON.parse(localStorage.getItem(storageKey) || '{{}}');
+
+    const stars     = document.querySelectorAll('.star');
+    const ratingLbl = document.getElementById('rating-label');
+    const ratingBar = document.getElementById('rating-bar');
+    const origOpts  = Array.from(sel.options).map(o => o.textContent);
+    const starChars = ['', '\u2605', '\u2605\u2605', '\u2605\u2605\u2605',
+                       '\u2605\u2605\u2605\u2605', '\u2605\u2605\u2605\u2605\u2605'];
+
+    function showRating(i) {{
+      const name = tsNames[i];
+      const val  = name ? (ratings[name] || 0) : 0;
+      stars.forEach(s => s.classList.toggle('on', parseInt(s.dataset.val) <= val));
+      ratingBar.style.opacity = name ? '1' : '0.3';
+      ratingLbl.textContent   = !name ? '\u2014'
+                              : val === 0 ? 'Not rated' : starChars[val] + ' (' + val + '/5)';
+    }}
+
+    function saveRating(i, val) {{
+      const name = tsNames[i];
+      if (!name) return;
+      if (ratings[name] === val) {{ delete ratings[name]; }}
+      else {{ ratings[name] = val; }}
+      localStorage.setItem(storageKey, JSON.stringify(ratings));
+      showRating(i);
+      const r = ratings[name] || 0;
+      sel.options[i].textContent = origOpts[i] + (r > 0 ? '  ' + starChars[r] : '');
+    }}
+
+    stars.forEach(s => {{
+      s.addEventListener('click', () => saveRating(idx, parseInt(s.dataset.val)));
+      s.addEventListener('mouseover', () => {{
+        const v = parseInt(s.dataset.val);
+        stars.forEach(s2 => s2.style.color = parseInt(s2.dataset.val) <= v ? '#ffdc6e' : '');
+      }});
+      s.addEventListener('mouseout', () => {{
+        stars.forEach(s2 => {{ s2.style.color = ''; }});
+        showRating(idx);
+      }});
+    }});
+
+    // Restore ratings into dropdown on load
+    for (let i = 0; i < n; i++) {{
+      const name = tsNames[i];
+      if (name && ratings[name]) {{
+        sel.options[i].textContent = origOpts[i] + '  ' + starChars[ratings[name]];
+      }}
+    }}
+
+    document.getElementById('btn-export').addEventListener('click', () => {{
+      const rows = ['ts_name,rating'];
+      [...new Set(tsNames.filter(Boolean))].sort().forEach(name => {{
+        if (ratings[name]) rows.push(name + ',' + ratings[name]);
+      }});
+      if (rows.length === 1) {{ alert('No ratings to export yet.'); return; }}
+      const a   = document.createElement('a');
+      a.href    = URL.createObjectURL(
+        new Blob([rows.join('\\n') + '\\n'], {{type: 'text/csv'}}));
+      a.download = 'ts_ratings.csv';
+      a.click();
     }});
 
     show(0);
@@ -804,7 +994,8 @@ def _base_position_label(original_path_str):
     return stem
 
 
-def plot_stage_positions(all_ts, out_dir, n_lamellae=None, lookup=None):
+def plot_stage_positions(all_ts, out_dir, n_lamellae=None, lookup=None,
+                         cluster_ids_override=None):
     """
     Scatter plots of stage X-Y positions from mdoc data.
 
@@ -826,7 +1017,6 @@ def plot_stage_positions(all_ts, out_dir, n_lamellae=None, lookup=None):
     -------
     list of (viewer_label, png_filename) for insertion into the HTML viewer
     """
-    import csv
     from collections import defaultdict
     from matplotlib.patches import Patch
 
@@ -864,18 +1054,26 @@ def plot_stage_positions(all_ts, out_dir, n_lamellae=None, lookup=None):
     original_paths = {ts: lookup.get(f'{ts}.mdoc', '') for ts in ts_names} \
         if lookup else {}
 
-    # K-means clustering
+    # K-means clustering (or reuse previous assignments)
     cluster_ids = np.zeros(n, dtype=int)
     n_clusters  = 1
-    if n_lamellae is not None and n_lamellae > 1 and n >= n_lamellae:
+    if cluster_ids_override is not None:
+        cluster_ids = np.array(
+            [cluster_ids_override.get(ts, 0) for ts in ts_names], dtype=int)
+        n_clusters = int(cluster_ids.max()) + 1 if n > 0 else 1
+        print(f'  Reused previous lamellae assignments ({n_clusters} lamellae, {n} TS)')
+    elif n_lamellae is not None and n_lamellae > 1 and n >= n_lamellae:
         try:
             from sklearn.cluster import KMeans
             import warnings as _warnings
             km = KMeans(n_clusters=n_lamellae, random_state=42, n_init=10)
             with _warnings.catch_warnings():
                 _warnings.simplefilter('ignore')
+                t0 = time.time()
                 cluster_ids = km.fit_predict(X)
+                t1 = time.time()
             n_clusters = n_lamellae
+            print(f'  K-means ({n_lamellae} clusters, {n} TS): {t1 - t0:.1f} s')
         except ImportError:
             print('  WARNING: scikit-learn not installed — K-means clustering skipped')
 
@@ -1125,7 +1323,16 @@ def add_parser(subparsers):
                    help='Directory containing ts-xxx.mrc raw stacks for MRC '
                         'header sanity checks (nx/ny/nz vs .aln).  '
                         'Defaults to --input; per-TS check silently skipped '
-                        'if the .mrc file is not found.')
+                        'if the .mrc file is not found.  '
+                        'For --cmd 1 re-alignment runs, point to the previous '
+                        'run directory (e.g. run001).')
+    p.add_argument('--tltdir',    '-T', default=None,
+                   help='Directory containing ts-xxx_TLT.txt files.  '
+                        'Defaults to --input.  AreTomo3 only writes _TLT.txt '
+                        'when processing raw movies (--cmd 0); for re-alignment '
+                        'runs (--cmd 1) point to the prior run that has them '
+                        '(e.g. run001).  Without _TLT.txt, mdoc enrichment '
+                        '(stage positions, dose) is skipped.')
     p.add_argument('--gain-check-dir', '-g', default=None,
                    help='Output directory from a previous check-gain-transform '
                         'run (must contain aretomo3_project.json backup, '
@@ -1137,6 +1344,14 @@ def add_parser(subparsers):
                         'K-means clustering is applied to the stage X-Y '
                         'positions and lamella groups are colour-coded in the '
                         'stage position scatter plot (requires scikit-learn).')
+    p.add_argument('--reuse-lamellae', action='store_true',
+                   help='Reuse lamellae cluster assignments from a previous run '
+                        '(reads lamella_positions.csv from --output dir).  '
+                        'Skips K-means clustering.')
+    p.add_argument('--compare-previous', '-C', default=None,
+                   help='Output directory from a previous analyse run.  '
+                        'Previous run data is shown in grey in per-TS overlap '
+                        'plots and global summary histograms.')
     p.set_defaults(func=run)
     return p
 
@@ -1164,16 +1379,38 @@ def run(args):
         print(f'WARNING: --mrcdir {mrc_dir} not found — MRC checks skipped\n')
         mrc_dir = None
 
+    # TLT directory: explicit --tltdir, else same directory as the .aln files.
+    # AreTomo3 only writes _TLT.txt for --cmd 0 (raw movies); for re-alignment
+    # runs (--cmd 1) point to the prior run that has them.
+    tlt_dir = Path(args.tltdir) if args.tltdir else in_dir
+    if args.tltdir and not tlt_dir.exists():
+        print(f'WARNING: --tltdir {tlt_dir} not found — TLT enrichment skipped\n')
+        tlt_dir = in_dir   # fall back to in_dir (will silently miss)
+    elif not args.tltdir and not any(in_dir.glob('*_TLT.txt')):
+        print(f'WARNING: no _TLT.txt files found in {in_dir}\n'
+              f'         TLT enrichment (stage positions, dose, z_value) will be '
+              f'skipped.\n'
+              f'         If this is a re-alignment run (--cmd 1), use\n'
+              f'           --tltdir <prior-run-dir>\n'
+              f'         to read _TLT.txt files from the run that processed '
+              f'raw movies.\n')
+
     angpix_str = f'{args.angpix} Å/px' if args.angpix else 'from mdoc (or None)'
+    tlt_note   = f'  |  TLT dir = {tlt_dir}' if args.tltdir else ''
     print(f'Found {len(aln_files)} .aln files  |  threshold = {args.threshold}%  '
-          f'|  pixel size = {angpix_str}\n')
+          f'|  pixel size = {angpix_str}{tlt_note}\n')
 
     # ── Pass 1: parse all files, attach overlap + CTF + TLT + mdoc ───────────
     all_ts = {}
+    _t1_start = time.perf_counter()
+    _timing   = {'aln': 0.0, 'ctf': 0.0, 'tlt': 0.0, 'mdoc': 0.0, 'enrich': 0.0}
 
     for aln_path in aln_files:
         ts_name = aln_path.stem
+
+        _t = time.perf_counter()
         data    = parse_aln_file(aln_path)
+        _timing['aln'] += time.perf_counter() - _t
 
         if not data['frames'] or data['width'] is None:
             print(f'  WARNING: {ts_name} could not be parsed — skipping')
@@ -1181,29 +1418,33 @@ def run(args):
 
         W, H = data['width'], data['height']
 
+        _t = time.perf_counter()
         ctf_path = aln_path.parent / f'{ts_name}_CTF.txt'
         ctf_data = parse_ctf_file(ctf_path) if ctf_path.exists() else {}
+        _timing['ctf'] += time.perf_counter() - _t
 
-        tlt_path = aln_path.parent / f'{ts_name}_TLT.txt'
+        _t = time.perf_counter()
+        tlt_path = tlt_dir / f'{ts_name}_TLT.txt'
         tlt_data = parse_tlt_file(tlt_path) if tlt_path.exists() else {}
+        _timing['tlt'] += time.perf_counter() - _t
 
+        _t = time.perf_counter()
         mdoc_path = mdoc_dir / f'{ts_name}.mdoc'
-        mdoc_data = (parse_mdoc_file(mdoc_path)
-                     if _HAS_MDOCFILE and mdoc_path.exists() else {})
+        if _HAS_MDOCFILE and mdoc_path.exists():
+            mdoc_data, mdoc_angpix = parse_mdoc_file(mdoc_path)
+        else:
+            mdoc_data, mdoc_angpix = {}, None
+        _timing['mdoc'] += time.perf_counter() - _t
 
         # Resolve pixel size: CLI arg → mdoc PixelSpacing → None
-        angpix = args.angpix
-        if angpix is None and _HAS_MDOCFILE and mdoc_path.exists():
-            try:
-                _df = _mdocfile.read(mdoc_path)
-                angpix = _float_or_none(_df['PixelSpacing'].iloc[0])
-            except Exception:
-                angpix = None
+        angpix = args.angpix if args.angpix is not None else mdoc_angpix
         data['angpix'] = angpix
         if data['thickness'] is not None and angpix is not None:
             data['thickness_nm'] = round(data['thickness'] * angpix / 10.0, 2)
         else:
             data['thickness_nm'] = None
+
+        _t = time.perf_counter()
 
         # Cumulative dose (RELION prior-dose convention: first acquired = 0)
         cum_dose_by_acq = {}
@@ -1219,7 +1460,8 @@ def run(args):
                       'stage_z', 'exposure_time', 'num_subframes')
 
         for f in data['frames']:
-            f['overlap_pct']  = compute_overlap(f['tx'], f['ty'], W, H)
+            f['overlap_pct']  = compute_overlap(f['tx'], f['ty'], W, H,
+                                                   rot_deg=f['rot'])
             f['is_reference'] = (f['tx'] == 0.0 and f['ty'] == 0.0)
             f['is_flagged']   = (f['overlap_pct'] < args.threshold
                                  and not f['is_reference'])
@@ -1266,11 +1508,29 @@ def run(args):
                           'z_value', 'cumulative_dose_e_per_A2', *_MDOC_KEYS):
                     df.setdefault(k, None)
 
+        _timing['enrich'] += time.perf_counter() - _t
+
         # Sanity checks
         mrc_path = (mrc_dir / f'{ts_name}.mrc') if mrc_dir else None
         data['warnings'] = _validate_ts(data, tlt_data, mdoc_data, mrc_path)
 
         all_ts[ts_name] = data
+
+    # ── Pass 1 timing summary ─────────────────────────────────────────────────
+    _t1_total = time.perf_counter() - _t1_start
+    _t1_other = _t1_total - sum(_timing.values())
+    print(f'\nPass 1 complete  ({len(all_ts)} TS in {_t1_total:.1f}s)\n')
+    _steps = [('aln parse',  _timing['aln']),
+              ('ctf parse',  _timing['ctf']),
+              ('tlt parse',  _timing['tlt']),
+              ('mdoc parse', _timing['mdoc']),
+              ('enrichment', _timing['enrich']),
+              ('other',      _t1_other)]
+    for _label, _secs in _steps:
+        _pct  = 100 * _secs / _t1_total if _t1_total > 0 else 0
+        _bar  = '█' * int(_pct / 2.5)
+        print(f'  {_label:<12}  {_secs:6.2f}s  {_pct:5.1f}%  {_bar}')
+    print()
 
     # ── Compute global axis ranges ────────────────────────────────────────────
     all_tilts, all_defocus, all_spacing = [], [], []
@@ -1312,18 +1572,38 @@ def run(args):
     print(f'Global fit spacing  : {fit_spacing_min:.1f} → {fit_spacing_max:.1f} Å  '
           f'(5th–95th percentile)\n')
 
+    # ── Load previous run data for comparison ────────────────────────────────
+    prev_all_ts = {}
+    if args.compare_previous:
+        prev_json = Path(args.compare_previous) / 'alignment_data.json'
+        if prev_json.exists():
+            with open(prev_json) as fh:
+                prev_all_ts = json.load(fh)
+            print(f'Comparing with previous run: {prev_json}  ({len(prev_all_ts)} TS)\n')
+        else:
+            print(f'WARNING: --compare-previous: {prev_json} not found'
+                  f' — comparison skipped\n')
+
     # ── Pass 2: generate console output, JSON, TSV, plots ────────────────────
     sep           = '─' * 70
     all_parsed    = {}
     flagged_rows  = []
     ts_entries    = []
     total_flagged = 0
+    n_ts          = len(all_ts)
+    _bw           = 40   # progress bar width in characters
+    _t2_start     = time.perf_counter()
+    _t2_plot      = 0.0
 
-    for ts_name, data in all_ts.items():
+    for i_ts, (ts_name, data) in enumerate(all_ts.items(), 1):
         bad_frames    = [f for f in data['frames'] if f['is_flagged']]
         n_bad         = len(bad_frames)
         total_flagged += n_bad
 
+        filled = round(_bw * i_ts / n_ts)
+        w      = len(str(n_ts))
+        print(f'\n  [{"█" * filled}{"░" * (_bw - filled)}]'
+              f'  {i_ts:{w}d}/{n_ts}  ({100 * i_ts / n_ts:.1f}%)')
         status = '✗' if n_bad else '✓'
         print(sep)
         print(f'  {status}  {ts_name}   {n_bad} frame(s) below {args.threshold}%  '
@@ -1361,8 +1641,13 @@ def run(args):
         }
 
         png_name = f'{ts_name}.png'
+        vol_path = in_dir / f'{ts_name}_Vol.mrc'
+        _tp = time.perf_counter()
         plot_tilt_series(ts_name, data, args.threshold,
-                         str(out_dir / png_name), global_ranges)
+                         str(out_dir / png_name), global_ranges,
+                         prev_data=prev_all_ts.get(ts_name),
+                         vol_path=vol_path if vol_path.exists() else None)
+        _t2_plot += time.perf_counter() - _tp
 
         ts_entries.append({
             'name':     ts_name,
@@ -1375,9 +1660,12 @@ def run(args):
     print(sep)
 
     # ── Global summary plot ───────────────────────────────────────────────────
+    _tp = time.perf_counter()
     summary_png = 'global_summary.png'
     plot_global_summary(all_ts, args.threshold, global_ranges,
-                        str(out_dir / summary_png))
+                        str(out_dir / summary_png),
+                        prev_ts=prev_all_ts or None)
+    _t2_summary = time.perf_counter() - _tp
     ts_entries.insert(0, {
         'name':     '[Summary] Global Analysis',
         'png':      summary_png,
@@ -1398,12 +1686,29 @@ def run(args):
         except Exception:
             pass
 
+    cluster_ids_override = None
+    if args.reuse_lamellae:
+        csv_path = out_dir / 'lamella_positions.csv'
+        if csv_path.exists():
+            cluster_ids_override = {}
+            with open(csv_path, newline='') as fh:
+                for row in csv.DictReader(fh):
+                    cluster_ids_override[row['ts_name']] = int(row['lamella']) - 1
+            print(f'  Reusing {len(cluster_ids_override)} lamellae assignments'
+                  f' from {csv_path}')
+        else:
+            print(f'  WARNING: --reuse-lamellae set but {csv_path} not found'
+                  f' — running K-means instead')
+
+    _tp = time.perf_counter()
     stage_entries, lamella_stats = plot_stage_positions(
         all_ts,
-        out_dir    = out_dir,
-        n_lamellae = args.n_lamellae,
-        lookup     = stage_lookup or None,
+        out_dir              = out_dir,
+        n_lamellae           = args.n_lamellae,
+        lookup               = stage_lookup or None,
+        cluster_ids_override = cluster_ids_override,
     )
+    _t2_stage = time.perf_counter() - _tp
     total_frames = sum(len(d['frames']) for d in all_ts.values())
     for i, (entry_name, entry_png) in enumerate(stage_entries):
         ts_entries.insert(1 + i, {
@@ -1415,9 +1720,11 @@ def run(args):
         })
 
     # JSON
+    _tp = time.perf_counter()
     json_path = out_dir / 'alignment_data.json'
     with open(json_path, 'w') as fh:
         json.dump(all_parsed, fh, indent=2)
+    _t2_json = time.perf_counter() - _tp
 
     # Flagged TSV
     tsv_path = out_dir / 'flagged_frames.tsv'
@@ -1452,8 +1759,10 @@ def run(args):
             print(f'Gain check results loaded from {gc_dir}\n')
 
     # HTML
+    _tp = time.perf_counter()
     html_path = out_dir / 'index.html'
     make_html(ts_entries, str(html_path), args.threshold, gain_check)
+    _t2_html = time.perf_counter() - _tp
 
     # ── Project JSON ──────────────────────────────────────────────────────────
     n_ts_bad  = sum(1 for e in ts_entries if e['n_bad'] > 0)
@@ -1528,3 +1837,20 @@ def run(args):
     print(f'  HTML viewer    : {html_path}')
     print(f'  Alignment JSON : {json_path}')
     print(f'  Flagged TSV    : {tsv_path}')
+
+    # ── Timing summary ────────────────────────────────────────────────────────
+    _t2_total  = time.perf_counter() - _t2_start
+    _t2_other  = _t2_total - _t2_plot - _t2_summary - _t2_stage - _t2_json - _t2_html
+    _t_overall = _t1_total + _t2_total
+    print(f'\nTiming summary  (total {_t_overall:.1f}s)')
+    print(f'  {"Pass 1 — parsing":<28}  {_t1_total:6.1f}s')
+    for _label, _secs in _steps:
+        print(f'    {_label:<26}  {_secs:6.2f}s  ({100*_secs/_t1_total:.0f}%)')
+    print(f'  {"Pass 2 — output":<28}  {_t2_total:6.1f}s')
+    for _label, _secs in [('per-TS plots',    _t2_plot),
+                           ('global summary',  _t2_summary),
+                           ('stage positions', _t2_stage),
+                           ('HTML',            _t2_html),
+                           ('JSON write',      _t2_json),
+                           ('other',           _t2_other)]:
+        print(f'    {_label:<26}  {_secs:6.2f}s  ({100*_secs/_t2_total:.0f}%)')
