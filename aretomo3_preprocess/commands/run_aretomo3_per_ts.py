@@ -198,20 +198,23 @@ def _load_lamella_params(analysis_dir: Path) -> tuple[dict, dict]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _build_per_ts_cmd(args, mrc_path: Path, out_mrc: Path,
-                      rot: float, align_z: int) -> list:
+                      rot: float, align_z: int,
+                      mdoc_dir: Path = None) -> list:
     """Build the AreTomo3 command for a single tilt series.
 
     All file paths are resolved to absolute so AreTomo3 can find them even if
     it changes its working directory internally.
 
-    -Mdoc is not passed: for cmd=0 dose comes from -FmDose, and for cmd=1
-    the tilt angles are already embedded in the stack.
+    -Mdoc is passed only for cmd=0 (motion correction needs mdoc metadata).
+    For cmd=1 the tilt angles are already embedded in the aligned stack.
     """
     vol_z = args.vol_z if args.vol_z is not None else align_z
 
     cmd = [args.aretomo3_bin]
     cmd += ['-InMrc',  str(mrc_path.resolve())]
     cmd += ['-OutMrc', str(out_mrc.resolve())]
+    if args.cmd == 0 and mdoc_dir is not None:
+        cmd += ['-Mdoc', str(mdoc_dir)]
     cmd += ['-Cmd',      _num(args.cmd)]
     cmd += ['-TiltAxis', _num(rot), _num(args.tilt_axis_search)]
     cmd += ['-AlignZ',   _num(align_z)]
@@ -230,6 +233,7 @@ def _build_per_ts_cmd(args, mrc_path: Path, out_mrc: Path,
     cmd += ['-CorrCTF',  _num(args.corr_ctf)]
     cmd += ['-OutXF',    _num(args.out_xf)]
     cmd += ['-OutImod',  _num(args.out_imod)]
+    cmd += ['-SplitSum', _num(args.split_sum)]
     return cmd
 
 
@@ -262,6 +266,9 @@ def add_parser(subparsers):
                      help='Pixel size in Å/px (-PixSize)')
 
     inp = p.add_argument_group('input')
+    inp.add_argument('--mdocdir', default='frames',
+                     help='Directory containing ts-xxx.mdoc files; '
+                          'passed as -Mdoc for --cmd 0 only (default: frames)')
     inp.add_argument('--in-skips', nargs='+',
                      default=['_Vol', '_CTF', '_EVN', '_ODD'],
                      metavar='PATTERN',
@@ -306,6 +313,8 @@ def add_parser(subparsers):
                      help='Write IMOD XF transform files (-OutXF)')
     ali.add_argument('--out-imod', type=int,   default=1,
                      help='Write IMOD support files for RELION (-OutImod)')
+    ali.add_argument('--split-sum', type=int, default=0,
+                     help='Output EVN/ODD frame sums: 0=disabled 1=enabled (-SplitSum)')
 
     ctl = p.add_argument_group('run control')
     ctl.add_argument('--aretomo3', dest='aretomo3_bin', default='AreTomo3',
@@ -402,6 +411,12 @@ def run(args):
         print(sep_hdr)
         print()
 
+    # Resolve mdoc directory (used by cmd=0 only)
+    mdoc_dir = Path(args.mdocdir).resolve() if args.cmd == 0 else None
+    if mdoc_dir is not None and not mdoc_dir.is_dir():
+        print(f'Warning: --mdocdir {mdoc_dir} not found — -Mdoc will be omitted')
+        mdoc_dir = None
+
     if not args.dry_run:
         if shutil.which(args.aretomo3_bin) is None \
                 and not Path(args.aretomo3_bin).is_file():
@@ -411,6 +426,17 @@ def run(args):
 
     mode = 'DRY RUN' if args.dry_run else 'RUN'
     print(f'Processing {len(mrc_files)} stacks  ({mode}, output → {out_dir})\n')
+
+    if args.dry_run:
+        print('── Resolved arguments ──────────────────────────────────────────────')
+        skip_keys = {'func'}
+        for k, v in sorted(vars(args).items()):
+            if k in skip_keys:
+                continue
+            print(f'  {k:<22} {v}')
+        if mdoc_dir is not None:
+            print(f'  {"mdocdir (resolved)":<22} {mdoc_dir}')
+        print()
 
     sep = '─' * 70
     n_run = n_skip = n_fail = 0
@@ -449,7 +475,7 @@ def run(args):
             n_skip += 1
             continue
 
-        cmd = _build_per_ts_cmd(args, mrc_path, out_mrc, rot, align_z)
+        cmd = _build_per_ts_cmd(args, mrc_path, out_mrc, rot, align_z, mdoc_dir)
 
         print(sep)
         print(f'  {ts_name}  [lamella {lam_id}  TiltAxis={rot}°  AlignZ={align_z} px]')
