@@ -1347,9 +1347,9 @@ def add_parser(subparsers):
                         'positions and lamella groups are colour-coded in the '
                         'stage position scatter plot (requires scikit-learn).')
     p.add_argument('--reuse-lamellae', action='store_true',
-                   help='Reuse lamellae cluster assignments from a previous run '
-                        '(reads lamella_positions.csv from --output dir).  '
-                        'Skips K-means clustering.')
+                   help='Deprecated — lamella assignments are now reused automatically '
+                        'whenever lamella_positions.csv exists in --output.  '
+                        'Flag is kept for backward compatibility.')
     p.add_argument('--compare-previous', '-C', default=None,
                    help='Output directory from a previous analyse run.  '
                         'Previous run data is shown in grey in per-TS overlap '
@@ -1693,19 +1693,26 @@ def run(args):
         except Exception:
             pass
 
+    # Lamella assignments are locked once the CSV exists — reuse automatically
+    # so that downstream commands (run-aretomo3-per-ts etc.) see stable numbering.
     cluster_ids_override = None
-    if args.reuse_lamellae:
-        csv_path = out_dir / 'lamella_positions.csv'
-        if csv_path.exists():
-            cluster_ids_override = {}
-            with open(csv_path, newline='') as fh:
-                for row in csv.DictReader(fh):
-                    cluster_ids_override[row['ts_name']] = int(row['lamella']) - 1
-            print(f'  Reusing {len(cluster_ids_override)} lamellae assignments'
-                  f' from {csv_path}')
-        else:
-            print(f'  WARNING: --reuse-lamellae set but {csv_path} not found'
-                  f' — running K-means instead')
+    csv_path = out_dir / 'lamella_positions.csv'
+    if csv_path.exists():
+        cluster_ids_override = {}
+        with open(csv_path, newline='') as fh:
+            for row in csv.DictReader(fh):
+                cluster_ids_override[row['ts_name']] = int(row['lamella']) - 1
+        print(f'  Lamella assignments locked — reusing {csv_path}'
+              f'  ({len(cluster_ids_override)} TS)')
+        new_ts = [ts for ts in all_ts if ts not in cluster_ids_override]
+        if new_ts:
+            print(f'  WARNING: {len(new_ts)} TS not in saved lamella CSV'
+                  f' (assigned to lamella 1 as fallback):')
+            for ts in sorted(new_ts):
+                print(f'    {ts}')
+    elif args.reuse_lamellae:
+        print(f'  WARNING: --reuse-lamellae set but {csv_path} not found'
+              f' — running K-means instead')
 
     _tp = time.perf_counter()
     stage_entries, lamella_stats = plot_stage_positions(
