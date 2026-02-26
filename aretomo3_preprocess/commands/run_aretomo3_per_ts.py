@@ -19,7 +19,6 @@ Typical usage
         --mrcdir /path/to/relion/stacks \\
         --output run002 \\
         --analysis run001_analysis \\
-        --mdocdir frames \\
         --gpu 2 3 \\
         --apix 1.63 \\
         --dry-run
@@ -198,20 +197,21 @@ def _load_lamella_params(analysis_dir: Path) -> tuple[dict, dict]:
 # Per-TS command builder
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _build_per_ts_cmd(args, mrc_path: Path, out_mrc: Path, mdoc_path: Path,
+def _build_per_ts_cmd(args, mrc_path: Path, out_mrc: Path,
                       rot: float, align_z: int) -> list:
     """Build the AreTomo3 command for a single tilt series.
 
     All file paths are resolved to absolute so AreTomo3 can find them even if
     it changes its working directory internally.
+
+    -Mdoc is not passed: for cmd=0 dose comes from -FmDose, and for cmd=1
+    the tilt angles are already embedded in the stack.
     """
     vol_z = args.vol_z if args.vol_z is not None else align_z
 
     cmd = [args.aretomo3_bin]
     cmd += ['-InMrc',  str(mrc_path.resolve())]
     cmd += ['-OutMrc', str(out_mrc.resolve())]
-    if mdoc_path.exists():
-        cmd += ['-Mdoc', str(mdoc_path.resolve())]
     cmd += ['-Cmd',      _num(args.cmd)]
     cmd += ['-TiltAxis', _num(rot), _num(args.tilt_axis_search)]
     cmd += ['-AlignZ',   _num(align_z)]
@@ -262,8 +262,6 @@ def add_parser(subparsers):
                      help='Pixel size in Å/px (-PixSize)')
 
     inp = p.add_argument_group('input')
-    inp.add_argument('--mdocdir', default='frames',
-                     help='Directory containing ts-xxx.mdoc files (-Mdoc)')
     inp.add_argument('--in-skips', nargs='+',
                      default=['_Vol', '_CTF', '_EVN', '_ODD'],
                      metavar='PATTERN',
@@ -328,7 +326,6 @@ def add_parser(subparsers):
 def run(args):
     out_dir  = Path(args.output)
     ana_dir  = Path(args.analysis)
-    mdoc_dir = Path(args.mdocdir)
 
     if not ana_dir.is_dir():
         print(f'Error: --analysis {ana_dir} not found')
@@ -421,10 +418,9 @@ def run(args):
     cmd0_successes = [] # output mrc paths for successful cmd=0 runs
 
     for mrc_path in mrc_files:
-        ts_name   = mrc_path.stem
-        out_mrc   = out_dir  / f'{ts_name}.mrc'
-        out_aln   = out_dir  / f'{ts_name}.aln'
-        mdoc_path = mdoc_dir / f'{ts_name}.mdoc'
+        ts_name = mrc_path.stem
+        out_mrc = out_dir / f'{ts_name}.mrc'
+        out_aln = out_dir / f'{ts_name}.aln'
 
         # Skip if already done
         if out_aln.exists() and not args.overwrite:
@@ -453,7 +449,7 @@ def run(args):
             n_skip += 1
             continue
 
-        cmd = _build_per_ts_cmd(args, mrc_path, out_mrc, mdoc_path, rot, align_z)
+        cmd = _build_per_ts_cmd(args, mrc_path, out_mrc, rot, align_z)
 
         print(sep)
         print(f'  {ts_name}  [lamella {lam_id}  TiltAxis={rot}°  AlignZ={align_z} px]')
