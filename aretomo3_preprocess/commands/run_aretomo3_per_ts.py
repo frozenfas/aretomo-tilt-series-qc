@@ -279,6 +279,10 @@ def add_parser(subparsers):
     inp.add_argument('--mdocdir', default='frames',
                      help='Directory containing ts-xxx.mdoc files; '
                           'passed as -Mdoc for --cmd 0 only (default: frames)')
+    inp.add_argument('--aln-dir', default=None,
+                     help='Directory containing .aln files to copy into --output '
+                          'before running; required when --cmd 2 (reconstruction '
+                          'only) and --output is a fresh directory')
     inp.add_argument('--in-skips', nargs='+',
                      default=['_Vol', '_CTF', '_EVN', '_ODD'],
                      metavar='PATTERN',
@@ -434,6 +438,27 @@ def run(args):
             sys.exit(1)
         out_dir.mkdir(parents=True, exist_ok=True)
 
+        # For cmd=2 (recon only), copy .aln files into out_dir so AreTomo3 finds them
+        if args.cmd == 2:
+            if args.aln_dir is None:
+                print('Error: --cmd 2 requires --aln-dir pointing to a directory '
+                      'with .aln files from a previous alignment run')
+                sys.exit(1)
+            aln_source = Path(args.aln_dir)
+            if not aln_source.is_dir():
+                print(f'Error: --aln-dir {aln_source} not found')
+                sys.exit(1)
+            aln_files = sorted(aln_source.glob('*.aln'))
+            if not aln_files:
+                print(f'Warning: no .aln files found in {aln_source}')
+            else:
+                print(f'Copying {len(aln_files)} .aln files: {aln_source} → {out_dir}')
+                for aln in aln_files:
+                    dst = out_dir / aln.name
+                    if not dst.exists() or args.overwrite:
+                        shutil.copy2(aln, dst)
+                print()
+
     mode = 'DRY RUN' if args.dry_run else 'RUN'
     print(f'Processing {len(mrc_files)} stacks  ({mode}, output → {out_dir})\n')
 
@@ -466,8 +491,15 @@ def run(args):
         out_aln = out_dir / f'{ts_name}.aln'
 
         # Skip if already done
-        if out_aln.exists() and not args.overwrite:
-            _pwrite(f'  SKIP  {ts_name}  (.aln exists — use --overwrite to re-run)')
+        # cmd=2 produces volumes but not a new .aln, so check output .mrc instead
+        if args.cmd == 2:
+            already_done = out_mrc.exists()
+            skip_hint = 'output .mrc exists'
+        else:
+            already_done = out_aln.exists()
+            skip_hint = '.aln exists'
+        if already_done and not args.overwrite:
+            _pwrite(f'  SKIP  {ts_name}  ({skip_hint} — use --overwrite to re-run)')
             n_skip += 1
             continue
 
