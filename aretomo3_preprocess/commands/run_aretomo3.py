@@ -366,6 +366,10 @@ def add_parser(subparsers):
     inp.add_argument('--in-skips', nargs='*', default=None, metavar='PATTERN',
                      help='Filename patterns to exclude (-InSkips); '
                           'flag omitted if not given')
+    inp.add_argument('--aln-dir', default=None,
+                     help='Directory containing .aln files to copy into --output '
+                          'before running; use with --cmd 2 (reconstruction only) '
+                          'to reuse alignment from a previous run')
     inp.add_argument('--serial', type=int, default=1,
                      help='Seconds to wait for next series; 1=offline batch (-Serial)')
 
@@ -492,6 +496,24 @@ def run(args):
 
     # ── Run AreTomo3 with live streaming + log capture ─────────────────────
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # For cmd=2 (recon only), copy .aln files into out_dir so AreTomo3 finds them
+    if args.aln_dir is not None:
+        aln_source = Path(args.aln_dir)
+        if not aln_source.is_dir():
+            print(f'ERROR: --aln-dir {aln_source} not found')
+            sys.exit(1)
+        aln_files = sorted(aln_source.glob('*.aln'))
+        if not aln_files:
+            print(f'Warning: no .aln files found in {aln_source}')
+        else:
+            print(f'Copying {len(aln_files)} .aln files: {aln_source} → {out_dir}')
+            for aln in aln_files:
+                dst = out_dir / aln.name
+                if not dst.exists():
+                    shutil.copy2(aln, dst)
+            print()
+
     log_path = out_dir / 'run_aretomo3.log'
 
     print(f'Output directory : {out_dir}')
