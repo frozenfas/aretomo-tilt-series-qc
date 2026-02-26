@@ -48,6 +48,7 @@ A second run will not overwrite an existing .bak (safety).
 import re
 import sys
 import shutil
+import datetime
 import argparse
 from pathlib import Path
 
@@ -673,6 +674,41 @@ def run(args):
                 print('  where <dir> contains a .txt file per mdoc listing the correct')
                 print('  fraction filenames (one per line).')
     print()
+
+    # ── Save mdoc metadata to project.json when all files pass ────────────────
+    # Uses update_section (not _once) so re-running after --fix-dose or
+    # --fix-subframes refreshes the cached data with corrected content.
+    if n_fail == 0:
+        _save_mdoc_to_project(paths)
+
+
+def _save_mdoc_to_project(paths):
+    """Parse all mdoc files and save metadata to project.json."""
+    try:
+        from aretomo3_preprocess.shared.parsers import parse_mdoc_file
+        from aretomo3_preprocess.shared.project_json import update_section
+    except ImportError:
+        return
+
+    per_ts = {}
+    for path in paths:
+        p = Path(path)
+        try:
+            mdoc_data, angpix = parse_mdoc_file(p)
+        except Exception:
+            continue
+        if mdoc_data:
+            per_ts[p.stem] = {
+                'angpix':  angpix,
+                'frames':  {str(k): v for k, v in mdoc_data.items()},
+            }
+
+    if per_ts:
+        update_section('mdoc_data', {
+            'timestamp': datetime.datetime.now().isoformat(timespec='seconds'),
+            'n_ts':      len(per_ts),
+            'per_ts':    per_ts,
+        })
 
 
 def _failure_message(failure, r):

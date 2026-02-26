@@ -34,7 +34,7 @@ except ImportError:
 
 from aretomo3_preprocess.shared.project_json import (
     load as _load_project,
-    update_section, update_section_once, args_to_dict,
+    update_section, args_to_dict,
 )
 from aretomo3_preprocess.shared.parsers import (
     parse_aln_file, parse_ctf_file, parse_tlt_file, parse_mdoc_file,
@@ -1408,6 +1408,12 @@ def run(args):
     print(f'Found {len(aln_files)} .aln files  |  threshold = {args.threshold}%  '
           f'|  pixel size = {angpix_str}{tlt_note}\n')
 
+    # ── Load project.json once — used for mdoc cache and lamella assignments ──
+    _proj        = _load_project()
+    _cached_mdoc = _proj.get('mdoc_data', {}).get('per_ts', {})
+    _n_mdoc_cached = 0
+    _n_mdoc_file   = 0
+
     # ── Pass 1: parse all files, attach overlap + CTF + TLT + mdoc ───────────
     all_ts = {}
     _t1_start = time.perf_counter()
@@ -1438,14 +1444,20 @@ def run(args):
         _timing['tlt'] += time.perf_counter() - _t
 
         _t = time.perf_counter()
-        mdoc_path = mdoc_dir / f'{ts_name}.mdoc'
-        if _HAS_MDOCFILE and mdoc_path.exists():
-            mdoc_data, mdoc_angpix = parse_mdoc_file(mdoc_path)
+        if ts_name in _cached_mdoc:
+            # Use metadata cached in project.json by validate-mdoc
+            _cm        = _cached_mdoc[ts_name]
+            mdoc_data  = {int(k): v for k, v in _cm.get('frames', {}).items()}
+            mdoc_angpix = _cm.get('angpix')
+            _n_mdoc_cached += 1
         else:
-            mdoc_data, mdoc_angpix = {}, None
-        # Stash raw mdoc dict for saving to project.json after Pass 1
-        data['_mdoc_raw']    = mdoc_data
-        data['_mdoc_angpix'] = mdoc_angpix
+            # Fallback: parse file directly (no project.json cache yet)
+            mdoc_path = mdoc_dir / f'{ts_name}.mdoc'
+            if _HAS_MDOCFILE and mdoc_path.exists():
+                mdoc_data, mdoc_angpix = parse_mdoc_file(mdoc_path)
+            else:
+                mdoc_data, mdoc_angpix = {}, None
+            _n_mdoc_file += 1
         _timing['mdoc'] += time.perf_counter() - _t
 
         # Resolve pixel size: CLI arg → mdoc PixelSpacing → None
@@ -1545,28 +1557,12 @@ def run(args):
         _pct  = 100 * _secs / _t1_total if _t1_total > 0 else 0
         _bar  = '█' * int(_pct / 2.5)
         print(f'  {_label:<12}  {_secs:6.2f}s  {_pct:5.1f}%  {_bar}')
+    if _n_mdoc_cached:
+        print(f'  mdoc: {_n_mdoc_cached} TS from project.json cache'
+              + (f', {_n_mdoc_file} from file' if _n_mdoc_file else ''))
+    if _n_mdoc_file and not _n_mdoc_cached:
+        print(f'  NOTE: mdoc data not in project.json — run validate-mdoc to cache it')
     print()
-
-    # ── Save mdoc data to project.json (invariant — written once) ─────────────
-    _mdoc_to_save = {
-        ts: {'angpix': d.pop('_mdoc_angpix', None),
-             'frames': {str(k): v for k, v in d.pop('_mdoc_raw', {}).items()}}
-        for ts, d in all_ts.items()
-        if d.get('_mdoc_raw')
-    }
-    # pop keys even for TS with no mdoc data
-    for _d in all_ts.values():
-        _d.pop('_mdoc_raw', None)
-        _d.pop('_mdoc_angpix', None)
-    if _mdoc_to_save:
-        update_section_once('mdoc_data', {
-            'timestamp': datetime.datetime.now().isoformat(timespec='seconds'),
-            'n_ts':      len(_mdoc_to_save),
-            'per_ts':    _mdoc_to_save,
-        })
-
-    # Load project.json once for downstream invariant lookups (lamella, etc.)
-    _proj = _load_project()
 
     # ── Compute global axis ranges ────────────────────────────────────────────
     all_tilts, all_defocus, all_spacing = [], [], []
@@ -1709,39 +1705,19 @@ def run(args):
     })
 
     # ── Stage positions scatter plot ──────────────────────────────────────────
-    # Load ts-name → original-path lookup from project JSON if available
-    stage_lookup = {}
-    proj_json = Path('aretomo3_project.json')
-    if proj_json.exists():
-        try:
-            with open(proj_json) as fh:
-                proj = json.load(fh)
-            stage_lookup = proj.get('rename_ts', {}).get('lookup', {})
-        except Exception:
-            pass
+    # ts-name → original-path lookup for stage position labels (from rename-ts)
+    stage_lookup = _proj.get('rename_ts', {}).get('lookup', {})
 
-    # Lamella assignments are locked once established — reuse automatically.
-    # Priority: project.json (primary) → lamella_positions.csv (backward compat)
+    # Lamella assignments locked in project.json — reuse automatically.
+    # First run: no saved assignments → K-means (requires --n-lamellae).
     cluster_ids_override = None
-    csv_path = out_dir / 'lamella_positions.csv'
-    _saved_positions = _proj.get('lamella_assignments', {}).get('positions', {})
+    csv_path             = out_dir / 'lamella_positions.csv'
+    _saved_positions     = _proj.get('lamella_assignments', {}).get('positions', {})
 
     if _saved_positions:
-        # Primary source — project.json
         cluster_ids_override = {ts: pos - 1 for ts, pos in _saved_positions.items()}
         print(f'  Lamella assignments locked — from project.json'
               f'  ({len(cluster_ids_override)} TS)')
-    elif csv_path.exists():
-        # Backward compat — CSV from a run before project.json tracking was added
-        cluster_ids_override = {}
-        with open(csv_path, newline='') as fh:
-            for row in csv.DictReader(fh):
-                cluster_ids_override[row['ts_name']] = int(row['lamella']) - 1
-        print(f'  Lamella assignments reused from CSV: {csv_path}'
-              f'  ({len(cluster_ids_override)} TS)')
-    elif args.reuse_lamellae:
-        print(f'  WARNING: --reuse-lamellae set but no saved assignments found'
-              f' — running K-means instead')
 
     if cluster_ids_override is not None:
         new_ts = [ts for ts in all_ts if ts not in cluster_ids_override]
