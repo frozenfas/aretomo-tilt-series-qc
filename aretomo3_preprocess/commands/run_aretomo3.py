@@ -226,14 +226,63 @@ def _read_mdoc_metadata(mdoc_path: Path) -> dict:
     return fields
 
 
-def _find_input_files(in_prefix: str, in_suffix: str) -> tuple:
+def _find_input_files(in_prefix: str, in_suffix: str,
+                      in_skips: list = None) -> tuple:
     """Return (in_dir, pattern, sorted file list).  in_dir is a Path."""
     p = Path(in_prefix)
     in_dir = p.parent
     stem   = p.name
     pattern = f'{stem}*.{in_suffix}'
     files = sorted(in_dir.glob(pattern)) if in_dir.is_dir() else []
+    if in_skips:
+        files = [f for f in files if not any(s in f.stem for s in in_skips)]
     return in_dir, pattern, files
+
+
+def _ensure_mrc_symlinks(in_dir: Path, dry_run: bool = False) -> int:
+    """
+    For cmd=1/2 runs: look up input_stacks in project.json (written by the
+    cmd=0 run) and create symlinks for any ts-xxx.mrc files missing from
+    in_dir.  Prints a prominent banner showing the source directory.
+
+    Returns the number of symlinks created (or that would be created).
+    """
+    proj   = load_or_create()
+    stored = proj.get('input_stacks', {})
+    stacks = stored.get('stacks', {})
+    if not stacks:
+        return 0
+
+    to_link = []
+    for ts_name in sorted(stacks):
+        dst = in_dir / f'{ts_name}.mrc'
+        if not dst.exists() and not dst.is_symlink():
+            to_link.append((ts_name, Path(stacks[ts_name]['path'])))
+
+    if not to_link:
+        return 0
+
+    source_dir = stored.get('cmd0_outdir', '?')
+    timestamp  = stored.get('timestamp', '?')
+    sep = '═' * 70
+    tag = '[DRY RUN] ' if dry_run else ''
+    print(sep)
+    print(f'  {tag}MRC INPUT STACKS  —  symlinking from cmd=0 output')
+    print(f'  Source    : {source_dir}')
+    print(f'  Registered: {timestamp}')
+    print(f'  Linking   : {len(to_link)} of {len(stacks)} stacks into {in_dir}/')
+    for ts_name, src in to_link[:5]:
+        print(f'    {tag}{ts_name}.mrc  →  {src}')
+    if len(to_link) > 5:
+        print(f'    ... ({len(to_link) - 5} more)')
+    print(sep)
+    print()
+
+    if not dry_run:
+        for ts_name, src in to_link:
+            (in_dir / f'{ts_name}.mrc').symlink_to(src)
+
+    return len(to_link)
 
 
 def _validate(args) -> tuple:
@@ -257,14 +306,28 @@ def _validate(args) -> tuple:
         errors.append('--fm-dose is required for --cmd 0 (motion correction mode)')
 
     # ── 2. Input files found ───────────────────────────────────────────────
-    in_dir, pattern, mdoc_files = _find_input_files(args.in_prefix, args.in_suffix)
+    in_dir, pattern, mdoc_files = _find_input_files(
+        args.in_prefix, args.in_suffix, args.in_skips)
     if not in_dir.is_dir():
         errors.append(f'Input directory not found: {in_dir}/')
     elif not mdoc_files:
-        errors.append(
-            f'No .{args.in_suffix} files found matching {in_dir}/{pattern}\n'
-            f'       (run rename-ts first if using mdoc mode)'
-        )
+        if args.in_suffix == 'mrc':
+            # In dry-run, symlinks haven't been created yet — check project.json
+            proj_stacks = load_or_create().get('input_stacks', {}).get('stacks', {})
+            if proj_stacks:
+                print(f'  Input files     : {len(proj_stacks)} stacks in '
+                      f'project.json (symlinks will be created before run)')
+            else:
+                errors.append(
+                    f'No .mrc files found in {in_dir}/ and no input_stacks in '
+                    f'project.json.\n'
+                    f'       Run with --cmd 0 first to register the input stacks.'
+                )
+        else:
+            errors.append(
+                f'No .{args.in_suffix} files found matching {in_dir}/{pattern}\n'
+                f'       (run rename-ts first if using mdoc mode)'
+            )
     else:
         print(f'  Input files     : {len(mdoc_files)} .{args.in_suffix} files '
               f'found ({in_dir}/{pattern})')
@@ -363,9 +426,11 @@ def add_parser(subparsers):
                      help='Input file prefix for batch discovery (-InPrefix)')
     inp.add_argument('--in-suffix', default='mdoc',
                      help='Input file suffix for batch discovery (-InSuffix)')
-    inp.add_argument('--in-skips', nargs='*', default=None, metavar='PATTERN',
-                     help='Filename patterns to exclude (-InSkips); '
-                          'flag omitted if not given')
+    inp.add_argument('--in-skips', nargs='*', metavar='PATTERN',
+                     default=['_CTF', '_Vol', '_EVN', '_ODD'],
+                     help='Filename stem substrings to exclude from input discovery '
+                          '(-InSkips). Default excludes AreTomo3 side outputs. '
+                          'Pass an empty string to disable.')
     inp.add_argument('--aln-dir', default=None,
                      help='Directory containing .aln files to copy into --output '
                           'before running; use with --cmd 2 (reconstruction only) '
@@ -452,6 +517,15 @@ def add_parser(subparsers):
 
 def run(args):
     out_dir = Path(args.output)
+    in_dir  = Path(args.in_prefix).parent
+
+    # ── MRC symlinks: ensure ts-xxx.mrc files exist in the input directory ─
+    # For cmd=1/2, the input dir is the output dir (which has .aln files but
+    # not the raw stacks — those were produced by the cmd=0 run in run001).
+    # Symlinks are created from paths recorded in project.json input_stacks.
+    if args.in_suffix == 'mrc':
+        in_dir.mkdir(parents=True, exist_ok=True)
+        _ensure_mrc_symlinks(in_dir, dry_run=args.dry_run)
 
     # ── Pre-flight validation ──────────────────────────────────────────────
     print('Pre-flight checks:')
