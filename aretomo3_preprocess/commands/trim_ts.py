@@ -27,6 +27,7 @@ Requires:
 import csv
 import json
 import math
+import subprocess
 from pathlib import Path
 
 
@@ -148,7 +149,7 @@ def write_newst(path, ts_name, xf_name, output_ali, bin_factor, keep_indices,
     angle by _calc_output_size() if not supplied.
     """
     sections_str = ','.join(str(i) for i in keep_indices)
-    size_line = f'OutputSizeXandY\t{out_x},{out_y}\n' if (out_x and out_y) else ''
+    size_line = f'SizeToOutputInXandY\t{out_x},{out_y}\n' if (out_x and out_y) else ''
     content = (
         f'$newstack -StandardInput\n'
         f'InputFile\t{ts_name}.mrc\n'
@@ -164,6 +165,28 @@ def write_newst(path, ts_name, xf_name, output_ali, bin_factor, keep_indices,
         f'$if (-e ./savework) ./savework\n'
     )
     Path(path).write_text(content)
+
+
+def _run_submfg(work_dir, com_file, ts_name):
+    """Run submfg <com_file> from work_dir synchronously. Print result."""
+    print(f'    submfg {com_file} ...', end=' ', flush=True)
+    try:
+        result = subprocess.run(
+            ['submfg', com_file],
+            cwd=work_dir,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        print('FAILED — submfg not found in PATH')
+        return
+    if result.returncode == 0:
+        print('OK')
+    else:
+        print(f'FAILED (exit {result.returncode})')
+        for line in (result.stdout + result.stderr).splitlines()[-5:]:
+            if line.strip():
+                print(f'      {line}')
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -199,6 +222,11 @@ def add_parser(subparsers):
     p.add_argument('--rank-by', choices=['overlap', 'frames', 'both'], default='both',
                    help='Metric for --best-n: "overlap" = mean %% overlap, '
                         '"frames" = clean frame count, "both" = combined rank (default).')
+    p.add_argument('--run-submfg', choices=['none', 'nodark', 'clean', 'both'],
+                   default='none',
+                   help='Run submfg on the generated .com files after writing them. '
+                        '"nodark" runs newst_nodark.com, "clean" runs newst_clean.com, '
+                        '"both" runs both (default: none).')
     p.set_defaults(func=run)
     return p
 
@@ -275,6 +303,7 @@ def run(args):
 
     sep = '─' * 68
     n_done = n_skip = 0
+    processed_ts = []   # TS names successfully processed (for link folders)
 
     for ts_name, data in all_parsed.items():
         imod_src  = in_dir / f'{ts_name}_Imod'
@@ -377,7 +406,31 @@ def run(args):
         print(f'    Misaligned (extra)     : {n_extra}')
         print(f'    nodark keeps           : {len(nodark_keep)}  sections')
         print(f'    clean  keeps           : {len(clean_keep)}  sections')
+
+        if args.run_submfg in ('nodark', 'both'):
+            _run_submfg(ts_out, 'newst_nodark.com', ts_name)
+        if args.run_submfg in ('clean', 'both'):
+            _run_submfg(ts_out, 'newst_clean.com', ts_name)
+
+        processed_ts.append(ts_name)
         n_done += 1
+
+    # ── Create clean_ts/ and nodark_ts/ link folders ──────────────────────────
+    for variant in ('clean', 'nodark'):
+        link_dir = out_dir / f'{variant}_ts'
+        link_dir.mkdir(exist_ok=True)
+        n_links = 0
+        for ts_name in processed_ts:
+            ts_imod = out_dir / f'{ts_name}_Imod'
+            for ext in ('ali', 'tlt'):
+                target = ts_imod / f'{ts_name}_{variant}.{ext}'
+                link   = link_dir / f'{ts_name}.{ext}'
+                if link.exists() or link.is_symlink():
+                    link.unlink()
+                # Use relative path: ../ts-xxx_Imod/ts-xxx_<variant>.<ext>
+                link.symlink_to(Path('..') / ts_imod.name / target.name)
+                n_links += 1
+        print(f'{variant}_ts/  created with {n_links} symlinks → {link_dir}')
 
     print(sep)
     print(f'\nDone: {n_done} TS processed, {n_skip} skipped')
@@ -386,6 +439,11 @@ def run(args):
     print(f'  ts-xxx_nodark.xtilt / .tlt / _order_list.csv')
     print(f'  ts-xxx_clean.xtilt  / .tlt / _order_list.csv')
     print(f'  newst_nodark.com  /  newst_clean.com')
-    print(f'\nTo run (from inside each ts-xxx_Imod directory):')
-    print(f'  submfg newst_nodark.com')
-    print(f'  submfg newst_clean.com')
+    if args.run_submfg == 'none':
+        print(f'\nTo run (from inside each ts-xxx_Imod directory):')
+        print(f'  submfg newst_nodark.com')
+        print(f'  submfg newst_clean.com')
+        print(f'  (or rerun with --run-submfg nodark/clean/both)')
+    print(f'\nLink folders for easy loading:')
+    print(f'  {out_dir}/clean_ts/   — ts-xxx.ali + ts-xxx.tlt (clean variant)')
+    print(f'  {out_dir}/nodark_ts/  — ts-xxx.ali + ts-xxx.tlt (nodark variant)')
