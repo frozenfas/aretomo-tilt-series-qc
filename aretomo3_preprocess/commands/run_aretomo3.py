@@ -239,38 +239,62 @@ def _find_input_files(in_prefix: str, in_suffix: str,
     return in_dir, pattern, files
 
 
-def _ensure_mrc_symlinks(in_dir: Path, dry_run: bool = False) -> int:
+def _ensure_mrc_symlinks(in_dir: Path, mrcdir: Path = None,
+                         in_skips: list = None, dry_run: bool = False) -> int:
     """
-    For cmd=1/2 runs: look up input_stacks in project.json (written by the
-    cmd=0 run) and create symlinks for any ts-xxx.mrc files missing from
-    in_dir.  Prints a prominent banner showing the source directory.
+    For cmd=1/2 runs: the input directory has .aln files but is missing the
+    raw tilt-series stacks.  Look up the stack locations from project.json
+    input_stacks (written after a cmd=0 run) and create symlinks in in_dir.
+
+    If project.json has no input_stacks, fall back to scanning --mrcdir
+    (required for datasets where the stacks were not produced by this tool).
 
     Returns the number of symlinks created (or that would be created).
     """
+    tag = '[DRY RUN] ' if dry_run else ''
+    sep = '═' * 70
+
+    # ── Source 1: project.json input_stacks ───────────────────────────────
     proj   = load_or_create()
     stored = proj.get('input_stacks', {})
     stacks = stored.get('stacks', {})
-    if not stacks:
-        return 0
 
-    to_link = []
-    for ts_name in sorted(stacks):
-        dst = in_dir / f'{ts_name}.mrc'
-        if not dst.exists() and not dst.is_symlink():
-            to_link.append((ts_name, Path(stacks[ts_name]['path'])))
+    if stacks:
+        source_label = f'project.json  (cmd=0 run {stored.get("timestamp", "?")})'
+        source_dir   = stored.get('cmd0_outdir', '?')
+        to_link = []
+        for ts_name in sorted(stacks):
+            dst = in_dir / f'{ts_name}.mrc'
+            if not dst.exists() and not dst.is_symlink():
+                to_link.append((ts_name, Path(stacks[ts_name]['path'])))
+
+    # ── Source 2: explicit --mrcdir fallback ──────────────────────────────
+    elif mrcdir is not None:
+        if not mrcdir.is_dir():
+            print(f'ERROR: --mrcdir {mrcdir} not found')
+            sys.exit(1)
+        skips = [s for s in (in_skips or []) if s]
+        all_mrc = sorted(mrcdir.glob('ts-*.mrc'))
+        src_files = [f for f in all_mrc
+                     if not any(s in f.stem for s in skips)]
+        source_label = f'--mrcdir  {mrcdir.resolve()}'
+        source_dir   = str(mrcdir.resolve())
+        to_link = []
+        for f in src_files:
+            dst = in_dir / f.name
+            if not dst.exists() and not dst.is_symlink():
+                to_link.append((f.stem, f.resolve()))
+
+    else:
+        return 0
 
     if not to_link:
         return 0
 
-    source_dir = stored.get('cmd0_outdir', '?')
-    timestamp  = stored.get('timestamp', '?')
-    sep = '═' * 70
-    tag = '[DRY RUN] ' if dry_run else ''
     print(sep)
-    print(f'  {tag}MRC INPUT STACKS  —  symlinking from cmd=0 output')
-    print(f'  Source    : {source_dir}')
-    print(f'  Registered: {timestamp}')
-    print(f'  Linking   : {len(to_link)} of {len(stacks)} stacks into {in_dir}/')
+    print(f'  {tag}MRC INPUT STACKS  —  source: {source_label}')
+    print(f'  Stack dir : {source_dir}')
+    print(f'  Linking   : {len(to_link)} stacks into {in_dir}/')
     for ts_name, src in to_link[:5]:
         print(f'    {tag}{ts_name}.mrc  →  {src}')
     if len(to_link) > 5:
@@ -283,6 +307,52 @@ def _ensure_mrc_symlinks(in_dir: Path, dry_run: bool = False) -> int:
             (in_dir / f'{ts_name}.mrc').symlink_to(src)
 
     return len(to_link)
+
+
+def _register_cmd0_stacks(out_dir: Path, in_skips: list = None):
+    """
+    After a successful cmd=0 run, scan out_dir for ts-*.mrc stacks and
+    register them in project.json input_stacks so that subsequent cmd=1/2
+    runs can find them without needing --mrcdir.
+    """
+    try:
+        import mrcfile
+    except ImportError:
+        mrcfile = None
+
+    skips = [s for s in (in_skips or []) if s]
+    all_mrc = sorted(out_dir.glob('ts-*.mrc'))
+    stacks_mrc = [f for f in all_mrc
+                  if not any(s in f.stem for s in skips)]
+    if not stacks_mrc:
+        return
+
+    stacks = {}
+    for f in stacks_mrc:
+        info = {'path': str(f.resolve())}
+        if mrcfile is not None:
+            try:
+                with mrcfile.mmap(f, mode='r', permissive=True) as m:
+                    info.update({
+                        'nx': int(m.header.nx),
+                        'ny': int(m.header.ny),
+                        'nz': int(m.header.nz),
+                        'angpix': round(float(m.voxel_size.x), 4),
+                    })
+            except Exception:
+                pass
+        stacks[f.stem] = info
+
+    update_section(
+        section='input_stacks',
+        values={
+            'timestamp':   datetime.datetime.now().isoformat(timespec='seconds'),
+            'cmd0_outdir': str(out_dir.resolve()),
+            'n_stacks':    len(stacks),
+            'stacks':      stacks,
+        },
+    )
+    print(f'Registered {len(stacks)} input stacks in project.json  [input_stacks]')
 
 
 def _validate(args) -> tuple:
@@ -314,14 +384,23 @@ def _validate(args) -> tuple:
         if args.in_suffix == 'mrc':
             # In dry-run, symlinks haven't been created yet — check project.json
             proj_stacks = load_or_create().get('input_stacks', {}).get('stacks', {})
+            mrcdir_ok   = args.mrcdir is not None and Path(args.mrcdir).is_dir()
             if proj_stacks:
                 print(f'  Input files     : {len(proj_stacks)} stacks in '
                       f'project.json (symlinks will be created before run)')
+            elif mrcdir_ok:
+                n = len([f for f in Path(args.mrcdir).glob('ts-*.mrc')
+                         if not any(s in f.stem for s in (args.in_skips or []))])
+                print(f'  Input files     : {n} stacks from --mrcdir '
+                      f'(symlinks will be created before run)')
             else:
                 errors.append(
-                    f'No .mrc files found in {in_dir}/ and no input_stacks in '
-                    f'project.json.\n'
-                    f'       Run with --cmd 0 first to register the input stacks.'
+                    f'No .mrc files found in {in_dir}/ and no stack source '
+                    f'available.\n'
+                    f'       Options:\n'
+                    f'         1. Run --cmd 0 first (registers stacks in '
+                    f'project.json automatically)\n'
+                    f'         2. Add --mrcdir /path/to/stacks'
                 )
         else:
             errors.append(
@@ -431,10 +510,11 @@ def add_parser(subparsers):
                      help='Filename stem substrings to exclude from input discovery '
                           '(-InSkips). Default excludes AreTomo3 side outputs. '
                           'Pass an empty string to disable.')
-    inp.add_argument('--aln-dir', default=None,
-                     help='Directory containing .aln files to copy into --output '
-                          'before running; use with --cmd 2 (reconstruction only) '
-                          'to reuse alignment from a previous run')
+    inp.add_argument('--mrcdir', default=None,
+                     help='Directory containing ts-xxx.mrc stacks; only needed '
+                          'when stacks are not registered in project.json (e.g. '
+                          'stacks produced outside this tool). Stacks are '
+                          'symlinked into --in-prefix directory.')
     inp.add_argument('--serial', type=int, default=1,
                      help='Seconds to wait for next series; 1=offline batch (-Serial)')
 
@@ -520,12 +600,14 @@ def run(args):
     in_dir  = Path(args.in_prefix).parent
 
     # ── MRC symlinks: ensure ts-xxx.mrc files exist in the input directory ─
-    # For cmd=1/2, the input dir is the output dir (which has .aln files but
-    # not the raw stacks — those were produced by the cmd=0 run in run001).
-    # Symlinks are created from paths recorded in project.json input_stacks.
+    # For cmd=1/2 the input directory has .aln files but not the raw stacks.
+    # Stacks come from the cmd=0 run (registered in project.json) or from
+    # an explicit --mrcdir (for stacks produced outside this tool).
     if args.in_suffix == 'mrc':
         in_dir.mkdir(parents=True, exist_ok=True)
-        _ensure_mrc_symlinks(in_dir, dry_run=args.dry_run)
+        mrcdir = Path(args.mrcdir) if args.mrcdir is not None else None
+        _ensure_mrc_symlinks(in_dir, mrcdir=mrcdir,
+                             in_skips=args.in_skips, dry_run=args.dry_run)
 
     # ── Pre-flight validation ──────────────────────────────────────────────
     print('Pre-flight checks:')
@@ -570,24 +652,6 @@ def run(args):
 
     # ── Run AreTomo3 with live streaming + log capture ─────────────────────
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    # For cmd=2 (recon only), copy .aln files into out_dir so AreTomo3 finds them
-    if args.aln_dir is not None:
-        aln_source = Path(args.aln_dir)
-        if not aln_source.is_dir():
-            print(f'ERROR: --aln-dir {aln_source} not found')
-            sys.exit(1)
-        aln_files = sorted(aln_source.glob('*.aln'))
-        if not aln_files:
-            print(f'Warning: no .aln files found in {aln_source}')
-        else:
-            print(f'Copying {len(aln_files)} .aln files: {aln_source} → {out_dir}')
-            for aln in aln_files:
-                dst = out_dir / aln.name
-                if not dst.exists():
-                    shutil.copy2(aln, dst)
-            print()
-
     log_path = out_dir / 'run_aretomo3.log'
 
     print(f'Output directory : {out_dir}')
@@ -635,6 +699,10 @@ def run(args):
         sys.exit(returncode)
 
     print(f'AreTomo3 finished successfully.')
+
+    # ── Register cmd=0 output stacks for use by later cmd=1/2 runs ────────
+    if args.cmd == 0:
+        _register_cmd0_stacks(out_dir, in_skips=args.in_skips)
 
     # ── Save to project JSON ───────────────────────────────────────────────
     update_section(
