@@ -606,6 +606,8 @@ def run(args):
         'File', 'Result', 'Tilts', 'Notes', w=col_w))
     print('-' * (col_w + 60))
 
+    passing_paths = []   # collect files that are clean for project.json save
+
     for path in paths:
         fname = Path(path).name
         r = validate_file(path, fix_dose=fix_dose,
@@ -614,10 +616,12 @@ def run(args):
         if r['success'] and not r.get('fixed'):
             status = 'PASS'
             n_pass += 1
+            passing_paths.append(path)
         elif r['success'] and r.get('fixed'):
             status = 'FIXED'
             n_fixed += 1
             n_pass += 1
+            passing_paths.append(path)
         else:
             status = 'FAIL'
             n_fail += 1
@@ -675,22 +679,30 @@ def run(args):
                 print('  fraction filenames (one per line).')
     print()
 
-    # ── Save mdoc metadata to project.json when all files pass ────────────────
-    # Uses update_section (not _once) so re-running after --fix-dose or
-    # --fix-subframes refreshes the cached data with corrected content.
-    if n_fail == 0:
-        _save_mdoc_to_project(paths)
+    # ── Save mdoc metadata to project.json for all passing files ──────────────
+    # Merges into existing mdoc_data so running on a subset (e.g. to fix a
+    # few files) updates only those entries without wiping the rest.
+    if passing_paths:
+        _save_mdoc_to_project(passing_paths)
 
 
 def _save_mdoc_to_project(paths):
-    """Parse all mdoc files and save metadata to project.json."""
+    """
+    Parse validated mdoc files with mdocfile and save rich metadata to
+    project.json, merging with any previously saved entries so that
+    running on a subset (e.g. to fix a few files) updates only those
+    entries without wiping data for the rest of the dataset.
+    """
     try:
         from aretomo3_preprocess.shared.parsers import parse_mdoc_file
-        from aretomo3_preprocess.shared.project_json import update_section
+        from aretomo3_preprocess.shared.project_json import load as _load, update_section
     except ImportError:
         return
 
-    per_ts = {}
+    # Load existing entries so we can merge rather than replace
+    existing = _load().get('mdoc_data', {}).get('per_ts', {})
+
+    new_entries = {}
     for path in paths:
         p = Path(path)
         try:
@@ -698,17 +710,20 @@ def _save_mdoc_to_project(paths):
         except Exception:
             continue
         if mdoc_data:
-            per_ts[p.stem] = {
+            new_entries[p.stem] = {
                 'angpix':  angpix,
                 'frames':  {str(k): v for k, v in mdoc_data.items()},
             }
 
-    if per_ts:
+    if new_entries:
+        merged = {**existing, **new_entries}
         update_section('mdoc_data', {
             'timestamp': datetime.datetime.now().isoformat(timespec='seconds'),
-            'n_ts':      len(per_ts),
-            'per_ts':    per_ts,
+            'n_ts':      len(merged),
+            'per_ts':    merged,
         })
+        print(f'  mdoc_data: {len(new_entries)} TS saved'
+              + (f' ({len(merged)} total in project.json)' if existing else ''))
 
 
 def _failure_message(failure, r):
