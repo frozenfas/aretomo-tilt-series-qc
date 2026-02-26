@@ -428,21 +428,29 @@ def run(args):
         n_done += 1
 
     # ── Create clean_ts/ and nodark_ts/ link folders ──────────────────────────
+    import shutil as _shutil
     for variant in ('clean', 'nodark'):
         link_dir = out_dir / f'{variant}_ts'
-        link_dir.mkdir(exist_ok=True)
-        n_links = 0
+        # Remove and recreate on every run so stale links from a previous
+        # run (different TS set or different filter) don't accumulate.
+        if link_dir.exists():
+            _shutil.rmtree(link_dir)
+        link_dir.mkdir()
+        n_tlt = n_ali = 0
         for ts_name in processed_ts:
             ts_imod = out_dir / f'{ts_name}_Imod'
-            for ext in ('ali', 'tlt'):
-                target = ts_imod / f'{ts_name}_{variant}.{ext}'
-                link   = link_dir / f'{ts_name}.{ext}'
-                if link.exists() or link.is_symlink():
-                    link.unlink()
-                # Use relative path: ../ts-xxx_Imod/ts-xxx_<variant>.<ext>
-                link.symlink_to(Path('..') / ts_imod.name / target.name)
-                n_links += 1
-        print(f'{variant}_ts/  created with {n_links} symlinks → {link_dir}')
+            rel_imod = Path('..') / ts_imod.name
+            # .tlt — always present after trim-ts
+            tlt_target = ts_imod / f'{ts_name}_{variant}.tlt'
+            if tlt_target.exists():
+                (link_dir / f'{ts_name}.tlt').symlink_to(rel_imod / tlt_target.name)
+                n_tlt += 1
+            # .ali — only link if the file actually exists (created by submfg)
+            ali_target = ts_imod / f'{ts_name}_{variant}.ali'
+            if ali_target.exists():
+                (link_dir / f'{ts_name}.ali').symlink_to(rel_imod / ali_target.name)
+                n_ali += 1
+        print(f'{variant}_ts/  {n_tlt} .tlt links,  {n_ali} .ali links  → {link_dir}')
 
     print(sep)
     print(f'\nDone: {n_done} TS processed, {n_skip} skipped')
