@@ -197,11 +197,14 @@ def _load_lamella_params(analysis_dir: Path) -> tuple[dict, dict]:
 # Per-TS command builder
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _build_per_ts_cmd(args, mrc_path: Path, out_mrc: Path,
+def _build_per_ts_cmd(args, mrc_path: Path, out_dir: Path,
                       rot: float, align_z: int,
                       mdoc_dir: Path = None) -> list:
     """Build the AreTomo3 command for a single tilt series.
 
+    AreTomo3 uses -InPrefix (full path to the input .mrc) and -OutDir
+    (output directory); it does not accept -InMrc / -OutMrc.
+    -Serial 0 tells it we are handing it one TS at a time.
     All file paths are resolved to absolute so AreTomo3 can find them even if
     it changes its working directory internally.
 
@@ -211,10 +214,11 @@ def _build_per_ts_cmd(args, mrc_path: Path, out_mrc: Path,
     vol_z = args.vol_z if args.vol_z is not None else align_z
 
     cmd = [args.aretomo3_bin]
-    cmd += ['-InMrc',  str(mrc_path.resolve())]
-    cmd += ['-OutMrc', str(out_mrc.resolve())]
+    cmd += ['-InPrefix', str(mrc_path.resolve())]
+    cmd += ['-OutDir',   str(out_dir.resolve()) + '/']
     if args.cmd == 0 and mdoc_dir is not None:
         cmd += ['-Mdoc', str(mdoc_dir)]
+    cmd += ['-Serial', '0']
     cmd += ['-Cmd',      _num(args.cmd)]
     cmd += ['-TiltAxis', _num(rot), _num(args.tilt_axis_search)]
     cmd += ['-AlignZ',   _num(align_z)]
@@ -475,12 +479,12 @@ def run(args):
             n_skip += 1
             continue
 
-        cmd = _build_per_ts_cmd(args, mrc_path, out_mrc, rot, align_z, mdoc_dir)
+        cmd = _build_per_ts_cmd(args, mrc_path, out_dir, rot, align_z, mdoc_dir)
 
         print(sep)
         print(f'  {ts_name}  [lamella {lam_id}  TiltAxis={rot}°  AlignZ={align_z} px]')
-        print(f'  InMrc  : {mrc_path.resolve()}')
-        print(f'  OutMrc : {out_mrc.resolve()}')
+        print(f'  InPrefix : {mrc_path.resolve()}')
+        print(f'  OutDir   : {out_dir.resolve()}/')
         print()
         print(_fmt_command(cmd, annotate=False))
         print()
