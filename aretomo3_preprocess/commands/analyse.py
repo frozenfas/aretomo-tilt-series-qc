@@ -17,6 +17,11 @@ from matplotlib.lines import Line2D
 from pathlib import Path
 
 try:
+    from tqdm import tqdm as _tqdm
+except ImportError:
+    def _tqdm(it, **kw): return it  # type: ignore[assignment]
+
+try:
     import logging as _logging
     import mdocfile as _mdocfile
     _HAS_MDOCFILE = True
@@ -68,24 +73,21 @@ def plot_tilt_series(ts_name, data, threshold, out_path, global_ranges,
     defocus_ylim = (global_ranges['defocus_min'], global_ranges['defocus_max'])
 
     # ── Try to load tomogram volume for projections ──────────────────────────
-    vol_projs = None   # None if unavailable, else dict with xy, xz, yz, vox, slab_a
+    vol_projs = None   # None if unavailable, else dict with xy, vox, slab_a
     if vol_path is not None and Path(vol_path).exists():
         try:
             import mrcfile as _mrcfile
-            with _mrcfile.open(vol_path, permissive=True) as mrc:
-                vol  = np.asarray(mrc.data, dtype=np.float32)
-                vox  = float(mrc.voxel_size.x) or 1.0
-            nz, ny, nx = vol.shape
-            hp = max(1, int(round(150.0 / vox)))          # half-slab in px
-            zc, yc, xc = nz // 2, ny // 2, nx // 2
-            zs, ze = max(0, zc - hp), min(nz, zc + hp)
-            ys, ye = max(0, yc - hp), min(ny, yc + hp)
-            xs, xe = max(0, xc - hp), min(nx, xc + hp)
+            # Use mmap so only the needed Z slab is read from disk, not the full volume
+            with _mrcfile.mmap(vol_path, mode='r', permissive=True) as mrc:
+                vox = float(mrc.voxel_size.x) or 1.0
+                nz, ny, nx = mrc.data.shape
+                hp = max(1, int(round(150.0 / vox)))   # half-slab in px
+                zc = nz // 2
+                zs, ze = max(0, zc - hp), min(nz, zc + hp)
+                slab = np.asarray(mrc.data[zs:ze], dtype=np.float32)
             vol_projs = {
-                'xy':    vol[zs:ze].mean(axis=0),              # (ny, nx)
-                'xz':    vol[:, ys:ye, :].mean(axis=1),        # (nz, nx)
-                'yz':    vol[:, :, xs:xe].mean(axis=2),        # (nz, ny)
-                'vox':   vox,
+                'xy':     slab.mean(axis=0),            # (ny, nx)
+                'vox':    vox,
                 'slab_a': (ze - zs) * vox,
             }
         except Exception:
@@ -316,7 +318,7 @@ def _validate_ts(data, tlt_data, mdoc_data, mrc_path=None):
     if mrc_path is not None and mrc_path.exists():
         try:
             import mrcfile
-            with mrcfile.open(mrc_path, permissive=True) as m:
+            with mrcfile.mmap(mrc_path, mode='r', permissive=True) as m:
                 nx = int(m.header.nx)
                 ny = int(m.header.ny)
                 nz = int(m.header.nz)
@@ -1357,6 +1359,9 @@ def add_parser(subparsers):
 
 
 def run(args):
+    # Force line-buffered stdout so output appears immediately when piped (e.g. | tee)
+    sys.stdout.reconfigure(line_buffering=True)
+
     in_dir  = Path(args.input)
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1403,9 +1408,10 @@ def run(args):
     # ── Pass 1: parse all files, attach overlap + CTF + TLT + mdoc ───────────
     all_ts = {}
     _t1_start = time.perf_counter()
-    _timing   = {'aln': 0.0, 'ctf': 0.0, 'tlt': 0.0, 'mdoc': 0.0, 'enrich': 0.0}
+    _timing   = {'aln': 0.0, 'ctf': 0.0, 'tlt': 0.0, 'mdoc': 0.0,
+                 'enrich': 0.0, 'mrc_val': 0.0}
 
-    for aln_path in aln_files:
+    for aln_path in _tqdm(aln_files, desc='Pass 1 — parsing', unit='TS', ncols=80):
         ts_name = aln_path.stem
 
         _t = time.perf_counter()
@@ -1511,8 +1517,10 @@ def run(args):
         _timing['enrich'] += time.perf_counter() - _t
 
         # Sanity checks
+        _t = time.perf_counter()
         mrc_path = (mrc_dir / f'{ts_name}.mrc') if mrc_dir else None
         data['warnings'] = _validate_ts(data, tlt_data, mdoc_data, mrc_path)
+        _timing['mrc_val'] += time.perf_counter() - _t
 
         all_ts[ts_name] = data
 
@@ -1525,6 +1533,7 @@ def run(args):
               ('tlt parse',  _timing['tlt']),
               ('mdoc parse', _timing['mdoc']),
               ('enrichment', _timing['enrich']),
+              ('mrc header', _timing['mrc_val']),
               ('other',      _t1_other)]
     for _label, _secs in _steps:
         _pct  = 100 * _secs / _t1_total if _t1_total > 0 else 0
@@ -1591,31 +1600,29 @@ def run(args):
     ts_entries    = []
     total_flagged = 0
     n_ts          = len(all_ts)
-    _bw           = 40   # progress bar width in characters
     _t2_start     = time.perf_counter()
     _t2_plot      = 0.0
 
-    for i_ts, (ts_name, data) in enumerate(all_ts.items(), 1):
+    _p2     = _tqdm(list(all_ts.items()), desc='Pass 2 — plots', unit='TS', ncols=80)
+    _pwrite = getattr(_p2, 'write', print)  # tqdm.write keeps bar intact; fallback to print
+
+    for i_ts, (ts_name, data) in enumerate(_p2, 1):
         bad_frames    = [f for f in data['frames'] if f['is_flagged']]
         n_bad         = len(bad_frames)
         total_flagged += n_bad
 
-        filled = round(_bw * i_ts / n_ts)
-        w      = len(str(n_ts))
-        print(f'\n  [{"█" * filled}{"░" * (_bw - filled)}]'
-              f'  {i_ts:{w}d}/{n_ts}  ({100 * i_ts / n_ts:.1f}%)')
         status = '✗' if n_bad else '✓'
-        print(sep)
-        print(f'  {status}  {ts_name}   {n_bad} frame(s) below {args.threshold}%  '
-              f'| {len(data["dark_frames"])} dark frame(s)')
+        _pwrite(sep)
+        _pwrite(f'  {status}  {ts_name}   {n_bad} frame(s) below {args.threshold}%  '
+                f'| {len(data["dark_frames"])} dark frame(s)')
         for w in data.get('warnings', []):
-            print(f'  WARN  {w}')
+            _pwrite(f'  WARN  {w}')
         if bad_frames:
-            print(f'     {"SEC":>4}  {"Tilt (°)":>9}  {"TX (px)":>10}  '
-                  f'{"TY (px)":>10}  {"Overlap":>8}')
+            _pwrite(f'     {"SEC":>4}  {"Tilt (°)":>9}  {"TX (px)":>10}  '
+                    f'{"TY (px)":>10}  {"Overlap":>8}')
             for f in bad_frames:
-                print(f'     {f["sec"]:>4}  {f["tilt"]:>9.2f}  {f["tx"]:>10.1f}  '
-                      f'{f["ty"]:>10.1f}  {f["overlap_pct"]:>7.1f}%')
+                _pwrite(f'     {f["sec"]:>4}  {f["tilt"]:>9.2f}  {f["tx"]:>10.1f}  '
+                        f'{f["ty"]:>10.1f}  {f["overlap_pct"]:>7.1f}%')
                 flagged_rows.append({
                     'ts':          ts_name,
                     'sec':         f['sec'],
