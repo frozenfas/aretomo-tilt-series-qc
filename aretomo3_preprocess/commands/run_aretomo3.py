@@ -9,14 +9,13 @@ Pipeline modes (--cmd)
 ----------------------
 Each mode expects different inputs and handles stacks / .aln files differently:
 
-  cmd  --in-suffix  --in-skips needed  Input stacks          .aln files
-  ---  -----------  -----------------  --------------------  ----------------------
-   0   mdoc         (none; mdoc mode)  raw movies via mdoc   created in --output
-   1   mrc          _CTF _Vol _EVN     --in-prefix dir (cmd=0 output)  created in --output
-                    _ODD               stacks already there
-   2   mrc          _CTF _Vol _EVN     missing from --in-prefix dir;  pre-exist in
-                    _ODD               symlinked from project.json     --in-prefix dir
-                                       input_stacks or --mrcdir
+  cmd  --in-prefix          --in-suffix  --in-skips               Input stacks           .aln files
+  ---  -------------------  -----------  -----------------------  ---------------------  ------------------
+   0   frames/ts-           mdoc         (none — mdoc mode)       raw movies via mdoc    created in --output
+   1   <cmd0 output>/ts-    mrc          _CTF,_Vol,_EVN,_ODD      already in --in-prefix created in --output
+   2   <prev run>/ts-       mrc          _CTF,_Vol,_EVN,_ODD      missing; symlinked     pre-exist in
+                                                                   from project.json or   --in-prefix dir
+                                                                   --mrcdir
 
 For cmd=2, AreTomo3 reads the existing .aln from the --in-prefix directory and
 writes new volumes (at the requested --at-bin / --split-sum) to --output.
@@ -191,8 +190,9 @@ def _build_cmd(args) -> list:
 
     cmd += ['-InPrefix', args.in_prefix]
     cmd += ['-InSuffix', args.in_suffix]
-    if args.in_skips is not None:
-        cmd += ['-InSkips'] + list(args.in_skips)
+    skips = [s for s in (args.in_skips or []) if s]
+    if skips:
+        cmd += ['-InSkips', ','.join(skips)]
 
     cmd += ['-OutDir',  args.output]
     cmd += ['-LogDir',  args.output]
@@ -464,7 +464,19 @@ def _validate(args) -> tuple:
         print(f'  Input files     : {len(mdoc_files)} .{args.in_suffix} files '
               f'found ({in_dir}/{pattern})')
 
-    # ── 3. Gain transform vs gain_check JSON (only if gain provided) ──────
+    # ── 3. .aln files present (cmd=2 only) ────────────────────────────────
+    if args.cmd == 2 and in_dir.is_dir():
+        aln_files = sorted(in_dir.glob('ts-*.aln'))
+        if not aln_files:
+            errors.append(
+                f'No ts-*.aln files found in {in_dir}/\n'
+                f'       --in-prefix for cmd=2 should point to the directory '
+                f'of a previous alignment run (e.g. run003/ts-)'
+            )
+        else:
+            print(f'  .aln files      : {len(aln_files)} found in {in_dir}/')
+
+    # ── 4. Gain transform vs gain_check JSON (only if gain provided) ──────
     try:
         project = load_or_create()
         gc = project.get('gain_check', {})
