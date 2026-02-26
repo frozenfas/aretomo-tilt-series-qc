@@ -318,6 +318,16 @@ def run(args):
     print(f'Bin factor                       : {args.bin}')
     print(f'Overlap threshold                : {args.threshold}%\n')
 
+    # Wipe link folders now so they are never stale even if the run is
+    # interrupted before reaching the link-creation section at the end.
+    import shutil as _shutil
+    for _variant in ('clean', 'nodark'):
+        _link_dir = out_dir / f'{_variant}_ts'
+        if _link_dir.exists():
+            _shutil.rmtree(_link_dir)
+            print(f'Cleared {_link_dir.name}/')
+    print()
+
     sep = '─' * 68
     n_done = n_skip = 0
     processed_ts = []   # TS names successfully processed (for link folders)
@@ -436,7 +446,6 @@ def run(args):
         n_done += 1
 
     # ── Create clean_ts/ and nodark_ts/ link folders ──────────────────────────
-    import shutil as _shutil
     for variant in ('clean', 'nodark'):
         link_dir = out_dir / f'{variant}_ts'
         # Remove and recreate on every run so stale links from a previous
