@@ -37,18 +37,21 @@ except ImportError:
         return it
 
 
-def _calc_output_size(w, h, rot_deg):
+def _calc_output_size(w, h, rot_deg, bin_factor=1):
     """
-    Output image dimensions (pixels) needed to fully contain a W×H image
-    rotated in-plane by rot_deg degrees, without clipping.
-    Rounded up to the nearest even number for IMOD compatibility.
+    Output image dimensions (pixels, pre-bin) needed to fully contain a W×H
+    image rotated in-plane by rot_deg degrees, without clipping.
+
+    Rounded up to the next multiple of bin_factor so that after BinByFactor N
+    the output is an exact integer number of pixels in both dimensions.
     """
     a  = math.radians(rot_deg)
     ca, sa = abs(math.cos(a)), abs(math.sin(a))
     out_x = math.ceil(w * ca + h * sa)
     out_y = math.ceil(w * sa + h * ca)
-    out_x += out_x % 2   # round up to even
-    out_y += out_y % 2
+    m = max(2, bin_factor)          # at minimum round to even
+    out_x = math.ceil(out_x / m) * m
+    out_y = math.ceil(out_y / m) * m
     return out_x, out_y
 
 
@@ -353,7 +356,7 @@ def run(args):
         rot = data['frames'][0]['rot'] if data.get('frames') else 0.0
         W   = data.get('width',  0)
         H   = data.get('height', 0)
-        out_x, out_y = _calc_output_size(W, H, rot) if (W and H and rot) else (None, None)
+        out_x, out_y = _calc_output_size(W, H, rot, args.bin) if (W and H and rot) else (None, None)
 
         ts_out = out_dir / f'{ts_name}_Imod'
         ts_out.mkdir(exist_ok=True)
