@@ -150,6 +150,49 @@ def update_section(section: str, values: dict,
         print(f'Backup written to  : {backup_dir / PROJECT_FILENAME}')
 
 
+def load(path: Path = None) -> dict:
+    """
+    Read the project JSON without modifying it.
+
+    Returns an empty dict if the file does not exist yet.
+    Use this for read-only access (e.g. checking existing invariant data).
+    """
+    if path is None:
+        path = Path.cwd() / PROJECT_FILENAME
+    return _read(path)
+
+
+def update_section_once(section: str, values: dict,
+                        backup_dir: Path = None,
+                        path: Path = None):
+    """
+    Write values to a named section ONLY if that section does not already exist.
+
+    For invariant data (lamella assignments, mdoc metadata) that should be
+    set once and never overwritten by subsequent runs.  If the section
+    already exists the call is a silent no-op (no file write).
+    """
+    if path is None:
+        path = Path.cwd() / PROJECT_FILENAME
+
+    data = load_or_create(path)
+    if section in data:
+        return   # already frozen — do not overwrite
+
+    data[section]                   = values
+    data['project']['last_updated'] = (
+        datetime.datetime.now().isoformat(timespec='seconds')
+    )
+    _write(data, path)
+    print(f'Project file updated: {path.name}  [{section}]  (invariant)')
+
+    if backup_dir is not None:
+        backup_dir = Path(backup_dir)
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, backup_dir / PROJECT_FILENAME)
+        print(f'Backup written to  : {backup_dir / PROJECT_FILENAME}')
+
+
 def args_to_dict(args) -> dict:
     """
     Convert an argparse Namespace to a JSON-serialisable dict.

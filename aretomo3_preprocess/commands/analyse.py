@@ -32,7 +32,10 @@ except ImportError:
     _HAS_MDOCFILE = False
 
 
-from aretomo3_preprocess.shared.project_json import update_section, args_to_dict
+from aretomo3_preprocess.shared.project_json import (
+    load as _load_project,
+    update_section, update_section_once, args_to_dict,
+)
 from aretomo3_preprocess.shared.parsers import (
     parse_aln_file, parse_ctf_file, parse_tlt_file, parse_mdoc_file,
     _float_or_none,
@@ -1440,6 +1443,9 @@ def run(args):
             mdoc_data, mdoc_angpix = parse_mdoc_file(mdoc_path)
         else:
             mdoc_data, mdoc_angpix = {}, None
+        # Stash raw mdoc dict for saving to project.json after Pass 1
+        data['_mdoc_raw']    = mdoc_data
+        data['_mdoc_angpix'] = mdoc_angpix
         _timing['mdoc'] += time.perf_counter() - _t
 
         # Resolve pixel size: CLI arg → mdoc PixelSpacing → None
@@ -1540,6 +1546,27 @@ def run(args):
         _bar  = '█' * int(_pct / 2.5)
         print(f'  {_label:<12}  {_secs:6.2f}s  {_pct:5.1f}%  {_bar}')
     print()
+
+    # ── Save mdoc data to project.json (invariant — written once) ─────────────
+    _mdoc_to_save = {
+        ts: {'angpix': d.pop('_mdoc_angpix', None),
+             'frames': {str(k): v for k, v in d.pop('_mdoc_raw', {}).items()}}
+        for ts, d in all_ts.items()
+        if d.get('_mdoc_raw')
+    }
+    # pop keys even for TS with no mdoc data
+    for _d in all_ts.values():
+        _d.pop('_mdoc_raw', None)
+        _d.pop('_mdoc_angpix', None)
+    if _mdoc_to_save:
+        update_section_once('mdoc_data', {
+            'timestamp': datetime.datetime.now().isoformat(timespec='seconds'),
+            'n_ts':      len(_mdoc_to_save),
+            'per_ts':    _mdoc_to_save,
+        })
+
+    # Load project.json once for downstream invariant lookups (lamella, etc.)
+    _proj = _load_project()
 
     # ── Compute global axis ranges ────────────────────────────────────────────
     all_tilts, all_defocus, all_spacing = [], [], []
@@ -1693,26 +1720,36 @@ def run(args):
         except Exception:
             pass
 
-    # Lamella assignments are locked once the CSV exists — reuse automatically
-    # so that downstream commands (run-aretomo3-per-ts etc.) see stable numbering.
+    # Lamella assignments are locked once established — reuse automatically.
+    # Priority: project.json (primary) → lamella_positions.csv (backward compat)
     cluster_ids_override = None
     csv_path = out_dir / 'lamella_positions.csv'
-    if csv_path.exists():
+    _saved_positions = _proj.get('lamella_assignments', {}).get('positions', {})
+
+    if _saved_positions:
+        # Primary source — project.json
+        cluster_ids_override = {ts: pos - 1 for ts, pos in _saved_positions.items()}
+        print(f'  Lamella assignments locked — from project.json'
+              f'  ({len(cluster_ids_override)} TS)')
+    elif csv_path.exists():
+        # Backward compat — CSV from a run before project.json tracking was added
         cluster_ids_override = {}
         with open(csv_path, newline='') as fh:
             for row in csv.DictReader(fh):
                 cluster_ids_override[row['ts_name']] = int(row['lamella']) - 1
-        print(f'  Lamella assignments locked — reusing {csv_path}'
+        print(f'  Lamella assignments reused from CSV: {csv_path}'
               f'  ({len(cluster_ids_override)} TS)')
+    elif args.reuse_lamellae:
+        print(f'  WARNING: --reuse-lamellae set but no saved assignments found'
+              f' — running K-means instead')
+
+    if cluster_ids_override is not None:
         new_ts = [ts for ts in all_ts if ts not in cluster_ids_override]
         if new_ts:
-            print(f'  WARNING: {len(new_ts)} TS not in saved lamella CSV'
+            print(f'  WARNING: {len(new_ts)} TS not in saved lamella assignments'
                   f' (assigned to lamella 1 as fallback):')
             for ts in sorted(new_ts):
                 print(f'    {ts}')
-    elif args.reuse_lamellae:
-        print(f'  WARNING: --reuse-lamellae set but {csv_path} not found'
-              f' — running K-means instead')
 
     _tp = time.perf_counter()
     stage_entries, lamella_stats = plot_stage_positions(
@@ -1723,6 +1760,21 @@ def run(args):
         cluster_ids_override = cluster_ids_override,
     )
     _t2_stage = time.perf_counter() - _tp
+
+    # Save lamella assignments to project.json (invariant — written once).
+    # Read back from the CSV that plot_stage_positions() just wrote so we
+    # capture both freshly computed and reused assignments in the same place.
+    if csv_path.exists() and 'lamella_assignments' not in _proj:
+        _la_positions = {}
+        with open(csv_path, newline='') as fh:
+            for row in csv.DictReader(fh):
+                _la_positions[row['ts_name']] = int(row['lamella'])
+        update_section_once('lamella_assignments', {
+            'timestamp': datetime.datetime.now().isoformat(timespec='seconds'),
+            'n_ts':      len(_la_positions),
+            'positions': _la_positions,   # ts_name -> lamella number (1-indexed)
+        })
+
     total_frames = sum(len(d['frames']) for d in all_ts.values())
     for i, (entry_name, entry_png) in enumerate(stage_entries):
         ts_entries.insert(1 + i, {
