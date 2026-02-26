@@ -33,6 +33,11 @@ import subprocess
 from pathlib import Path
 import argparse
 
+try:
+    from tqdm import tqdm as _tqdm
+except ImportError:
+    _tqdm = None
+
 from aretomo3_preprocess.commands.run_aretomo3 import _fmt_command, _num
 from aretomo3_preprocess.shared.project_json import load as _load_project, update_section, args_to_dict
 
@@ -447,27 +452,34 @@ def run(args):
     run_log = []        # (ts_name, lamella, rot, align_z, returncode)
     cmd0_successes = [] # output mrc paths for successful cmd=0 runs
 
-    for mrc_path in mrc_files:
+    if _tqdm is not None and not args.dry_run:
+        _pbar = _tqdm(mrc_files, unit='TS', dynamic_ncols=True)
+    else:
+        _pbar = None
+    _pwrite = _pbar.write if _pbar is not None else print
+    _iter   = _pbar if _pbar is not None else mrc_files
+
+    for mrc_path in _iter:
         ts_name = mrc_path.stem
         out_mrc = out_dir / f'{ts_name}.mrc'
         out_aln = out_dir / f'{ts_name}.aln'
 
         # Skip if already done
         if out_aln.exists() and not args.overwrite:
-            print(f'  SKIP  {ts_name}  (.aln exists — use --overwrite to re-run)')
+            _pwrite(f'  SKIP  {ts_name}  (.aln exists — use --overwrite to re-run)')
             n_skip += 1
             continue
 
         # Input file must exist
         if not mrc_path.exists():
-            print(f'  SKIP  {ts_name}  input not found: {mrc_path.resolve()}')
+            _pwrite(f'  SKIP  {ts_name}  input not found: {mrc_path.resolve()}')
             n_skip += 1
             continue
 
         # Lamella lookup
         lam_id = ts_to_lamella.get(ts_name)
         if lam_id is None:
-            print(f'  WARN  {ts_name}  not in lamella_positions.csv — skipping')
+            _pwrite(f'  WARN  {ts_name}  not in lamella_positions.csv — skipping')
             n_skip += 1
             continue
 
@@ -475,23 +487,26 @@ def run(args):
         rot     = lp.get('rot_deg')
         align_z = lp.get('align_z_px')
         if rot is None or align_z is None:
-            print(f'  WARN  {ts_name}  lamella {lam_id} missing rot/AlignZ — skipping')
+            _pwrite(f'  WARN  {ts_name}  lamella {lam_id} missing rot/AlignZ — skipping')
             n_skip += 1
             continue
 
         cmd = _build_per_ts_cmd(args, mrc_path, out_dir, rot, align_z, mdoc_dir)
 
-        print(sep)
-        print(f'  {ts_name}  [lamella {lam_id}  TiltAxis={rot}°  AlignZ={align_z} px]')
-        print(f'  InPrefix : {mrc_path.resolve()}')
-        print(f'  OutDir   : {out_dir.resolve()}/')
-        print()
-        print(_fmt_command(cmd, annotate=False))
-        print()
+        _pwrite(sep)
+        _pwrite(f'  {ts_name}  [lamella {lam_id}  TiltAxis={rot}°  AlignZ={align_z} px]')
+        _pwrite(f'  InPrefix : {mrc_path.resolve()}')
+        _pwrite(f'  OutDir   : {out_dir.resolve()}/')
+        _pwrite('')
+        _pwrite(_fmt_command(cmd, annotate=False))
+        _pwrite('')
 
         if args.dry_run:
             n_run += 1
             continue
+
+        if _pbar is not None:
+            _pbar.set_description(ts_name)
 
         # ── Run and stream output ──────────────────────────────────────────
         ts_log_path = out_dir / f'{ts_name}_aretomo3.log'
@@ -504,22 +519,23 @@ def run(args):
                 universal_newlines=True,
             ) as proc:
                 for line in proc.stdout:
-                    sys.stdout.write(line)
-                    sys.stdout.flush()
+                    _pwrite(line.rstrip())
                     log_fh.write(line)
 
         rc = proc.returncode
         run_log.append((ts_name, lam_id, rot, align_z, rc))
 
         if rc != 0:
-            print(f'\n  FAILED  {ts_name}  (exit code {rc}  —  log: {ts_log_path})')
+            _pwrite(f'\n  FAILED  {ts_name}  (exit code {rc}  —  log: {ts_log_path})')
             n_fail += 1
         else:
-            print(f'\n  OK  {ts_name}')
+            _pwrite(f'  OK  {ts_name}')
             n_run += 1
             if args.cmd == 0:
                 cmd0_successes.append(out_mrc)
 
+    if _pbar is not None:
+        _pbar.close()
     print(sep)
     print(f'\nDone: {n_run} {"would run" if args.dry_run else "run"}, '
           f'{n_skip} skipped, {n_fail} failed\n')
