@@ -1750,6 +1750,19 @@ def run(args):
                   f' (assigned to lamella 1 as fallback):')
             for ts in sorted(new_ts):
                 print(f'    {ts}')
+    else:
+        # No saved assignments exist yet — require the user to declare the
+        # number of lamellae so assignments are established intentionally.
+        if args.n_lamellae is None:
+            print(
+                f'\nERROR: No lamella assignments found for this project.\n'
+                f'       Please re-run with --n-lamellae N to cluster the\n'
+                f'       {len(all_ts)} tilt series into N lamellae, e.g.:\n\n'
+                f'         aretomo3-preprocess analyse ... --n-lamellae 6\n\n'
+                f'       Assignments will be saved to project.json and locked\n'
+                f'       for all future runs.\n'
+            )
+            sys.exit(1)
 
     _tp = time.perf_counter()
     stage_entries, lamella_stats = plot_stage_positions(
