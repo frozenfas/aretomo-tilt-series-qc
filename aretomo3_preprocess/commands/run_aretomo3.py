@@ -5,30 +5,66 @@ Builds the AreTomo3 command from Python CLI arguments, prints it as a formatted
 multi-line shell snippet with inline annotations, then runs it with live
 stdout/stderr streaming captured to a log file.
 
+Pipeline modes (--cmd)
+----------------------
+Each mode expects different inputs and handles stacks / .aln files differently:
+
+  cmd  --in-suffix  --in-skips needed  Input stacks          .aln files
+  ---  -----------  -----------------  --------------------  ----------------------
+   0   mdoc         (none; mdoc mode)  raw movies via mdoc   created in --output
+   1   mrc          _CTF _Vol _EVN     --in-prefix dir (cmd=0 output)  created in --output
+                    _ODD               stacks already there
+   2   mrc          _CTF _Vol _EVN     missing from --in-prefix dir;  pre-exist in
+                    _ODD               symlinked from project.json     --in-prefix dir
+                                       input_stacks or --mrcdir
+
+For cmd=2, AreTomo3 reads the existing .aln from the --in-prefix directory and
+writes new volumes (at the requested --at-bin / --split-sum) to --output.
+Missing ts-xxx.mrc stacks are auto-symlinked into --in-prefix from project.json
+(written automatically after a cmd=0 run) or from an explicit --mrcdir.
+
+TiltAxis and AlignZ (cmd=1/2)
+------------------------------
+Supply these in one of three ways (listed in decreasing precedence):
+  1. Explicit:   --tilt-axis 86.5 3  --align-z 590
+  2. Analysis:   --analysis run001_analysis  (reads global_suggested)
+  3. Auto:       omit both — AreTomo3 estimates them
+
 Before running, validates that:
-  - the gain reference file exists
-  - input mdoc/mrc files are found matching the prefix/suffix pattern
-  - gain orientation (--flip-gain / --rot-gain) matches the recommendation in
-    aretomo3_project.json from a prior check-gain-transform run
+  - the gain reference file exists (cmd=0 only)
+  - input files are found matching the prefix/suffix/skips pattern
+  - gain orientation matches the recommendation in aretomo3_project.json
+    from a prior check-gain-transform run
   - pixel spacing (--apix) matches PixelSpacing in the mdoc files
   - voltage (--kv) matches Voltage in the mdoc files (if present)
 
 Parameter mismatches are reported as warnings that block execution unless
 --force is given.  Missing files are always fatal.
 
-On success, saves the invocation to aretomo3_project.json under the
-'run_aretomo3' key with a backup in the output directory.
+On success, saves the invocation to aretomo3_project.json.  After a cmd=0
+run the output stacks are also registered under input_stacks so that
+subsequent cmd=2 runs can locate them without --mrcdir.
 
 Typical usage
 -------------
-    aretomo3-preprocess run-aretomo3 \\
-        --output run001 \\
-        --gain gain_20260213T101027.mrc \\
-        --apix 1.63 \\
-        --fm-dose 0.52 \\
-        --gpu 2 3 \\
-        --flip-gain 1 \\
-        --dry-run
+  # cmd=0 — full pipeline (motion correction + alignment + reconstruction)
+  aretomo3-preprocess run-aretomo3 \\
+      --output run001 --gain estimated_gain.mrc \\
+      --apix 1.63 --fm-dose 0.52 --flip-gain 1 \\
+      --gpu 0 1 2 3 --dry-run
+
+  # cmd=1 — re-align from existing stacks using global analysis values
+  aretomo3-preprocess run-aretomo3 \\
+      --in-prefix run001/ts- --in-suffix mrc \\
+      --output run003 --analysis run001_analysis \\
+      --cmd 1 --apix 1.63 --gpu 0 1 2 3 --dry-run
+
+  # cmd=2 — reconstruct only (reuse run003 .aln, bin4+bin8, with EVN/ODD)
+  aretomo3-preprocess run-aretomo3 \\
+      --in-prefix run003/ts- --in-suffix mrc \\
+      --output run004 --mrcdir run001 \\
+      --cmd 2 --at-bin 4 8 --split-sum 1 \\
+      --apix 1.63 --gpu 0 1 2 3 --dry-run
 """
 
 import re
