@@ -151,6 +151,62 @@ def _stratified_sample(candidates, n, seed=42):
     return sorted(selected)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Dry-run argument table
+# ─────────────────────────────────────────────────────────────────────────────
+
+_TRAIN_ARG_HELP = {
+    'input':                   'directory containing EVN/ODD half-set volumes',
+    'vol_suffix':              'suffix between ts-name and _EVN/_ODD (e.g. "_b4")',
+    'analysis':                'analyse output dir for defocus/n_tilts data',
+    'n_vols':                  'volumes for training, selected stratified by defocus',
+    'min_tilts':               'exclude volumes with fewer than N aligned tilts',
+    'output':                  'output dir for configs, training data and model',
+    'model_name':              'model file stem (saved as <model_name>.tar.gz)',
+    'patch_shape':             'training patch size in voxels [X Y Z]',
+    'num_slices':              'sub-volume patches extracted per tomogram',
+    'tilt_axis':               'tilt axis in volume (0=X 1=Y 2=Z); 1=Y for AreTomo3 FlipVol=1',
+    'n_normalization_samples': 'patches used to estimate normalisation statistics',
+    'epochs':                  'training epochs',
+    'steps_per_epoch':         'gradient steps per epoch',
+    'batch_size':              'training mini-batch size',
+    'unet_kern_size':          'U-Net convolution kernel size',
+    'unet_n_depth':            'U-Net depth (number of down/up levels)',
+    'unet_n_first':            'U-Net first-layer feature maps',
+    'learning_rate':           'Adam optimiser learning rate',
+    'gpu':                     'GPU device ID',
+    'cryocare_dir':            'explicit path to cryoCARE scripts (if not on PATH)',
+    'dry_run':                 'write configs without running cryoCARE',
+}
+
+_PREDICT_ARG_HELP = {
+    'input':       'directory containing EVN/ODD half-set volumes',
+    'vol_suffix':  'suffix between ts-name and _EVN/_ODD (e.g. "_b4")',
+    'model':       'trained model .tar.gz (or from project.json if omitted)',
+    'analysis':    'analyse output dir for --min-tilts filtering',
+    'min_tilts':   'exclude volumes with fewer than N aligned tilts',
+    'output':      'output dir for denoised volumes',
+    'overwrite':   'overwrite existing predictions',
+    'n_tiles':     'prediction tiling [X Y Z] (reduce if GPU runs out of memory)',
+    'gpu':         'GPU device ID',
+    'cryocare_dir': 'explicit path to cryoCARE scripts (if not on PATH)',
+    'dry_run':     'write predict_config.json without running cryoCARE',
+}
+
+
+def _print_args_table(args, descriptions):
+    """Print a formatted argument table for dry-run."""
+    skip = {'func', 'command'}
+    items = [(k, v) for k, v in sorted(vars(args).items()) if k not in skip]
+    w_key = max(len(k) for k, _ in items)
+    w_val = min(30, max(len(str(v)) for _, v in items))
+    print('── Arguments ───────────────────────────────────────────────────────')
+    for k, v in items:
+        desc = descriptions.get(k, '')
+        print(f'  {k:<{w_key}}  {str(v):<{w_val}}  {desc}')
+    print()
+
+
 def _find_script(name, cryocare_dir=None):
     """Return the path to a cryoCARE script, or None if not found."""
     if cryocare_dir is not None:
@@ -251,6 +307,9 @@ def _run_train(args):
     in_dir  = Path(args.input)
     out_dir = Path(args.output)
     sep     = '─' * 70
+
+    if args.dry_run:
+        _print_args_table(args, _TRAIN_ARG_HELP)
 
     if not in_dir.is_dir():
         print(f'ERROR: --input {in_dir} not found')
@@ -459,6 +518,9 @@ def _run_predict(args):
     in_dir  = Path(args.input)
     out_dir = Path(args.output)
     sep     = '─' * 70
+
+    if args.dry_run:
+        _print_args_table(args, _PREDICT_ARG_HELP)
 
     if not in_dir.is_dir():
         print(f'ERROR: --input {in_dir} not found')
