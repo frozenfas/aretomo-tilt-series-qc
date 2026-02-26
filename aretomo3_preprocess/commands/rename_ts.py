@@ -2,11 +2,18 @@
 rename-ts — create ts-XXXX.mdoc symlinks for Position_*.mdoc files.
 
 Symlinks are created inside the input directory alongside the originals
-so AreTomo3 can find them.  A lookup table mapping ts-name -> original
-absolute path is saved to aretomo3_project.json under the 'rename_ts' key.
+so AreTomo3 can find them.
 
-For multi-session datasets, use --start to offset numbering and avoid
-collisions (e.g. session 2: --start 100).
+Each invocation of rename-ts represents one data-collection session (grid).
+Running it multiple times with increasing --start values assigns consecutive
+ts-XXXX numbers across sessions.  Each run is recorded as a separate grid in
+aretomo3_project.json, so that downstream commands (e.g. analyse) know which
+tilt series belong to the same grid and can cluster lamellae correctly.
+
+project.json structure after rename-ts:
+    rename_ts.grids.<N>  — per-grid metadata + per-grid lookup table
+    rename_ts.ts_to_grid — flat map ts-stem -> grid number (for clustering)
+    rename_ts.lookup     — merged ts-name.mdoc -> original absolute path
 """
 
 import csv
@@ -15,15 +22,20 @@ import datetime
 from pathlib import Path
 import argparse
 
-from aretomo3_preprocess.shared.project_json import update_section, args_to_dict
+from aretomo3_preprocess.shared.project_json import (
+    load as _load_project,
+    update_section, args_to_dict,
+)
 
 
-def _write_csv(lookup: dict, path: Path):
+def _write_csv(lookup: dict, ts_to_grid: dict, path: Path):
     with open(path, 'w', newline='') as fh:
         writer = csv.writer(fh)
-        writer.writerow(['ts_name', 'original_path'])
+        writer.writerow(['ts_name', 'grid', 'original_path'])
         for ts_name, orig_path in lookup.items():
-            writer.writerow([ts_name, orig_path])
+            stem = ts_name.replace('.mdoc', '')
+            grid = ts_to_grid.get(stem, '')
+            writer.writerow([ts_name, grid, orig_path])
     print(f'Lookup CSV written : {path}')
 
 
@@ -63,12 +75,18 @@ def run(args):
     digits = args.digits or len(str(args.start + n - 1))
     prefix = '[DRY RUN] ' if args.dry_run else ''
 
-    print(f'{prefix}Creating {n} symlinks in {in_dir}/')
+    # Determine grid number from existing project state
+    proj          = _load_project()
+    existing      = proj.get('rename_ts', {})
+    existing_grids = existing.get('grids', {})
+    grid_no       = max((int(g) for g in existing_grids), default=0) + 1
+
+    print(f'{prefix}Grid {grid_no} — creating {n} symlinks in {in_dir}/')
     print()
 
-    lookup = {}  # ts-name -> original absolute path (str)
+    lookup = {}   # ts-name.mdoc -> original absolute path (str), this grid only
     for i, mdoc_path in enumerate(mdoc_files, start=args.start):
-        ts_name = f'ts-{i:0{digits}d}.mdoc'
+        ts_name  = f'ts-{i:0{digits}d}.mdoc'
         symlink_path = in_dir / ts_name
         resolved = mdoc_path.resolve()
 
@@ -84,16 +102,38 @@ def run(args):
     print(f'{prefix}{n} symlinks {"would be " if args.dry_run else ""}created.')
 
     if not args.dry_run:
-        _write_csv(lookup, in_dir / 'ts_rename_lookup.csv')
-        _write_csv(lookup, Path.cwd() / 'ts_rename_lookup.csv')
+        # Merge with existing grids
+        merged_lookup     = {**existing.get('lookup', {}), **lookup}
+        merged_ts_to_grid = dict(existing.get('ts_to_grid', {}))
+        for ts_name in lookup:
+            merged_ts_to_grid[ts_name.replace('.mdoc', '')] = grid_no
+
+        new_grids = {
+            **existing_grids,
+            str(grid_no): {
+                'timestamp':  datetime.datetime.now().isoformat(timespec='seconds'),
+                'command':    ' '.join(sys.argv),
+                'args':       args_to_dict(args),
+                'input_dir':  str(in_dir.resolve()),
+                'start':      args.start,
+                'digits':     digits,
+                'n_symlinks': n,
+                'lookup':     lookup,
+            },
+        }
 
         update_section(
             section='rename_ts',
             values={
-                'command':    ' '.join(sys.argv),
-                'args':       args_to_dict(args),
-                'timestamp':  datetime.datetime.now().isoformat(timespec='seconds'),
-                'n_symlinks': n,
-                'lookup':     lookup,
+                'grids':       new_grids,
+                'ts_to_grid':  merged_ts_to_grid,
+                'lookup':      merged_lookup,
             },
         )
+
+        csv_path = Path.cwd() / 'ts_rename_lookup.csv'
+        _write_csv(merged_lookup, merged_ts_to_grid, csv_path)
+        _write_csv(merged_lookup, merged_ts_to_grid, in_dir / 'ts_rename_lookup.csv')
+
+        print(f'\nGrid {grid_no} recorded in project.json'
+              f'  ({len(existing_grids)} previous grid(s) + this one)')
