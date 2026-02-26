@@ -35,7 +35,82 @@ from pathlib import Path
 import argparse
 
 from aretomo3_preprocess.commands.run_aretomo3 import _fmt_command, _num
-from aretomo3_preprocess.shared.project_json import update_section, args_to_dict
+from aretomo3_preprocess.shared.project_json import load as _load_project, update_section, args_to_dict
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Input-stack registry helpers (project.json  ▶  input_stacks)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _read_mrc_header(path: Path) -> dict:
+    """Read nx/ny/nz and pixel size from an MRC header without loading data."""
+    try:
+        import mrcfile
+        with mrcfile.mmap(path, mode='r', permissive=True) as mrc:
+            return {
+                'path':   str(path.resolve()),
+                'nx':     int(mrc.header.nx),
+                'ny':     int(mrc.header.ny),
+                'nz':     int(mrc.header.nz),
+                'angpix': round(float(mrc.voxel_size.x), 4),
+            }
+    except Exception as exc:
+        return {'path': str(path.resolve()), 'angpix': None, 'error': str(exc)}
+
+
+def _save_stacks_to_project(mrc_paths: list, out_dir: Path):
+    """
+    Read MRC headers for all successfully produced stacks and store in
+    project.json under 'input_stacks'.  Called after a cmd=0 run; overwrites
+    any previously stored stack list for this output directory.
+    """
+    stacks = {}
+    for p in sorted(mrc_paths):
+        if p.exists():
+            stacks[p.stem] = _read_mrc_header(p)
+    if not stacks:
+        return
+    update_section(
+        section='input_stacks',
+        values={
+            'timestamp':   datetime.datetime.now().isoformat(timespec='seconds'),
+            'cmd0_outdir': str(out_dir.resolve()),
+            'n_stacks':    len(stacks),
+            'stacks':      stacks,
+        },
+    )
+    print(f'Registered {len(stacks)} input stacks in project.json  [input_stacks]')
+
+
+def _load_stacks_from_project() -> tuple:
+    """
+    Load the input_stacks section from project.json in the current directory.
+
+    Returns (mrc_files, source_info) where:
+      mrc_files   — list of Path objects (only paths that exist on disk)
+      source_info — dict with 'cmd0_outdir', 'timestamp', 'n_registered', 'n_found'
+    Returns (None, None) if the section is absent.
+    """
+    proj = _load_project()
+    stored = proj.get('input_stacks', {})
+    if not stored or not stored.get('stacks'):
+        return None, None
+
+    mrc_files = []
+    for ts_name in sorted(stored['stacks']):
+        info = stored['stacks'][ts_name]
+        p = Path(info['path'])
+        if p.exists():
+            mrc_files.append(p)
+
+    source_info = {
+        'cmd0_outdir':   stored.get('cmd0_outdir', '?'),
+        'timestamp':     stored.get('timestamp', '?'),
+        'n_registered':  stored.get('n_stacks', len(stored['stacks'])),
+        'n_found':       len(mrc_files),
+        'stacks':        stored['stacks'],
+    }
+    return mrc_files, source_info
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -125,14 +200,18 @@ def _load_lamella_params(analysis_dir: Path) -> tuple[dict, dict]:
 
 def _build_per_ts_cmd(args, mrc_path: Path, out_mrc: Path, mdoc_path: Path,
                       rot: float, align_z: int) -> list:
-    """Build the AreTomo3 command for a single tilt series."""
+    """Build the AreTomo3 command for a single tilt series.
+
+    All file paths are resolved to absolute so AreTomo3 can find them even if
+    it changes its working directory internally.
+    """
     vol_z = args.vol_z if args.vol_z is not None else align_z
 
     cmd = [args.aretomo3_bin]
-    cmd += ['-InMrc',  str(mrc_path)]
-    cmd += ['-OutMrc', str(out_mrc)]
+    cmd += ['-InMrc',  str(mrc_path.resolve())]
+    cmd += ['-OutMrc', str(out_mrc.resolve())]
     if mdoc_path.exists():
-        cmd += ['-Mdoc', str(mdoc_path)]
+        cmd += ['-Mdoc', str(mdoc_path.resolve())]
     cmd += ['-Cmd',      _num(args.cmd)]
     cmd += ['-TiltAxis', _num(rot), _num(args.tilt_axis_search)]
     cmd += ['-AlignZ',   _num(align_z)]
@@ -167,8 +246,10 @@ def add_parser(subparsers):
     )
 
     req = p.add_argument_group('required arguments')
-    req.add_argument('--mrcdir',   '-m', required=True,
-                     help='Directory containing ts-xxx.mrc input stacks')
+    req.add_argument('--mrcdir',   '-m', default=None,
+                     help='Directory containing ts-xxx.mrc input stacks. '
+                          'Optional if project.json has an input_stacks section '
+                          'from a previous --cmd 0 run; required otherwise.')
     req.add_argument('--output',   '-o', required=True,
                      help='Output directory for AreTomo3 results')
     req.add_argument('--analysis', '-A', required=True,
@@ -245,15 +326,13 @@ def add_parser(subparsers):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run(args):
-    mrc_dir  = Path(args.mrcdir)
     out_dir  = Path(args.output)
     ana_dir  = Path(args.analysis)
     mdoc_dir = Path(args.mdocdir)
 
-    for d, name in [(mrc_dir, '--mrcdir'), (ana_dir, '--analysis')]:
-        if not d.is_dir():
-            print(f'Error: {name} {d} not found')
-            sys.exit(1)
+    if not ana_dir.is_dir():
+        print(f'Error: --analysis {ana_dir} not found')
+        sys.exit(1)
 
     # ── Load per-lamella parameters ────────────────────────────────────────
     try:
@@ -272,22 +351,59 @@ def run(args):
               f'VolZ={vol_z} px')
     print()
 
-    # ── Find input stacks ──────────────────────────────────────────────────
-    all_mrc = sorted(mrc_dir.glob('ts-*.mrc'))
-    if not all_mrc:
-        print(f'No ts-*.mrc files found in {mrc_dir}')
-        sys.exit(1)
-
-    # Apply --in-skips filter (default excludes AreTomo3 side files)
-    skip_pats = [p for p in (args.in_skips or []) if p]
-    if skip_pats:
-        mrc_files = [p for p in all_mrc
-                     if not any(pat in p.stem for pat in skip_pats)]
-        n_excluded = len(all_mrc) - len(mrc_files)
-        print(f'--in-skips {skip_pats}: {n_excluded} files excluded '
-              f'({len(mrc_files)} remaining)\n')
+    # ── Resolve input stack source ─────────────────────────────────────────
+    sep_hdr = '═' * 70
+    if args.mrcdir is not None:
+        # Explicit --mrcdir: discover stacks on disk
+        mrc_dir = Path(args.mrcdir)
+        if not mrc_dir.is_dir():
+            print(f'Error: --mrcdir {mrc_dir} not found')
+            sys.exit(1)
+        all_mrc = sorted(mrc_dir.glob('ts-*.mrc'))
+        if not all_mrc:
+            print(f'No ts-*.mrc files found in {mrc_dir}')
+            sys.exit(1)
+        skip_pats = [p for p in (args.in_skips or []) if p]
+        if skip_pats:
+            mrc_files = [p for p in all_mrc
+                         if not any(pat in p.stem for pat in skip_pats)]
+            n_excluded = len(all_mrc) - len(mrc_files)
+            print(f'--in-skips {skip_pats}: {n_excluded} files excluded '
+                  f'({len(mrc_files)} remaining)')
+        else:
+            mrc_files = all_mrc
+        print(sep_hdr)
+        print(f'  INPUT STACKS  —  source: --mrcdir')
+        print(f'  Directory   : {mrc_dir.resolve()}')
+        print(f'  Stacks found: {len(mrc_files)}')
+        print(sep_hdr)
+        print()
     else:
-        mrc_files = all_mrc
+        # No --mrcdir: try project.json input_stacks (written by a prior cmd=0 run)
+        mrc_files, src_info = _load_stacks_from_project()
+        if mrc_files is None:
+            print('ERROR: No --mrcdir given and no input_stacks section found in '
+                  'project.json.')
+            print('       Options:')
+            print('         1. Run with --cmd 0 first (stores output stacks automatically)')
+            print('         2. Specify --mrcdir explicitly')
+            sys.exit(1)
+        print(sep_hdr)
+        print(f'  INPUT STACKS  —  source: project.json (cmd=0 output)')
+        print(f'  Output dir  : {src_info["cmd0_outdir"]}')
+        print(f'  Registered  : {src_info["timestamp"]}')
+        print(f'  Stacks      : {src_info["n_found"]} on disk  '
+              f'(of {src_info["n_registered"]} registered)')
+        # Show first few paths + dims as a sanity check
+        shown = list(sorted(src_info['stacks'].items()))[:3]
+        for ts_name, info in shown:
+            dims = (f'{info["nx"]}×{info["ny"]}×{info["nz"]}  '
+                    f'{info["angpix"]} Å/px' if info.get('nx') else '')
+            print(f'    {ts_name}  {dims}')
+        if len(src_info['stacks']) > 3:
+            print(f'    ... ({len(src_info["stacks"]) - 3} more)')
+        print(sep_hdr)
+        print()
 
     if not args.dry_run:
         if shutil.which(args.aretomo3_bin) is None \
@@ -297,22 +413,28 @@ def run(args):
         out_dir.mkdir(parents=True, exist_ok=True)
 
     mode = 'DRY RUN' if args.dry_run else 'RUN'
-    print(f'Found {len(mrc_files)} stacks in {mrc_dir}  '
-          f'({mode}, output → {out_dir})\n')
+    print(f'Processing {len(mrc_files)} stacks  ({mode}, output → {out_dir})\n')
 
     sep = '─' * 70
     n_run = n_skip = n_fail = 0
-    run_log = []   # (ts_name, lamella, rot, align_z, returncode)
+    run_log = []        # (ts_name, lamella, rot, align_z, returncode)
+    cmd0_successes = [] # output mrc paths for successful cmd=0 runs
 
     for mrc_path in mrc_files:
-        ts_name  = mrc_path.stem
-        out_mrc  = out_dir  / f'{ts_name}.mrc'
-        out_aln  = out_dir  / f'{ts_name}.aln'
+        ts_name   = mrc_path.stem
+        out_mrc   = out_dir  / f'{ts_name}.mrc'
+        out_aln   = out_dir  / f'{ts_name}.aln'
         mdoc_path = mdoc_dir / f'{ts_name}.mdoc'
 
         # Skip if already done
         if out_aln.exists() and not args.overwrite:
             print(f'  SKIP  {ts_name}  (.aln exists — use --overwrite to re-run)')
+            n_skip += 1
+            continue
+
+        # Input file must exist
+        if not mrc_path.exists():
+            print(f'  SKIP  {ts_name}  input not found: {mrc_path.resolve()}')
             n_skip += 1
             continue
 
@@ -335,6 +457,8 @@ def run(args):
 
         print(sep)
         print(f'  {ts_name}  [lamella {lam_id}  TiltAxis={rot}°  AlignZ={align_z} px]')
+        print(f'  InMrc  : {mrc_path.resolve()}')
+        print(f'  OutMrc : {out_mrc.resolve()}')
         print()
         print(_fmt_command(cmd, annotate=False))
         print()
@@ -367,12 +491,23 @@ def run(args):
         else:
             print(f'\n  OK  {ts_name}')
             n_run += 1
+            if args.cmd == 0:
+                cmd0_successes.append(out_mrc)
 
     print(sep)
     print(f'\nDone: {n_run} {"would run" if args.dry_run else "run"}, '
           f'{n_skip} skipped, {n_fail} failed\n')
 
     if not args.dry_run:
+        # After a cmd=0 run, register output stacks in project.json so that
+        # subsequent cmd=1 runs can find them without needing --mrcdir.
+        if args.cmd == 0 and cmd0_successes:
+            print(f'cmd=0 run complete — registering {len(cmd0_successes)} '
+                  f'output stacks in project.json')
+            _save_stacks_to_project(cmd0_successes, out_dir)
+            print(f'  Next cmd=1 run can omit --mrcdir; stacks will be loaded '
+                  f'automatically from project.json\n')
+
         update_section(
             section='run_aretomo3_per_ts',
             values={
