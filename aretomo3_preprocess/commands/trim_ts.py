@@ -152,13 +152,21 @@ def write_newst(path, ts_name, xf_name, output_ali, bin_factor, keep_indices,
     full raw .mrc.  IMOD newstack uses section-number indexing for the xf
     (verified experimentally), so the full unmodified xf is safe to use.
 
-    out_x / out_y: output image size in pixels (before binning).  When the xf
+    out_x / out_y: output image size in pixels (pre-bin).  When the xf
     includes a large in-plane rotation, specifying a larger output size avoids
     clipping the image content at the top/bottom.  Calculated from the ROT
     angle by _calc_output_size() if not supplied.
+
+    SizeToOutputInXandY is specified in post-bin (output) pixels, so out_x
+    and out_y are divided by bin_factor before writing.  _calc_output_size
+    rounds them to a multiple of bin_factor so the division is always exact.
     """
     sections_str = ','.join(str(i) for i in keep_indices)
-    size_line = f'SizeToOutputInXandY\t{out_x},{out_y}\n' if (out_x and out_y) else ''
+    if out_x and out_y:
+        size_line = (f'SizeToOutputInXandY\t'
+                     f'{out_x // bin_factor},{out_y // bin_factor}\n')
+    else:
+        size_line = ''
     content = (
         f'$newstack -StandardInput\n'
         f'InputFile\t{ts_name}.mrc\n'
