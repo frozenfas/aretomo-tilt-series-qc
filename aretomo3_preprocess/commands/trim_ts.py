@@ -30,6 +30,12 @@ import math
 import subprocess
 from pathlib import Path
 
+try:
+    from tqdm import tqdm as _tqdm
+except ImportError:
+    def _tqdm(it, **kw):
+        return it
+
 
 def _calc_output_size(w, h, rot_deg):
     """
@@ -167,9 +173,9 @@ def write_newst(path, ts_name, xf_name, output_ali, bin_factor, keep_indices,
     Path(path).write_text(content)
 
 
-def _run_submfg(work_dir, com_file, ts_name):
+def _run_submfg(work_dir, com_file, ts_name, pwrite=print):
     """Run submfg <com_file> from work_dir synchronously. Print result."""
-    print(f'    submfg {com_file} ...', end=' ', flush=True)
+    pwrite(f'    submfg {com_file} ...')
     try:
         result = subprocess.run(
             ['submfg', com_file],
@@ -178,15 +184,15 @@ def _run_submfg(work_dir, com_file, ts_name):
             text=True,
         )
     except FileNotFoundError:
-        print('FAILED — submfg not found in PATH')
+        pwrite(f'    submfg {com_file}: FAILED — submfg not found in PATH')
         return
     if result.returncode == 0:
-        print('OK')
+        pwrite(f'    submfg {com_file}: OK')
     else:
-        print(f'FAILED (exit {result.returncode})')
+        pwrite(f'    submfg {com_file}: FAILED (exit {result.returncode})')
         for line in (result.stdout + result.stderr).splitlines()[-5:]:
             if line.strip():
-                print(f'      {line}')
+                pwrite(f'      {line}')
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -305,7 +311,10 @@ def run(args):
     n_done = n_skip = 0
     processed_ts = []   # TS names successfully processed (for link folders)
 
-    for ts_name, data in all_parsed.items():
+    _pbar = _tqdm(list(all_parsed.items()), desc='trim-ts', unit='TS', ncols=80)
+    _pwrite = getattr(_pbar, 'write', print)
+
+    for ts_name, data in _pbar:
         imod_src  = in_dir / f'{ts_name}_Imod'
         order_csv = imod_src / f'{ts_name}_order_list.csv'
         xf_src    = imod_src / f'{ts_name}_st.xf'
@@ -313,7 +322,7 @@ def run(args):
 
         missing = [p for p in (imod_src, order_csv, xf_src) if not p.exists()]
         if missing:
-            print(f'SKIP {ts_name}: missing {[p.name for p in missing]}')
+            _pwrite(f'SKIP {ts_name}: missing {[p.name for p in missing]}')
             n_skip += 1
             continue
 
@@ -332,8 +341,8 @@ def run(args):
 
         for miss, label in ((dark_miss, 'dark'), (flagged_miss, 'flagged')):
             if miss:
-                print(f'  WARNING {ts_name}: {len(miss)} {label} tilt(s) unmatched: '
-                      f'{[f"{t:.1f}" for t in miss]}')
+                _pwrite(f'  WARNING {ts_name}: {len(miss)} {label} tilt(s) unmatched: '
+                        f'{[f"{t:.1f}" for t in miss]}')
 
         nodark_keep = sorted(all_sec_idx - dark_secs)
         clean_keep  = sorted(all_sec_idx - dark_secs - flagged_secs)
@@ -354,7 +363,7 @@ def run(args):
         if not mrc_link.exists():
             mrc_link.symlink_to(mrc_dir / f'{ts_name}.mrc')
         if not (mrc_dir / f'{ts_name}.mrc').exists():
-            print(f'  WARNING {ts_name}: source .mrc not found at {mrc_dir}')
+            _pwrite(f'  WARNING {ts_name}: source .mrc not found at {mrc_dir}')
 
         xf_link = ts_out / f'{ts_name}_st.xf'
         if not xf_link.exists():
@@ -399,18 +408,18 @@ def run(args):
         n_total  = len(all_sec_idx)
         n_dark   = len(dark_secs)
         n_extra  = len(flagged_secs - dark_secs)
-        print(f'{sep}')
-        print(f'  {ts_name}')
-        print(f'    Total sections         : {n_total}')
-        print(f'    Dark excluded          : {n_dark}')
-        print(f'    Misaligned (extra)     : {n_extra}')
-        print(f'    nodark keeps           : {len(nodark_keep)}  sections')
-        print(f'    clean  keeps           : {len(clean_keep)}  sections')
+        _pwrite(f'{sep}')
+        _pwrite(f'  {ts_name}')
+        _pwrite(f'    Total sections         : {n_total}')
+        _pwrite(f'    Dark excluded          : {n_dark}')
+        _pwrite(f'    Misaligned (extra)     : {n_extra}')
+        _pwrite(f'    nodark keeps           : {len(nodark_keep)}  sections')
+        _pwrite(f'    clean  keeps           : {len(clean_keep)}  sections')
 
         if args.run_submfg in ('nodark', 'both'):
-            _run_submfg(ts_out, 'newst_nodark.com', ts_name)
+            _run_submfg(ts_out, 'newst_nodark.com', ts_name, pwrite=_pwrite)
         if args.run_submfg in ('clean', 'both'):
-            _run_submfg(ts_out, 'newst_clean.com', ts_name)
+            _run_submfg(ts_out, 'newst_clean.com', ts_name, pwrite=_pwrite)
 
         processed_ts.append(ts_name)
         n_done += 1
