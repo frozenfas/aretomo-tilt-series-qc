@@ -381,8 +381,8 @@ def _validate(args) -> tuple:
     if not in_dir.is_dir():
         errors.append(f'Input directory not found: {in_dir}/')
     elif not mdoc_files:
-        if args.in_suffix == 'mrc':
-            # In dry-run, symlinks haven't been created yet — check project.json
+        if args.in_suffix == 'mrc' and args.cmd == 2:
+            # cmd=2 dry-run: symlinks not yet created — check project.json/mrcdir
             proj_stacks = load_or_create().get('input_stacks', {}).get('stacks', {})
             mrcdir_ok   = args.mrcdir is not None and Path(args.mrcdir).is_dir()
             if proj_stacks:
@@ -599,11 +599,13 @@ def run(args):
     out_dir = Path(args.output)
     in_dir  = Path(args.in_prefix).parent
 
-    # ── MRC symlinks: ensure ts-xxx.mrc files exist in the input directory ─
-    # For cmd=1/2 the input directory has .aln files but not the raw stacks.
-    # Stacks come from the cmd=0 run (registered in project.json) or from
-    # an explicit --mrcdir (for stacks produced outside this tool).
-    if args.in_suffix == 'mrc':
+    # ── MRC symlinks (cmd=2 only) ──────────────────────────────────────────
+    # cmd=1: --in-prefix points directly at the cmd=0 output dir which has
+    #        the stacks; no symlinks needed, fresh .aln is written to OutDir.
+    # cmd=2: --in-prefix points at a previous run dir that has .aln files but
+    #        not the raw stacks (those are in the cmd=0 output).  Symlink them
+    #        in from project.json input_stacks or explicit --mrcdir.
+    if args.in_suffix == 'mrc' and args.cmd == 2:
         in_dir.mkdir(parents=True, exist_ok=True)
         mrcdir = Path(args.mrcdir) if args.mrcdir is not None else None
         _ensure_mrc_symlinks(in_dir, mrcdir=mrcdir,
