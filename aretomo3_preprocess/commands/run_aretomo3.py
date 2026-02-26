@@ -33,6 +33,7 @@ Typical usage
 
 import re
 import sys
+import json
 import shutil
 import datetime
 import subprocess
@@ -355,6 +356,22 @@ def _register_cmd0_stacks(out_dir: Path, in_skips: list = None):
     print(f'Registered {len(stacks)} input stacks in project.json  [input_stacks]')
 
 
+def _load_global_params(analysis_dir: Path) -> dict:
+    """Load global_suggested TiltAxis and AlignZ from an analyse output dir.
+
+    Returns {'rot_deg': float, 'align_z_px': int} or {} if not found.
+    """
+    proj_path = analysis_dir / 'aretomo3_project.json'
+    if not proj_path.exists():
+        return {}
+    try:
+        with open(proj_path) as fh:
+            proj = json.load(fh)
+    except Exception:
+        return {}
+    return proj.get('analyse', {}).get('global_suggested', {})
+
+
 def _validate(args) -> tuple:
     """Run pre-flight checks.
 
@@ -569,12 +586,17 @@ def add_parser(subparsers):
                      help='Write IMOD XF transform files (-OutXF)')
     ali.add_argument('--out-imod', type=int, default=1,
                      help='Write IMOD support files for RELION (-OutImod)')
+    ali.add_argument('--analysis', default=None,
+                     help='analyse output directory; loads global suggested '
+                          'TiltAxis and AlignZ from aretomo3_project.json. '
+                          'Explicit --tilt-axis / --align-z take precedence.')
     ali.add_argument('--tilt-axis', type=float, nargs='+', default=None,
                      metavar='ANGLE',
-                     help='Tilt axis angle [REFINE_FLAG]; auto-detected if omitted (-TiltAxis)')
+                     help='Tilt axis angle [REFINE_FLAG]; overrides --analysis; '
+                          'auto-detected if neither given (-TiltAxis)')
     ali.add_argument('--align-z', type=int, default=None,
-                     help='Sample thickness for alignment in pixels; '
-                          'auto-estimated if omitted (-AlignZ)')
+                     help='Sample thickness for alignment in pixels; overrides '
+                          '--analysis; auto-estimated if neither given (-AlignZ)')
     ali.add_argument('--group', type=int, nargs=2, default=None,
                      metavar=('GLOBAL', 'LOCAL'),
                      help='Frame grouping GLOBAL LOCAL; AreTomo3 default if omitted (-Group)')
@@ -635,6 +657,33 @@ def run(args):
             sys.exit(1)
 
     print()
+
+    # ── Load global TiltAxis / AlignZ from analysis (if requested) ─────────
+    if args.analysis is not None:
+        ana_dir = Path(args.analysis)
+        gp = _load_global_params(ana_dir)
+        if not gp:
+            print(f'Warning: no global_suggested found in '
+                  f'{ana_dir}/aretomo3_project.json — skipping\n')
+        else:
+            print(f'Global parameters from {ana_dir}/:')
+            rot_deg    = gp.get('rot_deg')
+            align_z_px = gp.get('align_z_px')
+            if rot_deg is not None:
+                if args.tilt_axis is None:
+                    args.tilt_axis = [rot_deg]
+                    print(f'  TiltAxis : {rot_deg}°  (analysis global_suggested)')
+                else:
+                    print(f'  TiltAxis : {args.tilt_axis}  (explicit --tilt-axis, '
+                          f'analysis={rot_deg}° ignored)')
+            if align_z_px is not None:
+                if args.align_z is None:
+                    args.align_z = align_z_px
+                    print(f'  AlignZ   : {align_z_px} px  (analysis global_suggested)')
+                else:
+                    print(f'  AlignZ   : {args.align_z} px  (explicit --align-z, '
+                          f'analysis={align_z_px} px ignored)')
+            print()
 
     # ── Build and print command ────────────────────────────────────────────
     cmd = _build_cmd(args)
