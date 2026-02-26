@@ -53,6 +53,7 @@ _FLAG_COMMENTS = {
     '-InSuffix':     'input file suffix (mdoc=live pipeline, mrc=offline)',
     '-InSkips':      'filename patterns to skip',
     '-OutDir':       'output directory',
+    '-LogDir':       'directory for AreTomo3 internal log files',
     '-Gain':         'gain reference file (.mrc or .gain)',
     '-FlipGain':     'flip gain: 0=none 1=flipud',
     '-RotGain':      'rotate gain: 0=none 1=90CCW 2=180 3=270CCW',
@@ -156,7 +157,8 @@ def _build_cmd(args) -> list:
     if args.in_skips is not None:
         cmd += ['-InSkips'] + list(args.in_skips)
 
-    cmd += ['-OutDir', args.output]
+    cmd += ['-OutDir',  args.output]
+    cmd += ['-LogDir',  args.output]
     if args.gain is not None:
         cmd += ['-Gain',     args.gain]
         cmd += ['-FlipGain', _num(args.flip_gain)]

@@ -221,6 +221,7 @@ def _build_per_ts_cmd(args, mrc_path: Path, out_dir: Path,
     cmd = [args.aretomo3_bin]
     cmd += ['-InPrefix', str(mrc_path.resolve())]
     cmd += ['-OutDir',   str(out_dir.resolve()) + '/']
+    cmd += ['-LogDir',   str(out_dir.resolve()) + '/']
     if args.cmd == 0 and mdoc_dir is not None:
         cmd += ['-Mdoc', str(mdoc_dir)]
     cmd += ['-Serial', '0']
