@@ -392,6 +392,156 @@ def _register_cmd0_stacks(out_dir: Path, in_skips: list = None):
     print(f'Registered {len(stacks)} input stacks in project.json  [input_stacks]')
 
 
+def _filter_alns_for_overlap(in_dir: Path, analysis_dir: Path,
+                             threshold: float, dry_run: bool = False) -> int:
+    """
+    Demote low-overlap frames in .aln files to DarkFrame entries for cmd=2 runs.
+
+    For each ts-*.aln in in_dir, reads per-frame overlap_pct values from
+    alignment_data.json in analysis_dir.  Frames with overlap_pct < threshold
+    are removed from the aligned-data section and added as DarkFrame entries
+    in the .aln header so that AreTomo3 cmd=2 excludes them from reconstruction.
+
+    Before modifying, the original .aln is backed up as ts-xxx.aln.bak.
+    If a .bak already exists (from a previous run with a different threshold),
+    it is restored first so re-runs are always applied to the unmodified original.
+
+    Returns the total number of frames demoted across all TS.
+    """
+    tag = '[DRY RUN] ' if dry_run else ''
+    sep = '─' * 70
+
+    aln_json = Path(analysis_dir) / 'alignment_data.json'
+    if not aln_json.exists():
+        print(f'ERROR: --analysis {analysis_dir}: alignment_data.json not found')
+        sys.exit(1)
+
+    with open(aln_json) as fh:
+        aln_data = json.load(fh)
+
+    aln_files = sorted(Path(in_dir).glob('ts-*.aln'))
+    if not aln_files:
+        print(f'Warning: no ts-*.aln files found in {in_dir} for overlap filtering')
+        return 0
+
+    print(f'{tag}Overlap filter: demoting frames with overlap_pct < {threshold}%')
+    print(f'  .aln directory : {in_dir}/')
+    print(f'  Analysis source: {analysis_dir}/alignment_data.json')
+    print(sep)
+
+    n_total  = 0
+    n_ts_mod = 0
+    for aln_file in aln_files:
+        ts_name = aln_file.stem
+        ts_data = aln_data.get(ts_name)
+        if not ts_data:
+            continue
+
+        # Collect SECs to demote from the analysis frames list
+        demote = {}  # sec → overlap_pct
+        for f in ts_data.get('frames', []):
+            ov = f.get('overlap_pct')
+            if ov is not None and ov < threshold:
+                demote[f['sec']] = ov
+
+        if not demote:
+            continue
+
+        # Show what will be demoted
+        ov_strs = ', '.join(f'{demote[s]:.0f}%' for s in sorted(demote))
+        print(f'  {ts_name}: {len(demote)} frame(s) → DarkFrame  (overlap: {ov_strs})')
+
+        n_total  += len(demote)
+        n_ts_mod += 1
+
+        if dry_run:
+            continue
+
+        # ── Restore from backup if one exists (idempotent re-runs) ────────────
+        bak = aln_file.with_suffix('.aln.bak')
+        if bak.exists():
+            shutil.copy2(bak, aln_file)
+            print(f'    Restored from backup: {bak.name}')
+        else:
+            shutil.copy2(aln_file, bak)
+            print(f'    Backed up: {bak.name}')
+
+        # ── Read current (original) .aln ──────────────────────────────────────
+        raw_lines = aln_file.read_text().splitlines(keepends=True)
+
+        # Scan data rows for the TILT values of demoted SECs
+        tilt_of = {}   # sec → tilt
+        for line in raw_lines:
+            stripped = line.strip()
+            if not stripped.startswith('#') and stripped:
+                parts = stripped.split()
+                if len(parts) == 10:
+                    try:
+                        sec = int(parts[0])
+                        if sec in demote:
+                            tilt_of[sec] = float(parts[9])
+                    except ValueError:
+                        pass
+
+        # ── Rewrite .aln ──────────────────────────────────────────────────────
+        # Strategy:
+        #   • All lines pass through unchanged EXCEPT:
+        #     - Data rows for demoted SECs are dropped
+        #     - New DarkFrame entries are inserted just before '# AlphaOffset'
+        new_lines = []
+        inserted = False
+        for line in raw_lines:
+            stripped = line.rstrip('\n').strip()
+
+            # Insert new DarkFrame lines immediately before # AlphaOffset
+            if not inserted and stripped.startswith('# AlphaOffset'):
+                for sec in sorted(demote):
+                    tilt = tilt_of.get(sec, 0.0)
+                    new_lines.append(
+                        f'# DarkFrame = {sec - 1:5d}{sec:5d} {tilt:8.2f}\n'
+                    )
+                inserted = True
+
+            # Drop demoted data rows
+            if not stripped.startswith('#') and stripped:
+                parts = stripped.split()
+                if len(parts) == 10:
+                    try:
+                        if int(parts[0]) in demote:
+                            continue
+                    except ValueError:
+                        pass
+
+            new_lines.append(line if line.endswith('\n') else line + '\n')
+
+        # Edge case: no AlphaOffset line found — append at end of header block
+        if not inserted:
+            last_hdr = max(
+                (i for i, l in enumerate(new_lines) if l.strip().startswith('#')),
+                default=-1,
+            )
+            insert_at = last_hdr + 1
+            new_dark = [
+                f'# DarkFrame = {sec - 1:5d}{sec:5d} {tilt_of.get(sec, 0.0):8.2f}\n'
+                for sec in sorted(demote)
+            ]
+            new_lines = new_lines[:insert_at] + new_dark + new_lines[insert_at:]
+
+        aln_file.write_text(''.join(new_lines))
+        print(f'    Written : {aln_file.name}')
+
+    print(sep)
+    if n_total == 0:
+        print(f'  No frames below {threshold}% overlap — .aln files not modified.\n')
+    else:
+        print(f'{tag}{n_total} frame(s) demoted across {n_ts_mod} TS.\n')
+        if not dry_run:
+            print(f'  To restore originals:')
+            print(f'    for f in {in_dir}/ts-*.aln.bak; do cp "$f" "${{f%.bak}}"; done\n')
+
+    return n_total
+
+
 def _load_global_params(analysis_dir: Path) -> dict:
     """Load global_suggested TiltAxis and AlignZ from an analyse output dir.
 
@@ -637,7 +787,15 @@ def add_parser(subparsers):
     ali.add_argument('--analysis', default=None,
                      help='analyse output directory; loads global suggested '
                           'TiltAxis and AlignZ from aretomo3_project.json. '
+                          'Also used by --filter-overlap. '
                           'Explicit --tilt-axis / --align-z take precedence.')
+    ali.add_argument('--filter-overlap', type=float, default=None,
+                     metavar='PCT',
+                     help='cmd=2 only: before reconstruction, demote frames '
+                          'with overlap_pct < PCT to DarkFrame in each .aln '
+                          'file (reads alignment_data.json from --analysis). '
+                          'Originals backed up as ts-xxx.aln.bak; re-running '
+                          'with a new threshold restores from backup first.')
     ali.add_argument('--tilt-axis', type=float, nargs='+', default=None,
                      metavar='ANGLE',
                      help='Tilt axis angle [REFINE_FLAG]; overrides --analysis; '
@@ -732,6 +890,22 @@ def run(args):
                     print(f'  AlignZ   : {args.align_z} px  (explicit --align-z, '
                           f'analysis={align_z_px} px ignored)')
             print()
+
+    # ── Overlap-based .aln filtering (cmd=2 only) ──────────────────────────
+    if args.filter_overlap is not None:
+        if args.cmd != 2:
+            print('Warning: --filter-overlap only applies to --cmd 2 — ignoring.\n')
+        elif args.analysis is None:
+            print('ERROR: --filter-overlap requires --analysis '
+                  '(alignment_data.json source).')
+            sys.exit(1)
+        else:
+            _filter_alns_for_overlap(
+                in_dir       = in_dir,
+                analysis_dir = Path(args.analysis),
+                threshold    = args.filter_overlap,
+                dry_run      = args.dry_run,
+            )
 
     # ── Build and print command ────────────────────────────────────────────
     cmd = _build_cmd(args)
