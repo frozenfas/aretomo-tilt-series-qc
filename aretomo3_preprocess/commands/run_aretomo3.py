@@ -13,14 +13,16 @@ Each mode expects different inputs and handles stacks / .aln files differently:
   ---  -------------------  -----------  -----------------------  ---------------------  ------------------
    0   frames/ts-           mdoc         (none — mdoc mode)       raw movies via mdoc    created in --output
    1   <cmd0 output>/ts-    mrc          _CTF,_Vol,_EVN,_ODD      already in --in-prefix created in --output
-   2   <prev run>/ts-       mrc          _CTF,_Vol,_EVN,_ODD      missing; symlinked     pre-exist in
-                                                                   from project.json or   --in-prefix dir
-                                                                   --mrcdir
+   2   <prev run>/ts-       mrc          _CTF,_Vol,_EVN,_ODD      symlinked into         pre-exist in
+                                                                   staging dir            --in-prefix dir
+                                                                   (--output/_input/)
 
 For cmd=2, AreTomo3 reads the existing .aln from the --in-prefix directory and
 writes new volumes (at the requested --at-bin / --split-sum) to --output.
-Missing ts-xxx.mrc stacks are auto-symlinked into --in-prefix from project.json
-(written automatically after a cmd=0 run) or from an explicit --mrcdir.
+A staging directory (--output/_input/) is created containing symlinks to the
+.aln files (from --in-prefix) and .mrc/.TLT stacks (from project.json or
+--mrcdir).  AreTomo3 is pointed at the staging directory so the source run is
+never modified.
 
 TiltAxis and AlignZ (cmd=1/2)
 ------------------------------
@@ -276,98 +278,120 @@ def _find_input_files(in_prefix: str, in_suffix: str,
     return in_dir, pattern, files
 
 
-def _ensure_mrc_symlinks(in_dir: Path, mrcdir: Path = None,
-                         in_skips: list = None, dry_run: bool = False) -> int:
+def _setup_cmd2_staging(out_dir: Path, src_in_dir: Path,
+                        mrcdir: Path = None, in_skips: list = None,
+                        dry_run: bool = False) -> Path:
     """
-    For cmd=2 runs: the input directory has .aln files but is missing the
-    raw tilt-series stacks and _TLT.txt files.  Look up the stack locations
-    from project.json input_stacks (written after a cmd=0 run) and create
-    symlinks for both ts-xxx.mrc and ts-xxx_TLT.txt in in_dir.
+    Create a staging directory out_dir/_input/ for cmd=2 runs.
 
-    If project.json has no input_stacks, fall back to scanning --mrcdir
-    (required for datasets where the stacks were not produced by this tool).
+    Populates it with symlinks to:
+      - ts-xxx.aln      →  src_in_dir/ts-xxx.aln         (alignment files)
+      - ts-xxx.mrc      →  <source>/ts-xxx.mrc            (tilt-series stacks)
+      - ts-xxx_TLT.txt  →  <source>/ts-xxx_TLT.txt       (frame ordering)
 
-    Returns the number of .mrc symlinks created (or that would be created).
+    The MRC/TLT source is project.json input_stacks (from a prior cmd=0 run)
+    or the explicit --mrcdir fallback.
+
+    src_in_dir (e.g. run003) is NEVER modified — only read.
+    Symlinks are created even during --dry-run because the staging directory
+    is inside the output dir (cheap and easily removed).
+
+    Returns the staging directory path.
     """
-    tag = '[DRY RUN] ' if dry_run else ''
     sep = '═' * 70
+    staging_dir = out_dir / '_input'
 
-    # ── Source 1: project.json input_stacks ───────────────────────────────
+    # ── Source for MRC stacks and _TLT.txt ────────────────────────────────
     proj   = load_or_create()
     stored = proj.get('input_stacks', {})
     stacks = stored.get('stacks', {})
 
     if stacks:
         source_label = f'project.json  (cmd=0 run {stored.get("timestamp", "?")})'
-        source_dir   = stored.get('cmd0_outdir', '?')
         src_root     = Path(stored.get('cmd0_outdir', '.'))
         all_ts       = sorted(stacks)
-        to_link_mrc  = []
-        for ts_name in all_ts:
-            dst = in_dir / f'{ts_name}.mrc'
-            if not dst.exists() and not dst.is_symlink():
-                to_link_mrc.append((ts_name, Path(stacks[ts_name]['path'])))
+        mrc_sources  = {ts: Path(stacks[ts]['path']) for ts in all_ts}
 
-    # ── Source 2: explicit --mrcdir fallback ──────────────────────────────
     elif mrcdir is not None:
         if not mrcdir.is_dir():
             print(f'ERROR: --mrcdir {mrcdir} not found')
             sys.exit(1)
-        skips    = [s for s in (in_skips or []) if s]
-        src_root = mrcdir.resolve()
-        all_mrc  = sorted(mrcdir.glob('ts-*.mrc'))
-        src_files = [f for f in all_mrc
-                     if not any(s in f.stem for s in skips)]
+        skips        = [s for s in (in_skips or []) if s]
+        src_root     = mrcdir.resolve()
         source_label = f'--mrcdir  {src_root}'
-        source_dir   = str(src_root)
+        src_files    = [f for f in sorted(mrcdir.glob('ts-*.mrc'))
+                        if not any(s in f.stem for s in skips)]
         all_ts       = [f.stem for f in src_files]
-        to_link_mrc  = []
-        for f in src_files:
-            dst = in_dir / f.name
-            if not dst.exists() and not dst.is_symlink():
-                to_link_mrc.append((f.stem, f.resolve()))
+        mrc_sources  = {f.stem: f.resolve() for f in src_files}
 
     else:
-        return 0
+        # No MRC source — still create ALN symlinks (mrc validation will handle error)
+        source_label = 'none'
+        src_root     = None
+        all_ts       = sorted(p.stem for p in src_in_dir.glob('ts-*.aln'))
+        mrc_sources  = {}
 
-    # ── _TLT.txt symlinks — checked independently of MRC (may already exist) ─
-    # _TLT.txt describes frame ordering in the .mrc stack and never changes
-    # after cmd=0, so a symlink from the source directory is sufficient.
-    to_link_tlt = []
+    staging_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── Build lists of links to create ────────────────────────────────────
+    to_link_aln = []
     for ts_name in all_ts:
-        tlt_src = Path(src_root) / f'{ts_name}_TLT.txt'
-        tlt_dst = in_dir         / f'{ts_name}_TLT.txt'
-        if tlt_src.exists() and not tlt_dst.exists() and not tlt_dst.is_symlink():
-            to_link_tlt.append((ts_name, tlt_src))
+        aln_src = src_in_dir / f'{ts_name}.aln'
+        aln_dst = staging_dir / f'{ts_name}.aln'
+        if aln_src.exists() and not aln_dst.exists() and not aln_dst.is_symlink():
+            to_link_aln.append((ts_name, aln_src.resolve()))
 
-    if not to_link_mrc and not to_link_tlt:
-        return 0
+    to_link_mrc = []
+    for ts_name, src in mrc_sources.items():
+        mrc_dst = staging_dir / f'{ts_name}.mrc'
+        if not mrc_dst.exists() and not mrc_dst.is_symlink():
+            to_link_mrc.append((ts_name, Path(src)))
+
+    to_link_tlt = []
+    if src_root is not None:
+        for ts_name in all_ts:
+            tlt_src = src_root / f'{ts_name}_TLT.txt'
+            tlt_dst = staging_dir / f'{ts_name}_TLT.txt'
+            if tlt_src.exists() and not tlt_dst.exists() and not tlt_dst.is_symlink():
+                to_link_tlt.append((ts_name, tlt_src.resolve()))
+
+    if not to_link_aln and not to_link_mrc and not to_link_tlt:
+        print(f'  Staging dir {staging_dir}/ already populated — skipping symlink creation.')
+        return staging_dir
 
     print(sep)
-    print(f'  {tag}MRC INPUT STACKS  —  source: {source_label}')
-    print(f'  Stack dir : {source_dir}')
+    print(f'  CMD=2 STAGING DIRECTORY  →  {staging_dir}/')
+    print(f'  .aln source    : {src_in_dir}/')
+    if src_root is not None:
+        print(f'  MRC/TLT source : {source_label}')
     parts = []
-    if to_link_mrc:  parts.append(f'{len(to_link_mrc)} .mrc stacks')
-    if to_link_tlt:  parts.append(f'{len(to_link_tlt)} _TLT.txt files')
-    print(f'  Linking   : {" + ".join(parts)} into {in_dir}/')
-    for ts_name, src in to_link_mrc[:5]:
-        print(f'    {tag}{ts_name}.mrc  →  {src}')
-    if len(to_link_mrc) > 5:
-        print(f'    ... ({len(to_link_mrc) - 5} more .mrc)')
+    if to_link_aln: parts.append(f'{len(to_link_aln)} .aln')
+    if to_link_mrc: parts.append(f'{len(to_link_mrc)} .mrc')
+    if to_link_tlt: parts.append(f'{len(to_link_tlt)} _TLT.txt')
+    print(f'  Linking        : {" + ".join(parts)}')
+    if to_link_aln:
+        print(f'    {to_link_aln[0][0]}.aln  →  {to_link_aln[0][1]}')
+        if len(to_link_aln) > 1:
+            print(f'    ... ({len(to_link_aln) - 1} more .aln)')
+    if to_link_mrc:
+        print(f'    {to_link_mrc[0][0]}.mrc  →  {to_link_mrc[0][1]}')
+        if len(to_link_mrc) > 1:
+            print(f'    ... ({len(to_link_mrc) - 1} more .mrc)')
     if to_link_tlt:
-        print(f'    {tag}{to_link_tlt[0][0]}_TLT.txt  →  {to_link_tlt[0][1]}')
+        print(f'    {to_link_tlt[0][0]}_TLT.txt  →  {to_link_tlt[0][1]}')
         if len(to_link_tlt) > 1:
             print(f'    ... ({len(to_link_tlt) - 1} more _TLT.txt)')
     print(sep)
     print()
 
-    if not dry_run:
-        for ts_name, src in to_link_mrc:
-            (in_dir / f'{ts_name}.mrc').symlink_to(src)
-        for ts_name, src in to_link_tlt:
-            (in_dir / f'{ts_name}_TLT.txt').symlink_to(src)
+    for ts_name, src in to_link_aln:
+        (staging_dir / f'{ts_name}.aln').symlink_to(src)
+    for ts_name, src in to_link_mrc:
+        (staging_dir / f'{ts_name}.mrc').symlink_to(src)
+    for ts_name, src in to_link_tlt:
+        (staging_dir / f'{ts_name}_TLT.txt').symlink_to(src)
 
-    return len(to_link_mrc)
+    return staging_dir
 
 
 def _register_cmd0_stacks(out_dir: Path, in_skips: list = None):
@@ -416,19 +440,21 @@ def _register_cmd0_stacks(out_dir: Path, in_skips: list = None):
     print(f'Registered {len(stacks)} input stacks in project.json  [input_stacks]')
 
 
-def _filter_alns_for_overlap(in_dir: Path, analysis_dir: Path,
+def _filter_alns_for_overlap(staging_dir: Path, src_in_dir: Path,
+                             analysis_dir: Path,
                              threshold: float, dry_run: bool = False) -> int:
     """
-    Demote low-overlap frames in .aln files to DarkFrame entries for cmd=2 runs.
+    Demote low-overlap frames to DarkFrame entries for cmd=2 runs.
 
-    For each ts-*.aln in in_dir, reads per-frame overlap_pct values from
-    alignment_data.json in analysis_dir.  Frames with overlap_pct < threshold
-    are removed from the aligned-data section and added as DarkFrame entries
-    in the .aln header so that AreTomo3 cmd=2 excludes them from reconstruction.
+    Reads each ts-*.aln from src_in_dir (original source, never modified).
+    For frames with overlap_pct < threshold, removes the data row and inserts
+    a DarkFrame header entry so AreTomo3 cmd=2 excludes them from reconstruction.
 
-    Before modifying, the original .aln is backed up as ts-xxx.aln.bak.
-    If a .bak already exists (from a previous run with a different threshold),
-    it is restored first so re-runs are always applied to the unmodified original.
+    The modified .aln is written into staging_dir, replacing the existing
+    symlink with a real file.  src_in_dir is NEVER touched.
+
+    Re-running with a different threshold always re-reads from src_in_dir, so
+    the staging copy is always consistent with the current threshold.
 
     Returns the total number of frames demoted across all TS.
     """
@@ -443,13 +469,15 @@ def _filter_alns_for_overlap(in_dir: Path, analysis_dir: Path,
     with open(aln_json) as fh:
         aln_data = json.load(fh)
 
-    aln_files = sorted(Path(in_dir).glob('ts-*.aln'))
+    # Read from original source — never touch src_in_dir
+    aln_files = sorted(Path(src_in_dir).glob('ts-*.aln'))
     if not aln_files:
-        print(f'Warning: no ts-*.aln files found in {in_dir} for overlap filtering')
+        print(f'Warning: no ts-*.aln files found in {src_in_dir} for overlap filtering')
         return 0
 
     print(f'{tag}Overlap filter: demoting frames with overlap_pct < {threshold}%')
-    print(f'  .aln directory : {in_dir}/')
+    print(f'  .aln source    : {src_in_dir}/')
+    print(f'  Writing to     : {staging_dir}/')
     print(f'  Analysis source: {analysis_dir}/alignment_data.json')
     print(sep)
 
@@ -481,16 +509,7 @@ def _filter_alns_for_overlap(in_dir: Path, analysis_dir: Path,
         if dry_run:
             continue
 
-        # ── Restore from backup if one exists (idempotent re-runs) ────────────
-        bak = aln_file.with_suffix('.aln.bak')
-        if bak.exists():
-            shutil.copy2(bak, aln_file)
-            print(f'    Restored from backup: {bak.name}')
-        else:
-            shutil.copy2(aln_file, bak)
-            print(f'    Backed up: {bak.name}')
-
-        # ── Read current (original) .aln ──────────────────────────────────────
+        # ── Read from original source ──────────────────────────────────────────
         raw_lines = aln_file.read_text().splitlines(keepends=True)
 
         # Scan data rows for the TILT values of demoted SECs
@@ -507,7 +526,7 @@ def _filter_alns_for_overlap(in_dir: Path, analysis_dir: Path,
                     except ValueError:
                         pass
 
-        # ── Rewrite .aln ──────────────────────────────────────────────────────
+        # ── Build modified .aln ────────────────────────────────────────────────
         # Strategy:
         #   • All lines pass through unchanged EXCEPT:
         #     - Data rows for demoted SECs are dropped
@@ -551,8 +570,12 @@ def _filter_alns_for_overlap(in_dir: Path, analysis_dir: Path,
             ]
             new_lines = new_lines[:insert_at] + new_dark + new_lines[insert_at:]
 
-        aln_file.write_text(''.join(new_lines))
-        print(f'    Written : {aln_file.name}')
+        # ── Write to staging dir (replace symlink with real file) ─────────────
+        staging_aln = staging_dir / f'{ts_name}.aln'
+        if staging_aln.exists() or staging_aln.is_symlink():
+            staging_aln.unlink()
+        staging_aln.write_text(''.join(new_lines))
+        print(f'    Written to staging: {staging_aln.name}')
 
     print(sep)
     if n_total == 0:
@@ -560,8 +583,7 @@ def _filter_alns_for_overlap(in_dir: Path, analysis_dir: Path,
     else:
         print(f'{tag}{n_total} frame(s) demoted across {n_ts_mod} TS.\n')
         if not dry_run:
-            print(f'  To restore originals:')
-            print(f'    for f in {in_dir}/ts-*.aln.bak; do cp "$f" "${{f%.bak}}"; done\n')
+            print(f'  Source .aln files in {src_in_dir}/ were NOT modified.\n')
 
     return n_total
 
@@ -818,8 +840,8 @@ def add_parser(subparsers):
                      help='cmd=2 only: before reconstruction, demote frames '
                           'with overlap_pct < PCT to DarkFrame in each .aln '
                           'file (reads alignment_data.json from --analysis). '
-                          'Originals backed up as ts-xxx.aln.bak; re-running '
-                          'with a new threshold restores from backup first.')
+                          'Modified .aln files are written to the staging dir '
+                          '(--output/_input/); the source run is never touched.')
     ali.add_argument('--tilt-axis', type=float, nargs='+', default=None,
                      metavar='ANGLE',
                      help='Tilt axis angle [REFINE_FLAG]; overrides --analysis; '
@@ -848,20 +870,30 @@ def add_parser(subparsers):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run(args):
-    out_dir = Path(args.output)
-    in_dir  = Path(args.in_prefix).parent
+    out_dir    = Path(args.output)
+    src_in_dir = Path(args.in_prefix).parent  # original source (e.g. run003)
+    staging_dir = None
 
-    # ── MRC symlinks (cmd=2 only) ──────────────────────────────────────────
-    # cmd=1: --in-prefix points directly at the cmd=0 output dir which has
-    #        the stacks; no symlinks needed, fresh .aln is written to OutDir.
-    # cmd=2: --in-prefix points at a previous run dir that has .aln files but
-    #        not the raw stacks (those are in the cmd=0 output).  Symlink them
-    #        in from project.json input_stacks or explicit --mrcdir.
+    # ── Staging directory (cmd=2 only) ────────────────────────────────────
+    # cmd=1: --in-prefix points at the cmd=0 output dir which has the stacks;
+    #        no staging needed, fresh .aln is written to OutDir.
+    # cmd=2: a staging dir (--output/_input/) is created with symlinks to the
+    #        .aln files (from src_in_dir) and .mrc/.TLT stacks (from project.json
+    #        or --mrcdir).  AreTomo3 is pointed at the staging dir.  src_in_dir
+    #        (e.g. run003) is NEVER modified.
     if args.in_suffix == 'mrc' and args.cmd == 2:
-        in_dir.mkdir(parents=True, exist_ok=True)
         mrcdir = Path(args.mrcdir) if args.mrcdir is not None else None
-        _ensure_mrc_symlinks(in_dir, mrcdir=mrcdir,
-                             in_skips=args.in_skips, dry_run=args.dry_run)
+        staging_dir = _setup_cmd2_staging(
+            out_dir    = out_dir,
+            src_in_dir = src_in_dir,
+            mrcdir     = mrcdir,
+            in_skips   = args.in_skips,
+            dry_run    = args.dry_run,
+        )
+        stem = Path(args.in_prefix).name      # e.g. 'ts-'
+        args.in_prefix = str(staging_dir / stem)
+
+    in_dir = Path(args.in_prefix).parent  # staging_dir for cmd=2, src_in_dir otherwise
 
     # ── Pre-flight validation ──────────────────────────────────────────────
     print('Pre-flight checks:')
@@ -925,7 +957,8 @@ def run(args):
             sys.exit(1)
         else:
             _filter_alns_for_overlap(
-                in_dir       = in_dir,
+                staging_dir  = staging_dir,
+                src_in_dir   = src_in_dir,
                 analysis_dir = Path(args.analysis),
                 threshold    = args.filter_overlap,
                 dry_run      = args.dry_run,
