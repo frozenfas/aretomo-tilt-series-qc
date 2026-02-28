@@ -921,31 +921,38 @@ def run(args):
     print()
 
     # ── Load global TiltAxis / AlignZ from analysis (if requested) ─────────
+    # cmd=2 is recon-only: alignment parameters are encoded in the .aln file,
+    # so TiltAxis / AlignZ from analysis are not applicable.  --analysis is
+    # still accepted (needed for --filter-overlap) but params are not loaded.
     if args.analysis is not None:
-        ana_dir = Path(args.analysis)
-        gp = _load_global_params(ana_dir)
-        if not gp:
-            print(f'Warning: no global_suggested found in '
-                  f'{ana_dir}/aretomo3_project.json — skipping\n')
+        if args.cmd == 2:
+            print(f'Note: cmd=2 — TiltAxis/AlignZ not loaded from --analysis '
+                  f'(already encoded in .aln files)\n')
         else:
-            print(f'Global parameters from {ana_dir}/:')
-            rot_deg    = gp.get('rot_deg')
-            align_z_px = gp.get('align_z_px')
-            if rot_deg is not None:
-                if args.tilt_axis is None:
-                    args.tilt_axis = [rot_deg]
-                    print(f'  TiltAxis : {rot_deg}°  (analysis global_suggested)')
-                else:
-                    print(f'  TiltAxis : {args.tilt_axis}  (explicit --tilt-axis, '
-                          f'analysis={rot_deg}° ignored)')
-            if align_z_px is not None:
-                if args.align_z is None:
-                    args.align_z = align_z_px
-                    print(f'  AlignZ   : {align_z_px} px  (analysis global_suggested)')
-                else:
-                    print(f'  AlignZ   : {args.align_z} px  (explicit --align-z, '
-                          f'analysis={align_z_px} px ignored)')
-            print()
+            ana_dir = Path(args.analysis)
+            gp = _load_global_params(ana_dir)
+            if not gp:
+                print(f'Warning: no global_suggested found in '
+                      f'{ana_dir}/aretomo3_project.json — skipping\n')
+            else:
+                print(f'Global parameters from {ana_dir}/:')
+                rot_deg    = gp.get('rot_deg')
+                align_z_px = gp.get('align_z_px')
+                if rot_deg is not None:
+                    if args.tilt_axis is None:
+                        args.tilt_axis = [rot_deg]
+                        print(f'  TiltAxis : {rot_deg}°  (analysis global_suggested)')
+                    else:
+                        print(f'  TiltAxis : {args.tilt_axis}  (explicit --tilt-axis, '
+                              f'analysis={rot_deg}° ignored)')
+                if align_z_px is not None:
+                    if args.align_z is None:
+                        args.align_z = align_z_px
+                        print(f'  AlignZ   : {align_z_px} px  (analysis global_suggested)')
+                    else:
+                        print(f'  AlignZ   : {args.align_z} px  (explicit --align-z, '
+                              f'analysis={align_z_px} px ignored)')
+                print()
 
     # ── Overlap-based .aln filtering (cmd=2 only) ──────────────────────────
     if args.filter_overlap is not None:
