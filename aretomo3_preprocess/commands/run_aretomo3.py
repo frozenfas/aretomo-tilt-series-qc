@@ -279,14 +279,15 @@ def _find_input_files(in_prefix: str, in_suffix: str,
 def _ensure_mrc_symlinks(in_dir: Path, mrcdir: Path = None,
                          in_skips: list = None, dry_run: bool = False) -> int:
     """
-    For cmd=1/2 runs: the input directory has .aln files but is missing the
-    raw tilt-series stacks.  Look up the stack locations from project.json
-    input_stacks (written after a cmd=0 run) and create symlinks in in_dir.
+    For cmd=2 runs: the input directory has .aln files but is missing the
+    raw tilt-series stacks and _TLT.txt files.  Look up the stack locations
+    from project.json input_stacks (written after a cmd=0 run) and create
+    symlinks for both ts-xxx.mrc and ts-xxx_TLT.txt in in_dir.
 
     If project.json has no input_stacks, fall back to scanning --mrcdir
     (required for datasets where the stacks were not produced by this tool).
 
-    Returns the number of symlinks created (or that would be created).
+    Returns the number of .mrc symlinks created (or that would be created).
     """
     tag = '[DRY RUN] ' if dry_run else ''
     sep = '═' * 70
@@ -299,51 +300,74 @@ def _ensure_mrc_symlinks(in_dir: Path, mrcdir: Path = None,
     if stacks:
         source_label = f'project.json  (cmd=0 run {stored.get("timestamp", "?")})'
         source_dir   = stored.get('cmd0_outdir', '?')
-        to_link = []
-        for ts_name in sorted(stacks):
+        src_root     = Path(stored.get('cmd0_outdir', '.'))
+        all_ts       = sorted(stacks)
+        to_link_mrc  = []
+        for ts_name in all_ts:
             dst = in_dir / f'{ts_name}.mrc'
             if not dst.exists() and not dst.is_symlink():
-                to_link.append((ts_name, Path(stacks[ts_name]['path'])))
+                to_link_mrc.append((ts_name, Path(stacks[ts_name]['path'])))
 
     # ── Source 2: explicit --mrcdir fallback ──────────────────────────────
     elif mrcdir is not None:
         if not mrcdir.is_dir():
             print(f'ERROR: --mrcdir {mrcdir} not found')
             sys.exit(1)
-        skips = [s for s in (in_skips or []) if s]
-        all_mrc = sorted(mrcdir.glob('ts-*.mrc'))
+        skips    = [s for s in (in_skips or []) if s]
+        src_root = mrcdir.resolve()
+        all_mrc  = sorted(mrcdir.glob('ts-*.mrc'))
         src_files = [f for f in all_mrc
                      if not any(s in f.stem for s in skips)]
-        source_label = f'--mrcdir  {mrcdir.resolve()}'
-        source_dir   = str(mrcdir.resolve())
-        to_link = []
+        source_label = f'--mrcdir  {src_root}'
+        source_dir   = str(src_root)
+        all_ts       = [f.stem for f in src_files]
+        to_link_mrc  = []
         for f in src_files:
             dst = in_dir / f.name
             if not dst.exists() and not dst.is_symlink():
-                to_link.append((f.stem, f.resolve()))
+                to_link_mrc.append((f.stem, f.resolve()))
 
     else:
         return 0
 
-    if not to_link:
+    # ── _TLT.txt symlinks — checked independently of MRC (may already exist) ─
+    # _TLT.txt describes frame ordering in the .mrc stack and never changes
+    # after cmd=0, so a symlink from the source directory is sufficient.
+    to_link_tlt = []
+    for ts_name in all_ts:
+        tlt_src = Path(src_root) / f'{ts_name}_TLT.txt'
+        tlt_dst = in_dir         / f'{ts_name}_TLT.txt'
+        if tlt_src.exists() and not tlt_dst.exists() and not tlt_dst.is_symlink():
+            to_link_tlt.append((ts_name, tlt_src))
+
+    if not to_link_mrc and not to_link_tlt:
         return 0
 
     print(sep)
     print(f'  {tag}MRC INPUT STACKS  —  source: {source_label}')
     print(f'  Stack dir : {source_dir}')
-    print(f'  Linking   : {len(to_link)} stacks into {in_dir}/')
-    for ts_name, src in to_link[:5]:
+    parts = []
+    if to_link_mrc:  parts.append(f'{len(to_link_mrc)} .mrc stacks')
+    if to_link_tlt:  parts.append(f'{len(to_link_tlt)} _TLT.txt files')
+    print(f'  Linking   : {" + ".join(parts)} into {in_dir}/')
+    for ts_name, src in to_link_mrc[:5]:
         print(f'    {tag}{ts_name}.mrc  →  {src}')
-    if len(to_link) > 5:
-        print(f'    ... ({len(to_link) - 5} more)')
+    if len(to_link_mrc) > 5:
+        print(f'    ... ({len(to_link_mrc) - 5} more .mrc)')
+    if to_link_tlt:
+        print(f'    {tag}{to_link_tlt[0][0]}_TLT.txt  →  {to_link_tlt[0][1]}')
+        if len(to_link_tlt) > 1:
+            print(f'    ... ({len(to_link_tlt) - 1} more _TLT.txt)')
     print(sep)
     print()
 
     if not dry_run:
-        for ts_name, src in to_link:
+        for ts_name, src in to_link_mrc:
             (in_dir / f'{ts_name}.mrc').symlink_to(src)
+        for ts_name, src in to_link_tlt:
+            (in_dir / f'{ts_name}_TLT.txt').symlink_to(src)
 
-    return len(to_link)
+    return len(to_link_mrc)
 
 
 def _register_cmd0_stacks(out_dir: Path, in_skips: list = None):
