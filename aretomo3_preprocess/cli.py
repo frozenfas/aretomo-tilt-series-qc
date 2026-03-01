@@ -3,7 +3,7 @@
 import argparse
 from aretomo3_preprocess.commands import (
     analyse, trim_ts, check_gain_transform, validate_mdoc,
-    rename_ts, run_aretomo3, run_aretomo3_per_ts, cryocare,
+    rename_ts, run_aretomo3, run_aretomo3_per_ts, cryocare, enrich,
 )
 
 
@@ -18,6 +18,7 @@ def main():
     check_gain_transform.add_parser(sub)
     validate_mdoc.add_parser(sub)
     rename_ts.add_parser(sub)
+    enrich.add_parser(sub)
     run_aretomo3.add_parser(sub)
     run_aretomo3_per_ts.add_parser(sub)
     analyse.add_parser(sub)

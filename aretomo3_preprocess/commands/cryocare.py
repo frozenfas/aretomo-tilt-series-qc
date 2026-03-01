@@ -53,6 +53,7 @@ import argparse
 from aretomo3_preprocess.shared.project_json import (
     load_or_create, update_section, args_to_dict,
 )
+from aretomo3_preprocess.shared.project_state import get_latest_analysis_dir
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -304,6 +305,13 @@ def _add_train_parser(subparsers):
 
 
 def _run_train(args):
+    # Auto-fill --analysis from project.json if not given
+    if args.analysis is None:
+        _auto = get_latest_analysis_dir()
+        if _auto is not None:
+            args.analysis = str(_auto)
+            print(f'Note: --analysis not given; using project.json → {args.analysis}')
+
     in_dir  = Path(args.input)
     out_dir = Path(args.output)
     sep     = '─' * 70
@@ -515,6 +523,12 @@ def _add_predict_parser(subparsers):
 
 
 def _run_predict(args):
+    # Auto-fill --analysis from project.json if not given
+    if args.analysis is None:
+        _auto = get_latest_analysis_dir()
+        if _auto is not None:
+            args.analysis = str(_auto)
+
     in_dir  = Path(args.input)
     out_dir = Path(args.output)
     sep     = '─' * 70

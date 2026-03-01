@@ -39,82 +39,11 @@ except ImportError:
     _tqdm = None
 
 from aretomo3_preprocess.commands.run_aretomo3 import _fmt_command, _num
-from aretomo3_preprocess.shared.project_json import load as _load_project, update_section, args_to_dict
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Input-stack registry helpers (project.json  ▶  input_stacks)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _read_mrc_header(path: Path) -> dict:
-    """Read nx/ny/nz and pixel size from an MRC header without loading data."""
-    try:
-        import mrcfile
-        with mrcfile.mmap(path, mode='r', permissive=True) as mrc:
-            return {
-                'path':   str(path.resolve()),
-                'nx':     int(mrc.header.nx),
-                'ny':     int(mrc.header.ny),
-                'nz':     int(mrc.header.nz),
-                'angpix': round(float(mrc.voxel_size.x), 4),
-            }
-    except Exception as exc:
-        return {'path': str(path.resolve()), 'angpix': None, 'error': str(exc)}
-
-
-def _save_stacks_to_project(mrc_paths: list, out_dir: Path):
-    """
-    Read MRC headers for all successfully produced stacks and store in
-    project.json under 'input_stacks'.  Called after a cmd=0 run; overwrites
-    any previously stored stack list for this output directory.
-    """
-    stacks = {}
-    for p in sorted(mrc_paths):
-        if p.exists():
-            stacks[p.stem] = _read_mrc_header(p)
-    if not stacks:
-        return
-    update_section(
-        section='input_stacks',
-        values={
-            'timestamp':   datetime.datetime.now().isoformat(timespec='seconds'),
-            'cmd0_outdir': str(out_dir.resolve()),
-            'n_stacks':    len(stacks),
-            'stacks':      stacks,
-        },
-    )
-    print(f'Registered {len(stacks)} input stacks in project.json  [input_stacks]')
-
-
-def _load_stacks_from_project() -> tuple:
-    """
-    Load the input_stacks section from project.json in the current directory.
-
-    Returns (mrc_files, source_info) where:
-      mrc_files   — list of Path objects (only paths that exist on disk)
-      source_info — dict with 'cmd0_outdir', 'timestamp', 'n_registered', 'n_found'
-    Returns (None, None) if the section is absent.
-    """
-    proj = _load_project()
-    stored = proj.get('input_stacks', {})
-    if not stored or not stored.get('stacks'):
-        return None, None
-
-    mrc_files = []
-    for ts_name in sorted(stored['stacks']):
-        info = stored['stacks'][ts_name]
-        p = Path(info['path'])
-        if p.exists():
-            mrc_files.append(p)
-
-    source_info = {
-        'cmd0_outdir':   stored.get('cmd0_outdir', '?'),
-        'timestamp':     stored.get('timestamp', '?'),
-        'n_registered':  stored.get('n_stacks', len(stored['stacks'])),
-        'n_found':       len(mrc_files),
-        'stacks':        stored['stacks'],
-    }
-    return mrc_files, source_info
+from aretomo3_preprocess.shared.project_json import update_section, args_to_dict
+from aretomo3_preprocess.shared.project_state import (
+    get_angpix, get_frames_dir, get_latest_analysis_dir,
+    register_input_stacks, load_input_stacks,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -266,19 +195,23 @@ def add_parser(subparsers):
                           'from a previous --cmd 0 run; required otherwise.')
     req.add_argument('--output',   '-o', required=True,
                      help='Output directory for AreTomo3 results')
-    req.add_argument('--analysis', '-A', required=True,
+    req.add_argument('--analysis', '-A', default=None,
                      help='analyse output directory (lamella_positions.csv + '
-                          'aretomo3_project.json)')
+                          'aretomo3_project.json). Auto-read from project.json '
+                          '(analyse.output_dir) if omitted.')
     req.add_argument('--gpu',      '-G', type=int, nargs='+', required=True,
                      metavar='ID',
                      help='GPU ID(s) to use (-Gpu)')
-    req.add_argument('--apix',     '-a', type=float, required=True,
-                     help='Pixel size in Å/px (-PixSize)')
+    req.add_argument('--apix',     '-a', type=float, default=None,
+                     help='Pixel size in Å/px (-PixSize). '
+                          'Auto-read from project.json (mdoc_data) if omitted.')
 
     inp = p.add_argument_group('input')
-    inp.add_argument('--mdocdir', default='frames',
+    inp.add_argument('--mdocdir', default=None,
                      help='Directory containing ts-xxx.mdoc files; '
-                          'passed as -Mdoc for --cmd 0 only (default: frames)')
+                          'passed as -Mdoc for --cmd 0 only. '
+                          'Auto-read from project.json (rename_ts.input) if omitted; '
+                          'falls back to "frames".')
     inp.add_argument('--aln-dir', default=None,
                      help='Directory containing .aln files to copy into --output '
                           'before running; required when --cmd 2 (reconstruction '
@@ -348,6 +281,29 @@ def add_parser(subparsers):
 
 def run(args):
     out_dir  = Path(args.output)
+
+    # ── Auto-fill from project.json if not given on CLI ────────────────────
+    if args.analysis is None:
+        _auto = get_latest_analysis_dir()
+        if _auto is not None:
+            args.analysis = str(_auto)
+            print(f'Note: --analysis not given; using project.json → {args.analysis}')
+    if args.analysis is None:
+        print('ERROR: --analysis not provided and no analysis dir found in project.json.')
+        print('       Run analyse first, or supply --analysis explicitly.')
+        sys.exit(1)
+
+    if args.apix is None:
+        args.apix = get_angpix()
+    if args.apix is None:
+        print('ERROR: --apix not provided and no pixel size found in project.json.')
+        print('       Run validate-mdoc first, or supply --apix explicitly.')
+        sys.exit(1)
+
+    if args.mdocdir is None:
+        _fd = get_frames_dir()
+        args.mdocdir = str(_fd) if _fd is not None else 'frames'
+
     ana_dir  = Path(args.analysis)
 
     if not ana_dir.is_dir():
@@ -400,7 +356,7 @@ def run(args):
         print()
     else:
         # No --mrcdir: try project.json input_stacks (written by a prior cmd=0 run)
-        mrc_files, src_info = _load_stacks_from_project()
+        mrc_files, src_info = load_input_stacks()
         if mrc_files is None:
             print('ERROR: No --mrcdir given and no input_stacks section found in '
                   'project.json.')
@@ -577,9 +533,8 @@ def run(args):
         # After a cmd=0 run, register output stacks in project.json so that
         # subsequent cmd=1 runs can find them without needing --mrcdir.
         if args.cmd == 0 and cmd0_successes:
-            print(f'cmd=0 run complete — registering {len(cmd0_successes)} '
-                  f'output stacks in project.json')
-            _save_stacks_to_project(cmd0_successes, out_dir)
+            print(f'cmd=0 run complete — registering output stacks in project.json')
+            register_input_stacks(out_dir, in_skips=args.in_skips)
             print(f'  Next cmd=1 run can omit --mrcdir; stacks will be loaded '
                   f'automatically from project.json\n')
 

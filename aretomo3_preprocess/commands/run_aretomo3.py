@@ -80,6 +80,9 @@ import argparse
 from aretomo3_preprocess.shared.project_json import (
     load_or_create, update_section, args_to_dict,
 )
+from aretomo3_preprocess.shared.project_state import (
+    get_angpix, register_input_stacks,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -394,51 +397,6 @@ def _setup_cmd2_staging(out_dir: Path, src_in_dir: Path,
     return staging_dir
 
 
-def _register_cmd0_stacks(out_dir: Path, in_skips: list = None):
-    """
-    After a successful cmd=0 run, scan out_dir for ts-*.mrc stacks and
-    register them in project.json input_stacks so that subsequent cmd=1/2
-    runs can find them without needing --mrcdir.
-    """
-    try:
-        import mrcfile
-    except ImportError:
-        mrcfile = None
-
-    skips = [s for s in (in_skips or []) if s]
-    all_mrc = sorted(out_dir.glob('ts-*.mrc'))
-    stacks_mrc = [f for f in all_mrc
-                  if not any(s in f.stem for s in skips)]
-    if not stacks_mrc:
-        return
-
-    stacks = {}
-    for f in stacks_mrc:
-        info = {'path': str(f.resolve())}
-        if mrcfile is not None:
-            try:
-                with mrcfile.mmap(f, mode='r', permissive=True) as m:
-                    info.update({
-                        'nx': int(m.header.nx),
-                        'ny': int(m.header.ny),
-                        'nz': int(m.header.nz),
-                        'angpix': round(float(m.voxel_size.x), 4),
-                    })
-            except Exception:
-                pass
-        stacks[f.stem] = info
-
-    update_section(
-        section='input_stacks',
-        values={
-            'timestamp':   datetime.datetime.now().isoformat(timespec='seconds'),
-            'cmd0_outdir': str(out_dir.resolve()),
-            'n_stacks':    len(stacks),
-            'stacks':      stacks,
-        },
-    )
-    print(f'Registered {len(stacks)} input stacks in project.json  [input_stacks]')
-
 
 def _filter_alns_for_overlap(staging_dir: Path, src_in_dir: Path,
                              analysis_dir: Path,
@@ -751,8 +709,9 @@ def add_parser(subparsers):
                      help='Gain reference file (.mrc or .gain) (-Gain). '
                           'Required for --cmd 0 (motion correction); '
                           'not needed for --cmd 1+ (alignment/recon only).')
-    req.add_argument('--apix', '-a', type=float, required=True,
-                     help='Pixel size of input movies in Å/px (-PixSize)')
+    req.add_argument('--apix', '-a', type=float, default=None,
+                     help='Pixel size of input movies in Å/px (-PixSize). '
+                          'Auto-read from project.json (mdoc_data) if omitted.')
     req.add_argument('--fm-dose', '-d', type=float, default=None,
                      help='Electron dose per raw frame in e⁻/Å² (-FmDose). '
                           'Required for --cmd 0 (motion correction); '
@@ -873,6 +832,14 @@ def run(args):
     out_dir    = Path(args.output)
     src_in_dir = Path(args.in_prefix).parent  # original source (e.g. run003)
     staging_dir = None
+
+    # ── Auto-fill from project.json if not given on CLI ────────────────────
+    if args.apix is None:
+        args.apix = get_angpix()
+    if args.apix is None:
+        print('ERROR: --apix not provided and no pixel size found in project.json')
+        print('       Run validate-mdoc first, or supply --apix explicitly.')
+        sys.exit(1)
 
     # ── Staging directory (cmd=2 only) ────────────────────────────────────
     # cmd=1: --in-prefix points at the cmd=0 output dir which has the stacks;
@@ -1039,7 +1006,7 @@ def run(args):
 
     # ── Register cmd=0 output stacks for use by later cmd=1/2 runs ────────
     if args.cmd == 0:
-        _register_cmd0_stacks(out_dir, in_skips=args.in_skips)
+        register_input_stacks(out_dir, in_skips=args.in_skips)
 
     # ── Save to project JSON ───────────────────────────────────────────────
     update_section(

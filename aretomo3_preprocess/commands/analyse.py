@@ -36,6 +36,9 @@ from aretomo3_preprocess.shared.project_json import (
     load as _load_project,
     update_section, args_to_dict,
 )
+from aretomo3_preprocess.shared.project_state import (
+    get_angpix, get_frames_dir, get_cmd0_outdir, get_gain_check_dir,
+)
 from aretomo3_preprocess.shared.parsers import (
     parse_aln_file, parse_ctf_file, parse_tlt_file, parse_mdoc_file,
     _float_or_none,
@@ -1318,32 +1321,27 @@ def add_parser(subparsers):
                    help='Output directory for plots, JSON, TSV, and HTML')
     p.add_argument('--threshold', '-t', type=float, default=80.0,
                    help='%% overlap below which a frame is flagged')
-    p.add_argument('--mdocdir',   '-m', default='frames',
+    p.add_argument('--mdocdir',   '-m', default=None,
                    help='Directory containing per-TS .mdoc files '
-                        '(ts-xxx.mdoc expected; skip enrichment if absent)')
+                        '(ts-xxx.mdoc expected; skip enrichment if absent). '
+                        'Auto-read from project.json (rename_ts.input) if omitted; '
+                        'falls back to "frames".')
     p.add_argument('--angpix',    '-a', type=float, default=None,
                    help='Pixel size in Å/px — used to convert thickness from '
-                        'pixels to nm.  If omitted, read from mdoc PixelSpacing.')
+                        'pixels to nm.  Auto-read from project.json (mdoc_data) '
+                        'if omitted; then from mdoc PixelSpacing.')
     p.add_argument('--mrcdir',    '-r', default=None,
                    help='Directory containing ts-xxx.mrc raw stacks for MRC '
                         'header sanity checks (nx/ny/nz vs .aln).  '
-                        'Defaults to --input; per-TS check silently skipped '
-                        'if the .mrc file is not found.  '
-                        'For --cmd 1 re-alignment runs, point to the previous '
-                        'run directory (e.g. run001).')
+                        'Auto-read from project.json (input_stacks.cmd0_outdir) '
+                        'if omitted; defaults to --input.')
     p.add_argument('--tltdir',    '-T', default=None,
                    help='Directory containing ts-xxx_TLT.txt files.  '
-                        'Defaults to --input.  AreTomo3 only writes _TLT.txt '
-                        'when processing raw movies (--cmd 0); for re-alignment '
-                        'runs (--cmd 1) point to the prior run that has them '
-                        '(e.g. run001).  Without _TLT.txt, mdoc enrichment '
-                        '(stage positions, dose) is skipped.')
-    p.add_argument('--gain-check-dir', '-g', default=None,
-                   help='Output directory from a previous check-gain-transform '
-                        'run (must contain aretomo3_project.json backup, '
-                        'corrected_averages.png, cv_vs_nmovies.png).  When '
-                        'provided, a "Gain Transform Check" tab is prepended '
-                        'to the HTML report.')
+                        'Auto-read from project.json (input_stacks.cmd0_outdir) '
+                        'if omitted; defaults to --input.  AreTomo3 only writes '
+                        '_TLT.txt when processing raw movies (--cmd 0); for '
+                        're-alignment runs (--cmd 1) point to the prior run that '
+                        'has them.')
     p.add_argument('--n-lamellae', '-n', type=int, default=None,
                    help='Expected number of lamellae on the grid.  When set, '
                         'K-means clustering is applied to the stage X-Y '
@@ -1373,6 +1371,20 @@ def run(args):
     if not aln_files:
         print(f'No .aln files found in {in_dir}')
         return
+
+    # ── Auto-fill from project.json if not given on CLI ──────────────────────
+    if args.mdocdir is None:
+        _fd = get_frames_dir()
+        args.mdocdir = str(_fd) if _fd is not None else 'frames'
+
+    if args.angpix is None:
+        args.angpix = get_angpix()
+
+    _cmd0_outdir = get_cmd0_outdir()
+    if args.mrcdir is None and _cmd0_outdir is not None:
+        args.mrcdir = str(_cmd0_outdir)
+    if args.tltdir is None and _cmd0_outdir is not None:
+        args.tltdir = str(_cmd0_outdir)
 
     mdoc_dir = Path(args.mdocdir)
     if not _HAS_MDOCFILE:
@@ -1718,6 +1730,11 @@ def run(args):
         cluster_ids_override = {ts: pos - 1 for ts, pos in _saved_positions.items()}
         print(f'  Lamella assignments locked — from project.json'
               f'  ({len(cluster_ids_override)} TS)')
+        if args.n_lamellae is not None:
+            print(f'  WARNING: --n-lamellae {args.n_lamellae} is ignored because '
+                  f'lamella assignments are already locked in project.json.\n'
+                  f'           To re-cluster, delete the lamella_assignments section '
+                  f'from project.json first.')
 
     if cluster_ids_override is not None:
         new_ts = [ts for ts in all_ts if ts not in cluster_ids_override]
@@ -1791,18 +1808,11 @@ def run(args):
                 f'{row["tx"]:.3f}\t{row["ty"]:.3f}\t{row["overlap_pct"]:.2f}\n'
             )
 
-    # ── Load gain-check results (optional) ───────────────────────────────────
-    gain_check = None
-    if args.gain_check_dir:
-        gc_dir = Path(args.gain_check_dir)
-        gc_json = gc_dir / 'aretomo3_project.json'
-        if not gc_json.exists():
-            print(f'WARNING: --gain-check-dir {gc_dir} has no aretomo3_project.json — '
-                  f'gain check tab skipped\n')
-        else:
-            with open(gc_json) as fh:
-                proj = json.load(fh)
-            gain_check = proj.get('gain_check')
+    # ── Load gain-check results from project.json (automatic) ────────────────
+    gain_check = _proj.get('gain_check')
+    if gain_check is not None:
+        gc_dir = get_gain_check_dir()
+        if gc_dir is not None:
             # Copy gain-check PNGs into the output directory so the HTML is
             # self-contained (relative src= paths work from any location).
             for png_name in ('corrected_averages.png', 'cv_vs_nmovies.png'):
@@ -1810,8 +1820,8 @@ def run(args):
                 if src.exists():
                     shutil.copy2(src, out_dir / png_name)
                 else:
-                    print(f'WARNING: gain-check PNG not found: {src}')
-            print(f'Gain check results loaded from {gc_dir}\n')
+                    print(f'Note: gain-check PNG not found: {src}')
+            print(f'Gain check results loaded from project.json (dir: {gc_dir})\n')
 
     # HTML
     _tp = time.perf_counter()
