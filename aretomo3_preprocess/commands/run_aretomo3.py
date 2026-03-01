@@ -195,7 +195,10 @@ def _build_cmd(args) -> list:
 
     cmd += ['-InPrefix', args.in_prefix]
     cmd += ['-InSuffix', args.in_suffix]
-    skips = [s for s in (args.in_skips or []) if s]
+    # Only pass file-type skip patterns to AreTomo3 (e.g. _CTF, _Vol).
+    # TS-name patterns (e.g. ts-008) are handled by not staging those files,
+    # so passing them to -InSkips is unnecessary and overflows AreTomo3's buffer.
+    skips = [s for s in (args.in_skips or []) if s and not s.startswith('ts-')]
     if skips:
         cmd += ['-InSkips', ','.join(skips)]
 
