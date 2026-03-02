@@ -1,20 +1,8 @@
 # aretomo3-preprocess
 
-Quality-control diagnostics and editing tools for [AreTomo3](https://github.com/czimaginginstitute/AreTomo3) cryo-ET tilt series.
+Pre-processing pipeline for AreTomo3 cryo-ET tilt-series data: from raw TIFF movies to reconstructed tomograms.
 
-> **Early development** — written with Claude Code, not yet production-ready. Review outputs before relying on them.
-
----
-
-## Overview
-
-A command-line toolkit with two main workflows:
-
-1. **`check-gain-transform`** — determine the correct AreTomo3 gain correction parameters (`-RotGain` / `-FlipGain`) by testing candidate transformations against your TIFF movies.  Run this **first**, before processing.
-
-2. **`analyse`** — parse AreTomo3 `.aln` output files, compute per-frame overlap and CTF metrics, flag problematic frames, produce diagnostic plots, and generate an interactive HTML report.
-
-Both commands write results to a shared **`aretomo3_project.json`** in the working directory, recording what was run, with what arguments, and key outputs — a lightweight lab notebook for the dataset.
+> **Early development** — written with Claude Code. Review outputs before relying on them.
 
 ---
 
@@ -28,162 +16,259 @@ conda activate aretomo-parse
 pip install -e .
 ```
 
----
-
-## Typical pipeline
+The executable is `aretomo3-preprocess`. Check it works:
 
 ```bash
-# 1. Determine correct gain correction parameters
-aretomo3-preprocess check-gain-transform \
-    --gain   gain_20260213T101027.mrc \
-    --frames frames/ \
-    --output gain_check/
-
-# → open gain_check/report.html to review results
-# → note the recommended -RotGain / -FlipGain flags
-
-# 2. Run AreTomo3 with the correct gain flags (external step)
-#    AreTomo3 ... -RotGain 0 -FlipGain 1 ...
-
-# 3. Analyse alignment results
-aretomo3-preprocess analyse \
-    --input          run001/ \
-    --output         run001_analysis/ \
-    --gain-check-dir gain_check/
-
-# → open run001_analysis/index.html
+aretomo3-preprocess --help
 ```
 
 ---
 
-## Commands
+## Pipeline overview
 
-### `check-gain-transform`
+```
+Stage 0  check-gain-transform   Determine -RotGain / -FlipGain for AreTomo3
+Stage 1  validate-mdoc          Check and repair mdoc files (ExposureDose etc.)
+Stage 2  rename-ts              Create ts-XXXX.mdoc symlinks from Position_*.mdoc
+Stage 3  run-aretomo3 --cmd 0   Motion correction + alignment (AreTomo3 batch)
+Stage 4  enrich                 Add mdoc metadata to alignment JSON
+Stage 5  analyse                Parse .aln outputs; produce QC plots + HTML
+Stage 6  select-ts              Filter TS by quality; produces ts_selection.csv
+Stage 7  run-aretomo3 --cmd 2   Final reconstruction using selected TS
+Stage 8  cryocare               Train and apply cryoCARE denoising (optional)
+```
 
-Tests 4 dimension-preserving gain transforms for **K3 rectangular detectors** (TIFF movies + MRC gain).  Scores each transform by the flatness (coefficient of variation) of the gain-corrected average — the correct transform produces the most uniform image.
-
-| Argument | Default | Description |
-|---|---|---|
-| `--gain` / `-g` | required | Gain MRC file (must be float32, mode 2) |
-| `--frames` / `-f` | required | Directory containing `*_fractions.tiff` movies |
-| `--output` / `-o` | `gain_check/` | Output directory |
-| `--n-acquisitions` / `-n` | `12` | Max acquisition order to include (filter threshold) |
-| `--n-movies` / `-N` | `150` | Movies to randomly sample from the filtered set |
-
-Movies are selected by **acquisition order** parsed from the filename (e.g. `Position_1_2_001_14.00_20260213_171849_fractions.tiff`), not by tilt angle.  Early acquisitions have more uniform illumination and are best for evaluating gain correction.
-
-**Validations at startup:**
-- Gain MRC must be float32 (mode 2) — aborts if not
-- Gain must be rectangular (K3) — aborts with a clear message for square sensors (Falcon support planned)
-
-**Outputs in `--output`:**
-
-| File | Description |
-|---|---|
-| `results.json` | Best transform, AreTomo3 flags, all CV/SSIM scores |
-| `corrected_averages.png` | 2×2 grid of normalised corrected images per transform |
-| `cv_vs_nmovies.png` | CV convergence vs movies accumulated per transform |
-| `report.html` | Standalone HTML viewer |
-| `aretomo3_project.json` | Backup of project state after this run |
-
-See [docs/check-gain-transform.md](docs/check-gain-transform.md) for full details.
+All commands write results to `aretomo3_project.json` in the working directory so subsequent commands can auto-fill their arguments.
 
 ---
 
-### `analyse`
+## Full pipeline example
 
-Parses all AreTomo3 `.aln` files in a directory, attaches CTF (`_CTF.txt`), dose/tilt (`_TLT.txt`), and metadata (`.mdoc`) data, computes per-frame overlap with the reference frame, flags frames below a threshold, and produces diagnostic plots and an HTML report.
+### Stage 0 — Check gain transform (optional)
+
+```bash
+aretomo3-preprocess check-gain-transform \
+    --gain   estimated_gain.mrc \
+    --frames frames/ \
+    --output gain_check \
+    --n-acquisitions 12 \
+    --n-movies 250 \
+    2>&1 | tee check-gain-transform.log
+```
+
+Open `gain_check/report.html`. Note the recommended `-RotGain` / `-FlipGain` flags.
+
+---
+
+### Stage 1 — Validate mdoc files
+
+```bash
+# Dry run first — see what needs fixing
+aretomo3-preprocess validate-mdoc frames/Position*.mdoc
+
+# Fix missing ExposureDose (most common Tomo5 issue)
+aretomo3-preprocess validate-mdoc frames/Position*.mdoc \
+    --fix-dose --dose 4.16
+
+# Fix too-short mdocs (restarted acquisition)
+aretomo3-preprocess validate-mdoc frames/Position_6*.mdoc \
+    --fix-subframes Position_6_SubFramePaths/
+
+# Revalidate — should be 100% PASS
+aretomo3-preprocess validate-mdoc frames/Position*.mdoc
+```
+
+---
+
+### Stage 2 — Rename mdoc files
+
+```bash
+# Dry run to preview
+aretomo3-preprocess rename-ts --input frames --dry-run
+
+# Create symlinks: ts-0001.mdoc → Position_1.mdoc etc.
+aretomo3-preprocess rename-ts --input frames
+```
+
+For multi-session datasets use `--start N` to offset numbering and avoid collisions.
+
+---
+
+### Stage 3 — Run AreTomo3 cmd=0 (motion correction + alignment)
+
+```bash
+aretomo3-preprocess run-aretomo3 \
+    --in-prefix   frames/ts- \
+    --in-suffix   mdoc \
+    --output      run001 \
+    --cmd         0 \
+    --gain        estimated_gain.mrc \
+    --flip-gain   1 \
+    --rot-gain    0 \
+    --apix        1.63 \
+    --fm-dose     0.52 \
+    --split-sum   1 \
+    --gpu         0 1 2 3 \
+    --aretomo3    /opt/AreTomo3/AreTomo3 \
+    2>&1 | tee run001.log
+```
+
+After cmd=0, output stacks are registered in `project.json` so later commands know where they are.
+
+---
+
+### Stage 4 — Enrich alignment data with mdoc metadata
+
+```bash
+aretomo3-preprocess enrich \
+    --input  run001 \
+    --mdocdir frames
+```
+
+---
+
+### Stage 5 — Analyse alignment results
+
+```bash
+aretomo3-preprocess analyse \
+    --input     run001 \
+    --output    run001_analysis \
+    --threshold 80 \
+    --mdocdir   frames \
+    --angpix    1.63 \
+    2>&1 | tee analyse.log
+```
+
+Open `run001_analysis/index.html` for the interactive report.
+
+---
+
+### Stage 6 — Select quality tilt series
+
+```bash
+# Use defaults: exclude TS with fewer than 2 pos OR 2 neg frames
+aretomo3-preprocess select-ts --analysis run001_analysis
+
+# Add quality filters
+aretomo3-preprocess select-ts \
+    --analysis       run001_analysis \
+    --min-neg-frames 2 \
+    --min-pos-frames 2 \
+    --min-frames     10 \
+    --max-thickness  300 \
+    --min-defocus    1.0 \
+    --max-defocus    6.0 \
+    --output         ts_selection.csv
+```
+
+Writes `ts_selection.csv` and saves selected TS names to `project.json`. Re-run `analyse` afterwards to see the "Selected only" toggle in the HTML viewer.
+
+---
+
+### Stage 7 — Run AreTomo3 cmd=2 (reconstruction only, selected TS)
+
+```bash
+aretomo3-preprocess run-aretomo3 \
+    --in-prefix run001/ts- \
+    --in-suffix mrc \
+    --output    run002 \
+    --cmd       2 \
+    --analysis  run001_analysis \
+    --filter-overlap 80 \
+    --at-bin    4 8 \
+    --split-sum 1 \
+    --apix      1.63 \
+    --gpu       0 1 2 3 \
+    --aretomo3  /opt/AreTomo3/AreTomo3 \
+    2>&1 | tee run002.log
+# --select-ts is auto-loaded from project.json
+```
+
+---
+
+### Stage 8 — cryoCARE denoising (optional)
+
+```bash
+aretomo3-preprocess cryocare train \
+    --input     run002 \
+    --output    cryocare_train \
+    --n-vols    8 \
+    --gpu       0
+# --select-ts is auto-loaded from project.json
+```
+
+---
+
+## Per-lamella reconstruction (run-aretomo3-per-ts)
+
+For datasets with multiple lamellae at different tilt-axis angles, use the
+per-TS command after running `analyse` (which clusters by stage position):
+
+```bash
+aretomo3-preprocess run-aretomo3-per-ts \
+    --mrcdir  run001 \
+    --output  run002 \
+    --analysis run001_analysis \
+    --cmd     1 \
+    --at-bin  4 8 \
+    --apix    1.63 \
+    --gpu     0 1 2 3 \
+    --aretomo3 /opt/AreTomo3/AreTomo3 \
+    2>&1 | tee run002.log
+# --select-ts is auto-loaded from project.json
+```
+
+---
+
+## Command reference
+
+| Command | Stage | Description |
+|---|---|---|
+| `check-gain-transform` | 0 | Test 4 gain orientations; outputs -RotGain/-FlipGain |
+| `validate-mdoc` | 1 | Check mdoc files; fix missing ExposureDose or too-short files |
+| `rename-ts` | 2 | Create ts-XXXX.mdoc symlinks from Position_*.mdoc |
+| `enrich` | 3.5 | Attach mdoc metadata to alignment .aln output |
+| `run-aretomo3` | 3/7 | Batch AreTomo3 wrapper (all cmds) |
+| `run-aretomo3-per-ts` | 3/7 | Per-TS AreTomo3 wrapper with per-lamella parameters |
+| `analyse` | 5 | Parse .aln outputs; QC plots and interactive HTML |
+| `select-ts` | 6 | Filter TS by quality criteria; saves selection to project.json |
+| `trim-ts` | post | Trim IMOD support files to match a subset of tilt series |
+| `cryocare` | 8 | Train and apply cryoCARE denoising |
+
+---
+
+## select-ts filters
 
 | Argument | Default | Description |
 |---|---|---|
-| `--input` / `-i` | `run001` | Directory containing `.aln` files |
-| `--output` / `-o` | `run001_analysis` | Output directory |
-| `--threshold` / `-t` | `80.0` | % overlap below which a frame is flagged |
-| `--mdocdir` / `-m` | `frames` | Directory containing `.mdoc` files |
-| `--angpix` / `-a` | from mdoc | Pixel size Å/px (for thickness in nm) |
-| `--mrcdir` / `-r` | same as `--input` | Directory with raw `.mrc` stacks for header checks |
-| `--gain-check-dir` / `-g` | — | Output dir from `check-gain-transform`; adds a Gain Check tab to the HTML report |
+| `--min-neg-frames` | 2 | Min frames with tilt < −threshold (AreTomo3 crash prevention) |
+| `--min-pos-frames` | 2 | Min frames with tilt > +threshold (AreTomo3 crash prevention) |
+| `--tilt-threshold` | 2.0° | ±boundary between pos/neg counting |
+| `--min-frames` / `--max-frames` | — | Total aligned frame count |
+| `--min-alpha` / `--max-alpha` | — | Alpha offset (°) |
+| `--min-thickness` / `--max-thickness` | — | Estimated sample thickness (nm) |
+| `--min-defocus` / `--max-defocus` | — | Reference-frame defocus (μm) |
+| `--min-rot` / `--max-rot` | — | Mean in-plane rotation angle (°) |
 
-**Per-tilt-series diagnostic plot (4 panels):**
-- Panel 1 — Overlap % vs corrected tilt angle
-- Panel 2 — Spatial frame positions (rectangle overlay)
-- Panel 3 — Tilt coverage (symmetric lines through origin, 0° = horizontal)
-- Panel 4 — Defocus vs tilt angle with astigmatism error bars and resolution colour coding
-
-**Global summary plot** — 3×3 histogram grid across all tilt series: frame counts, in-plane rotation, alpha offset, defocus, resolution, overlap, astigmatism, CTF CC, flagged frames per TS.
-
-**Sanity checks per tilt series:**
-- MRC header nx/ny/nz vs `.aln` width/height/total_frames
-- Corrected tilt consistency: `_TLT.txt` nominal + alpha_offset ≈ `.aln` tilt
-- TLT z-values link to mdoc ZValues
-- All TLT rows accounted for by aligned SECs + dark frame_bs
-- mdoc TiltAngle ≈ TLT nominal_tilt
-
-**Outputs in `--output`:**
-
-| File | Description |
-|---|---|
-| `<ts-name>.png` | 4-panel diagnostic plot per tilt series |
-| `global_summary.png` | 3×3 histogram grid for the full dataset |
-| `index.html` | Interactive HTML viewer (keyboard navigation, per-TS dropdown; optional Gain Check tab) |
-| `alignment_data.json` | All parsed alignment, CTF, dose, and mdoc data |
-| `flagged_frames.tsv` | Tab-separated list of frames below the overlap threshold |
-| `aretomo3_project.json` | Backup of project state after this run |
+The CSV output (`ts_selection.csv`) can be passed explicitly as `--select-ts ts_selection.csv`
+to any downstream command, or it is auto-loaded from `project.json` when omitted.
 
 ---
 
 ## Project state file
 
-Both commands maintain `aretomo3_project.json` in the **working directory** — a cumulative record of every run:
+`aretomo3_project.json` in the working directory records each command run:
 
 ```json
 {
-  "project": { "working_dir": "...", "created": "...", "last_updated": "..." },
-  "gain_check": {
-    "command":   "aretomo3-preprocess check-gain-transform --gain ...",
-    "args":      { "gain": "...", "n_acquisitions": 12, ... },
-    "best_transform": "flipud",
-    "aretomo3_rot_gain": 0,
-    "aretomo3_flip_gain": 1,
-    ...
-  },
-  "analyse": {
-    "command":        "aretomo3-preprocess analyse --input run001 ...",
-    "n_tilt_series":  146,
-    "n_flagged_frames": 23,
-    ...
-  }
+  "gain_check":  { "best_transform": "flipud", "aretomo3_rot_gain": 0, ... },
+  "validate_mdoc": { "n_pass": 156, "n_fail": 0, ... },
+  "rename_ts":   { "n_symlinks": 156, "lookup": { "ts-0001.mdoc": "..." } },
+  "input_stacks": { "n_stacks": 156, "stacks": { "ts-001": { "path": "..." } } },
+  "analyse":     { "output_dir": "run001_analysis", "n_tilt_series": 156, ... },
+  "select_ts":   { "n_selected": 149, "n_excluded": 7, "ts_names": [...] },
+  ...
 }
-```
-
-Each command also writes a backup copy to its own output directory.  To revert:
-
-```bash
-cp gain_check/aretomo3_project.json .
-```
-
-Running from the wrong directory is detected automatically — the command aborts with a clear message showing the expected and current paths.
-
----
-
-## Package structure
-
-```
-aretomo3_preprocess/
-  cli.py                        entry point (aretomo3-preprocess)
-  commands/
-    check_gain_transform.py     check-gain-transform subcommand
-    analyse.py                  analyse subcommand
-    trim_ts.py                  trim-ts subcommand
-  shared/
-    parsers.py                  .aln / _CTF.txt / _TLT.txt / .mdoc parsers
-    geometry.py                 overlap and rotation geometry
-    colours.py                  shared colourmap definitions
-    project_json.py             shared project state file utilities
-docs/
-  check-gain-transform.md       full documentation for check-gain-transform
-tests/
-  test_parsing.py               29+ tests for all parsers
 ```
 
 ---
@@ -194,15 +279,7 @@ tests/
 pytest tests/ -v
 ```
 
-Tests require the data directory to be mounted at `/mnt/McQueen-002/sconnell/TEST-ARETOMO-PARSE/relion` and are automatically skipped if absent.
-
----
-
-## Planned features
-
-- EER movie support for `check-gain-transform`
-- Square-sensor (Falcon) gain transform search
-- RELION / cryoSPARC gain convention variants
+Test data lives at `/mnt/McQueen-002/sconnell/TEST-ARETOMO-PARSE/relion` and tests are skipped if that path is not mounted.
 
 ---
 
