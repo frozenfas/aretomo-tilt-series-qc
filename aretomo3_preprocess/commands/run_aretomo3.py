@@ -755,7 +755,9 @@ def add_parser(subparsers):
                           'selected TS are staged for cmd=2 runs. '
                           'Auto-loaded from project.json if omitted.')
     inp.add_argument('--serial', type=int, default=1,
-                     help='Seconds to wait for next series; 1=offline batch (-Serial)')
+                     help='AreTomo3 -Serial flag: 1=process TS sequentially '
+                          '(batch mode, default); 0=parallel across GPUs '
+                          '(use only when handing a single TS at a time)')
 
     mic = p.add_argument_group('microscope / acquisition')
     mic.add_argument('--kv', type=float, default=300.0,
