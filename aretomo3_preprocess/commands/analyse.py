@@ -1406,6 +1406,10 @@ def add_parser(subparsers):
                    help='Deprecated — lamella assignments are now reused automatically '
                         'whenever lamella_positions.csv exists in --output.  '
                         'Flag is kept for backward compatibility.')
+    p.add_argument('--refit-lamellae', action='store_true',
+                   help='Ignore saved lamella assignments in project.json and '
+                        're-run K-means clustering from scratch.  Requires '
+                        '--n-lamellae.  Overwrites the saved assignments.')
     p.add_argument('--compare-previous', '-C', default=None,
                    help='Output directory from a previous analyse run.  '
                         'Previous run data is shown in grey in per-TS overlap '
@@ -1781,15 +1785,22 @@ def run(args):
     csv_path             = out_dir / 'lamella_positions.csv'
     _saved_positions     = _proj.get('lamella_assignments', {}).get('positions', {})
 
-    if _saved_positions:
+    refit = getattr(args, 'refit_lamellae', False)
+    if refit and args.n_lamellae is None:
+        print('ERROR: --refit-lamellae requires --n-lamellae N')
+        sys.exit(1)
+
+    if _saved_positions and not refit:
         cluster_ids_override = {ts: pos - 1 for ts, pos in _saved_positions.items()}
         print(f'  Lamella assignments locked — from project.json'
               f'  ({len(cluster_ids_override)} TS)')
         if args.n_lamellae is not None:
             print(f'  WARNING: --n-lamellae {args.n_lamellae} is ignored because '
                   f'lamella assignments are already locked in project.json.\n'
-                  f'           To re-cluster, delete the lamella_assignments section '
-                  f'from project.json first.')
+                  f'           Use --refit-lamellae to re-cluster.')
+    elif _saved_positions and refit:
+        print(f'  --refit-lamellae: ignoring saved assignments, re-running K-means '
+              f'with --n-lamellae {args.n_lamellae}')
 
     if cluster_ids_override is not None:
         new_ts = [ts for ts in all_ts if ts not in cluster_ids_override]
@@ -1822,19 +1833,22 @@ def run(args):
     )
     _t2_stage = time.perf_counter() - _tp
 
-    # Save lamella assignments to project.json (invariant — written once).
-    # Read back from the CSV that plot_stage_positions() just wrote so we
-    # capture both freshly computed and reused assignments in the same place.
-    if csv_path.exists() and 'lamella_assignments' not in _proj:
+    # Save lamella assignments to project.json.
+    # Normally written once (update_section_once); --refit-lamellae forces overwrite.
+    if csv_path.exists() and ('lamella_assignments' not in _proj or refit):
         _la_positions = {}
         with open(csv_path, newline='') as fh:
             for row in csv.DictReader(fh):
                 _la_positions[row['ts_name']] = int(row['lamella'])
-        update_section_once('lamella_assignments', {
+        _la_data = {
             'timestamp': datetime.datetime.now().isoformat(timespec='seconds'),
             'n_ts':      len(_la_positions),
             'positions': _la_positions,   # ts_name -> lamella number (1-indexed)
-        })
+        }
+        if refit:
+            update_section('lamella_assignments', _la_data)
+        else:
+            update_section_once('lamella_assignments', _la_data)
 
     total_frames = sum(len(d['frames']) for d in all_ts.values())
     for i, (entry_name, entry_png) in enumerate(stage_entries):
