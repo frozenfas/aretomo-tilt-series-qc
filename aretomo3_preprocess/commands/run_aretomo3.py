@@ -81,7 +81,7 @@ from aretomo3_preprocess.shared.project_json import (
     load_or_create, update_section, args_to_dict,
 )
 from aretomo3_preprocess.shared.project_state import (
-    get_angpix, register_input_stacks,
+    get_angpix, register_input_stacks, resolve_selected_ts,
 )
 
 
@@ -286,7 +286,7 @@ def _find_input_files(in_prefix: str, in_suffix: str,
 
 def _setup_cmd2_staging(out_dir: Path, src_in_dir: Path,
                         mrcdir: Path = None, in_skips: list = None,
-                        dry_run: bool = False) -> Path:
+                        dry_run: bool = False, selected_ts: set = None) -> Path:
     """
     Create a staging directory out_dir/_input/ for cmd=2 runs.
 
@@ -336,6 +336,15 @@ def _setup_cmd2_staging(out_dir: Path, src_in_dir: Path,
         src_root     = None
         all_ts       = sorted(p.stem for p in src_in_dir.glob('ts-*.aln'))
         mrc_sources  = {}
+
+    # ── Apply TS selection filter ──────────────────────────────────────────
+    if selected_ts is not None:
+        orig_n      = len(all_ts)
+        all_ts      = [ts for ts in all_ts if ts in selected_ts]
+        mrc_sources = {ts: mrc_sources[ts] for ts in all_ts if ts in mrc_sources}
+        n_excl      = orig_n - len(all_ts)
+        if n_excl:
+            print(f'  TS selection: {n_excl} excluded, {len(all_ts)} remaining')
 
     staging_dir.mkdir(parents=True, exist_ok=True)
 
@@ -738,6 +747,10 @@ def add_parser(subparsers):
                           'when stacks are not registered in project.json (e.g. '
                           'stacks produced outside this tool). Stacks are '
                           'symlinked into --in-prefix directory.')
+    inp.add_argument('--select-ts', default=None, metavar='CSV',
+                     help='Path to ts_selection.csv from select-ts; only the '
+                          'selected TS are staged for cmd=2 runs. '
+                          'Auto-loaded from project.json if omitted.')
     inp.add_argument('--serial', type=int, default=1,
                      help='Seconds to wait for next series; 1=offline batch (-Serial)')
 
@@ -852,13 +865,15 @@ def run(args):
     #        or --mrcdir).  AreTomo3 is pointed at the staging dir.  src_in_dir
     #        (e.g. run003) is NEVER modified.
     if args.in_suffix == 'mrc' and args.cmd == 2:
-        mrcdir = Path(args.mrcdir) if args.mrcdir is not None else None
+        mrcdir      = Path(args.mrcdir) if args.mrcdir is not None else None
+        selected_ts = resolve_selected_ts(getattr(args, 'select_ts', None))
         staging_dir = _setup_cmd2_staging(
-            out_dir    = out_dir,
-            src_in_dir = src_in_dir,
-            mrcdir     = mrcdir,
-            in_skips   = args.in_skips,
-            dry_run    = args.dry_run,
+            out_dir     = out_dir,
+            src_in_dir  = src_in_dir,
+            mrcdir      = mrcdir,
+            in_skips    = args.in_skips,
+            dry_run     = args.dry_run,
+            selected_ts = selected_ts,
         )
         stem = Path(args.in_prefix).name      # e.g. 'ts-'
         args.in_prefix = str(staging_dir / stem)

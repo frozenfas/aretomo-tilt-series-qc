@@ -42,7 +42,7 @@ from aretomo3_preprocess.commands.run_aretomo3 import _fmt_command, _num
 from aretomo3_preprocess.shared.project_json import update_section, args_to_dict
 from aretomo3_preprocess.shared.project_state import (
     get_angpix, get_frames_dir, get_latest_analysis_dir,
-    register_input_stacks, load_input_stacks,
+    register_input_stacks, load_input_stacks, resolve_selected_ts,
 )
 
 
@@ -223,6 +223,10 @@ def add_parser(subparsers):
                           'default excludes AreTomo3 side files '
                           '(_Vol _CTF _EVN _ODD). Pass an empty string to '
                           'disable, or add extra patterns e.g. ts-005')
+    inp.add_argument('--select-ts', default=None, metavar='CSV',
+                     help='Path to ts_selection.csv from select-ts; only '
+                          'selected TS are processed. '
+                          'Auto-loaded from project.json if omitted.')
 
     mic = p.add_argument_group('microscope / acquisition')
     mic.add_argument('--kv',           type=float, default=300.0,
@@ -379,6 +383,16 @@ def run(args):
         if len(src_info['stacks']) > 3:
             print(f'    ... ({len(src_info["stacks"]) - 3} more)')
         print(sep_hdr)
+        print()
+
+    # ── Apply TS selection filter ──────────────────────────────────────────
+    selected_ts = resolve_selected_ts(getattr(args, 'select_ts', None))
+    if selected_ts is not None:
+        orig_n    = len(mrc_files)
+        mrc_files = [p for p in mrc_files if p.stem in selected_ts]
+        n_excl    = orig_n - len(mrc_files)
+        if n_excl:
+            print(f'TS selection: {n_excl} excluded, {len(mrc_files)} remaining')
         print()
 
     # Resolve mdoc directory (used by cmd=0 only)

@@ -53,7 +53,7 @@ import argparse
 from aretomo3_preprocess.shared.project_json import (
     load_or_create, update_section, args_to_dict,
 )
-from aretomo3_preprocess.shared.project_state import get_latest_analysis_dir
+from aretomo3_preprocess.shared.project_state import get_latest_analysis_dir, resolve_selected_ts
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -256,6 +256,10 @@ def _add_train_parser(subparsers):
                       help='Number of volumes for training (stratified by defocus)')
     filt.add_argument('--min-tilts', type=int, default=None,
                       help='Exclude volumes with fewer than N aligned tilts')
+    filt.add_argument('--select-ts', default=None, metavar='CSV',
+                      help='Path to ts_selection.csv from select-ts; only '
+                           'selected TS volumes are considered for training. '
+                           'Auto-loaded from project.json if omitted.')
 
     out = p.add_argument_group('output')
     out.add_argument('--output', '-o', default='cryocare_train',
@@ -330,6 +334,18 @@ def _run_train(args):
               f'found in {in_dir}/')
         sys.exit(1)
     print(f'Found {len(pairs)} EVN/ODD pairs in {in_dir}/')
+
+    # ── Apply TS selection filter ──────────────────────────────────────────
+    selected_ts = resolve_selected_ts(getattr(args, 'select_ts', None))
+    if selected_ts is not None:
+        orig_n = len(pairs)
+        pairs  = [p for p in pairs if p['ts_name'] in selected_ts]
+        n_excl = orig_n - len(pairs)
+        if n_excl:
+            print(f'TS selection: {n_excl} excluded, {len(pairs)} remaining')
+        if not pairs:
+            print('ERROR: no volumes remain after TS selection filter')
+            sys.exit(1)
 
     # ── Load analysis data ─────────────────────────────────────────────────
     ts_names = [p['ts_name'] for p in pairs]

@@ -632,7 +632,7 @@ def plot_global_summary(all_ts, threshold, global_ranges, out_path, prev_ts=None
 # HTML viewer
 # ─────────────────────────────────────────────────────────────────────────────
 
-def make_html(ts_entries, out_path, threshold, gain_check=None):
+def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None):
     """
     Generate the HTML report.
 
@@ -644,21 +644,37 @@ def make_html(ts_entries, out_path, threshold, gain_check=None):
     gain_check  : dict or None   gain_check section from aretomo3_project.json;
                                  when provided a 'Gain Transform Check' tab is
                                  added before the tilt-series viewer.
+    selection   : dict or None   {ts_name: bool} from select-ts; when provided
+                                 a 'Selected only' toggle is shown in the viewer.
     """
+    # Determine per-entry selected flag (summary/lamella entries are always selected)
+    def _is_selected(e):
+        if selection is None:
+            return True
+        if e['name'].startswith('['):
+            return True
+        return selection.get(e['name'], True)
+
+    selected_flags = [1 if _is_selected(e) else 0 for e in ts_entries]
+    has_selection  = selection is not None
+    n_sel = sum(selected_flags)
+
     options_html = '\n'.join(
-        f'    <option value="{i}" data-bad="{e["n_bad"]}">'
+        f'    <option value="{i}" data-bad="{e["n_bad"]}" data-selected="{selected_flags[i]}">'
         f'{"[!] " if e["n_bad"] > 0 else "      "}'
+        f'{"" if selected_flags[i] else "[x] "}'
         f'{e["name"]}  ({e["n_bad"]} flagged / {e["n_frames"]} frames)'
         f'</option>'
         for i, e in enumerate(ts_entries)
     )
-    images_js = json.dumps([e['png'] for e in ts_entries])
-    titles_js = json.dumps([
+    images_js      = json.dumps([e['png'] for e in ts_entries])
+    titles_js      = json.dumps([
         f'{e["name"]}  —  {e["n_frames"]} aligned frames  |  '
         f'{e["n_dark"]} dark frames  |  {e["n_bad"]} below {threshold}% threshold'
         for e in ts_entries
     ])
-    n = len(ts_entries)
+    selected_js    = json.dumps(selected_flags)
+    n              = len(ts_entries)
 
     # ── Gain-check tab content (only when gain_check is provided) ─────────────
     has_gain = gain_check is not None
@@ -853,6 +869,10 @@ def make_html(ts_entries, out_path, threshold, gain_check=None):
       </select>
       <button class="nav-btn" id="btn-next">Next &#8594;</button>
       <span id="counter">1&nbsp;/&nbsp;{n}</span>
+      <button class="nav-btn" id="btn-filter"
+              style="font-size:0.82em;background:#37474f;{'display:none' if not has_selection else ''}">
+        Selected only ({n_sel})
+      </button>
     </div>
 
     <div id="progress"><div id="progress-bar"></div></div>
@@ -881,34 +901,69 @@ def make_html(ts_entries, out_path, threshold, gain_check=None):
     {tab_init_js}
     {tab_switch_js}
 
-    const images  = {images_js};
-    const titles  = {titles_js};
-    const n       = images.length;
-    let   idx     = 0;
+    const images        = {images_js};
+    const titles        = {titles_js};
+    const selectedFlags = {selected_js};
+    const n             = images.length;
+    let   idx           = 0;
+    let   showSelOnly   = false;
+    let   visIndices    = Array.from({{length: n}}, (_, i) => i);
 
-    const img  = document.getElementById('main-img');
-    const sel  = document.getElementById('ts-select');
-    const ctr  = document.getElementById('counter');
-    const ttl  = document.getElementById('title');
-    const pbar = document.getElementById('progress-bar');
+    const img     = document.getElementById('main-img');
+    const sel     = document.getElementById('ts-select');
+    const ctr     = document.getElementById('counter');
+    const ttl     = document.getElementById('title');
+    const pbar    = document.getElementById('progress-bar');
+    const btnFilt = document.getElementById('btn-filter');
+
+    function rebuildVis() {{
+      visIndices = [];
+      for (let i = 0; i < n; i++) {{
+        const opt = sel.options[i];
+        if (showSelOnly && selectedFlags[i] === 0) {{
+          opt.style.display = 'none';
+        }} else {{
+          opt.style.display = '';
+          visIndices.push(i);
+        }}
+        opt.style.color = (selectedFlags[i] === 0) ? '#546e7a' : '';
+      }}
+    }}
 
     function show(i) {{
       idx = ((i % n) + n) % n;
       img.src          = images[idx];
       ttl.textContent  = titles[idx];
-      ctr.innerHTML    = (idx + 1) + '&nbsp;/&nbsp;' + n;
+      ctr.innerHTML    = (visIndices.indexOf(idx) + 1) + '&nbsp;/&nbsp;' + visIndices.length;
       sel.value        = idx;
-      pbar.style.width = ((idx + 1) / n * 100).toFixed(1) + '%';
+      pbar.style.width = ((visIndices.indexOf(idx) + 1) / visIndices.length * 100).toFixed(1) + '%';
       showRating(idx);
     }}
 
-    document.getElementById('btn-prev').onclick = () => show(idx - 1);
-    document.getElementById('btn-next').onclick = () => show(idx + 1);
+    function showStep(step) {{
+      const pos    = visIndices.indexOf(idx);
+      const newPos = ((pos + step) % visIndices.length + visIndices.length) % visIndices.length;
+      show(visIndices[newPos]);
+    }}
+
+    if (btnFilt) {{
+      btnFilt.addEventListener('click', () => {{
+        showSelOnly = !showSelOnly;
+        btnFilt.style.background = showSelOnly ? '#2e7d32' : '#37474f';
+        rebuildVis();
+        if (!visIndices.includes(idx)) show(visIndices[0] || 0);
+        else show(idx);
+      }});
+    }}
+
+    document.getElementById('btn-prev').onclick = () => showStep(-1);
+    document.getElementById('btn-next').onclick = () => showStep(1);
     sel.onchange = () => show(parseInt(sel.value));
     document.addEventListener('keydown', e => {{
-      if (e.key === 'ArrowLeft')  show(idx - 1);
-      if (e.key === 'ArrowRight') show(idx + 1);
+      if (e.key === 'ArrowLeft')  showStep(-1);
+      if (e.key === 'ArrowRight') showStep(1);
     }});
+    rebuildVis();
 
     // ── Star ratings ──────────────────────────────────────────────────────
     const tsNames    = {ts_names_js};
@@ -1823,10 +1878,24 @@ def run(args):
                     print(f'Note: gain-check PNG not found: {src}')
             print(f'Gain check results loaded from project.json (dir: {gc_dir})\n')
 
+    # ── Load TS selection from project.json (automatic) ──────────────────────
+    sel_section = _proj.get('select_ts', {})
+    if sel_section.get('ts_names') is not None:
+        selection = {ts: True  for ts in sel_section['ts_names']}
+        # Mark all TS in alignment_data that are NOT in the selection as False
+        for ts in all_ts:
+            if ts not in selection:
+                selection[ts] = False
+        n_sel = sum(1 for v in selection.values() if v)
+        print(f'TS selection loaded from project.json: '
+              f'{n_sel}/{len(all_ts)} selected\n')
+    else:
+        selection = None
+
     # HTML
     _tp = time.perf_counter()
     html_path = out_dir / 'index.html'
-    make_html(ts_entries, str(html_path), args.threshold, gain_check)
+    make_html(ts_entries, str(html_path), args.threshold, gain_check, selection)
     _t2_html = time.perf_counter() - _tp
 
     # ── Project JSON ──────────────────────────────────────────────────────────
