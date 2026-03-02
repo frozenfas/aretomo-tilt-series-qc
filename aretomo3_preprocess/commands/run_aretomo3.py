@@ -502,20 +502,49 @@ def _filter_alns_for_overlap(staging_dir: Path, src_in_dir: Path,
         # ── Build modified .aln ────────────────────────────────────────────────
         # Strategy:
         #   • All lines pass through unchanged EXCEPT:
+        #     - Existing DarkFrame lines are collected and removed from header
         #     - Data rows for demoted SECs are dropped
-        #     - New DarkFrame entries are inserted just before '# AlphaOffset'
+        #     - ALL DarkFrame entries (original + new) are re-inserted just
+        #       before '# AlphaOffset', sorted by frame_a ascending.
+        #       AreTomo3 appears to require monotonically increasing frame_a.
+
+        # Collect existing DarkFrame entries from the source .aln
+        existing_dark = []  # list of (frame_a, line_str)
+        for line in raw_lines:
+            stripped = line.rstrip('\n').strip()
+            if stripped.startswith('# DarkFrame'):
+                parts = stripped.split()
+                # format: # DarkFrame = frame_a frame_b tilt
+                if len(parts) >= 6:
+                    try:
+                        frame_a = int(parts[3])
+                        existing_dark.append((frame_a, line if line.endswith('\n') else line + '\n'))
+                    except (ValueError, IndexError):
+                        existing_dark.append((999999, line if line.endswith('\n') else line + '\n'))
+
+        # Build new DarkFrame lines for demoted SECs
+        new_dark = []
+        for sec in demote:
+            tilt = tilt_of.get(sec, 0.0)
+            frame_a = sec - 1
+            new_dark.append((frame_a, f'# DarkFrame = {frame_a:5d}{sec:5d} {tilt:8.2f}\n'))
+
+        # Merge and sort all DarkFrame entries by frame_a ascending
+        all_dark = sorted(existing_dark + new_dark, key=lambda x: x[0])
+        all_dark_lines = [line for _, line in all_dark]
+
         new_lines = []
         inserted = False
         for line in raw_lines:
             stripped = line.rstrip('\n').strip()
 
-            # Insert new DarkFrame lines immediately before # AlphaOffset
+            # Skip existing DarkFrame lines — they will be re-inserted sorted
+            if stripped.startswith('# DarkFrame'):
+                continue
+
+            # Insert all sorted DarkFrame lines immediately before # AlphaOffset
             if not inserted and stripped.startswith('# AlphaOffset'):
-                for sec in sorted(demote):
-                    tilt = tilt_of.get(sec, 0.0)
-                    new_lines.append(
-                        f'# DarkFrame = {sec - 1:5d}{sec:5d} {tilt:8.2f}\n'
-                    )
+                new_lines.extend(all_dark_lines)
                 inserted = True
 
             # Drop demoted data rows
@@ -537,11 +566,7 @@ def _filter_alns_for_overlap(staging_dir: Path, src_in_dir: Path,
                 default=-1,
             )
             insert_at = last_hdr + 1
-            new_dark = [
-                f'# DarkFrame = {sec - 1:5d}{sec:5d} {tilt_of.get(sec, 0.0):8.2f}\n'
-                for sec in sorted(demote)
-            ]
-            new_lines = new_lines[:insert_at] + new_dark + new_lines[insert_at:]
+            new_lines = new_lines[:insert_at] + all_dark_lines + new_lines[insert_at:]
 
         # ── Write to staging dir (replace symlink with real file) ─────────────
         staging_aln = staging_dir / f'{ts_name}.aln'
