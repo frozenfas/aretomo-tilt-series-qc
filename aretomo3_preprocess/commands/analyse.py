@@ -34,7 +34,7 @@ except ImportError:
 
 from aretomo3_preprocess.shared.project_json import (
     load as _load_project,
-    update_section, args_to_dict,
+    update_section, update_section_once, args_to_dict,
 )
 from aretomo3_preprocess.shared.project_state import (
     get_angpix, get_frames_dir, get_cmd0_outdir, get_gain_check_dir,

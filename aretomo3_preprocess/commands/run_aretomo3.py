@@ -246,6 +246,9 @@ def _build_cmd(args) -> list:
     cmd += ['-OutXF',   _num(args.out_xf)]
     cmd += ['-OutImod', _num(args.out_imod)]
 
+    if getattr(args, 'resume', False):
+        cmd += ['-Resume', '1']
+
     return cmd
 
 
@@ -831,6 +834,9 @@ def add_parser(subparsers):
     ctl = p.add_argument_group('run control')
     ctl.add_argument('--aretomo3', dest='aretomo3_bin', default='AreTomo3',
                      help='Path to or name of the AreTomo3 executable')
+    ctl.add_argument('--resume', action='store_true',
+                     help='Pass -Resume 1 to AreTomo3: skip TS that already '
+                          'have output files in --output. Staging is preserved.')
     ctl.add_argument('--dry-run', action='store_true',
                      help='Print the annotated command without executing')
     ctl.add_argument('--force', action='store_true',
