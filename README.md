@@ -27,15 +27,17 @@ aretomo3-preprocess --help
 ## Pipeline overview
 
 ```
-Stage 0  check-gain-transform   Determine -RotGain / -FlipGain for AreTomo3
+Stage 0  check-gain-transform   Determine -RotGain / -FlipGain for AreTomo3     [OPTIONAL]
 Stage 1  validate-mdoc          Check and repair mdoc files (ExposureDose etc.)
 Stage 2  rename-ts              Create ts-XXXX.mdoc symlinks from Position_*.mdoc
-Stage 3  run-aretomo3 --cmd 0   Motion correction + alignment (AreTomo3 batch)
-Stage 4  enrich                 Add mdoc metadata to alignment JSON
-Stage 5  analyse                Parse .aln outputs; produce QC plots + HTML
-Stage 6  select-ts              Filter TS by quality; produces ts_selection.csv
-Stage 7  run-aretomo3 --cmd 2   Final reconstruction using selected TS
-Stage 8  cryocare               Train and apply cryoCARE denoising (optional)
+Stage 3  run-aretomo3 --cmd 0   Motion correction + initial alignment
+Stage 4  enrich                 Add mdoc metadata to alignment JSON              [OPTIONAL]
+Stage 5  analyse                Parse .aln outputs; QC plots + HTML
+Stage 6  run-aretomo3 --cmd 1   Re-alignment with global or per-lamella TiltAxis/AlignZ
+Stage 7  analyse (re-run)       Re-analyse after cmd=1; update QC plots
+Stage 8  select-ts              Filter TS by quality; produces ts_selection.csv
+Stage 9  run-aretomo3 --cmd 2   Final reconstruction using selected TS
+Stage 10 cryocare               Train and apply cryoCARE denoising               [OPTIONAL]
 ```
 
 All commands write results to `aretomo3_project.json` in the working directory so subsequent commands can auto-fill their arguments.
@@ -44,7 +46,7 @@ All commands write results to `aretomo3_project.json` in the working directory s
 
 ## Full pipeline example
 
-### Stage 0 — Check gain transform (optional)
+### Stage 0 — Check gain transform *(optional)*
 
 ```bash
 aretomo3-preprocess check-gain-transform \
@@ -117,17 +119,20 @@ After cmd=0, output stacks are registered in `project.json` so later commands kn
 
 ---
 
-### Stage 4 — Enrich alignment data with mdoc metadata
+### Stage 4 — Enrich alignment data with mdoc metadata *(optional)*
+
+Attaches mdoc fields (dose, datetime, stage position, defocus target) to the
+alignment data for use by `analyse` and `select-ts`.
 
 ```bash
 aretomo3-preprocess enrich \
-    --input  run001 \
+    --input   run001 \
     --mdocdir frames
 ```
 
 ---
 
-### Stage 5 — Analyse alignment results
+### Stage 5 — Analyse initial alignment results
 
 ```bash
 aretomo3-preprocess analyse \
@@ -139,19 +144,82 @@ aretomo3-preprocess analyse \
     2>&1 | tee analyse.log
 ```
 
-Open `run001_analysis/index.html` for the interactive report.
+Open `run001_analysis/index.html`. The report shows per-TS histograms and a
+global summary including the **recommended TiltAxis** (median in-plane rotation)
+and **suggested AlignZ** (median sample thickness in pixels), which are saved to
+`project.json` and used automatically in the next step.
 
 ---
 
-### Stage 6 — Select quality tilt series
+### Stage 6 — Re-align with refined TiltAxis/AlignZ (cmd=1)
+
+cmd=1 skips motion correction and re-runs alignment + reconstruction using the
+optimised global or per-lamella parameters from the Stage 5 analysis.
+
+**Option A — single global TiltAxis/AlignZ** (auto-loaded from `project.json`):
+
+```bash
+aretomo3-preprocess run-aretomo3 \
+    --in-prefix run001/ts- \
+    --in-suffix mrc \
+    --in-skips  _CTF _Vol _EVN _ODD \
+    --output    run002 \
+    --cmd       1 \
+    --analysis  run001_analysis \
+    --split-sum 1 \
+    --at-bin    4 8 \
+    --apix      1.63 \
+    --gpu       0 1 2 3 \
+    --aretomo3  /opt/AreTomo3/AreTomo3 \
+    2>&1 | tee run002.log
+# --tilt-axis and --align-z are auto-filled from run001_analysis/project.json
+```
+
+**Option B — per-lamella TiltAxis/AlignZ** (use `run-aretomo3-per-ts` instead):
+
+```bash
+aretomo3-preprocess run-aretomo3-per-ts \
+    --mrcdir   run001 \
+    --output   run002 \
+    --analysis run001_analysis \
+    --cmd      1 \
+    --split-sum 1 \
+    --at-bin   4 8 \
+    --apix     1.63 \
+    --gpu      0 1 2 3 \
+    --aretomo3 /opt/AreTomo3/AreTomo3 \
+    2>&1 | tee run002.log
+# TiltAxis and AlignZ are read per-lamella from run001_analysis/lamella_positions.csv
+```
+
+Use Option B when the dataset has multiple lamellae with significantly different
+tilt-axis orientations.
+
+---
+
+### Stage 7 — Analyse refined alignment results
+
+```bash
+aretomo3-preprocess analyse \
+    --input     run002 \
+    --output    run002_analysis \
+    --threshold 80 \
+    --mdocdir   frames \
+    --angpix    1.63 \
+    2>&1 | tee analyse2.log
+```
+
+---
+
+### Stage 8 — Select quality tilt series
 
 ```bash
 # Use defaults: exclude TS with fewer than 2 pos OR 2 neg frames
-aretomo3-preprocess select-ts --analysis run001_analysis
+aretomo3-preprocess select-ts --analysis run002_analysis
 
 # Add quality filters
 aretomo3-preprocess select-ts \
-    --analysis       run001_analysis \
+    --analysis       run002_analysis \
     --min-neg-frames 2 \
     --min-pos-frames 2 \
     --min-frames     10 \
@@ -161,32 +229,36 @@ aretomo3-preprocess select-ts \
     --output         ts_selection.csv
 ```
 
-Writes `ts_selection.csv` and saves selected TS names to `project.json`. Re-run `analyse` afterwards to see the "Selected only" toggle in the HTML viewer.
+Writes `ts_selection.csv` and saves the selection to `project.json`. Re-run
+`analyse` afterwards to see the "Selected only" toggle in the HTML viewer.
 
 ---
 
-### Stage 7 — Run AreTomo3 cmd=2 (reconstruction only, selected TS)
+### Stage 9 — Final reconstruction of selected TS (cmd=2)
+
+cmd=2 uses the existing `.aln` files from run002 and re-runs only the WBP
+reconstruction, optionally filtering out low-overlap frames first.
 
 ```bash
 aretomo3-preprocess run-aretomo3 \
-    --in-prefix run001/ts- \
-    --in-suffix mrc \
-    --output    run002 \
-    --cmd       2 \
-    --analysis  run001_analysis \
+    --in-prefix      run002/ts- \
+    --in-suffix      mrc \
+    --output         run003 \
+    --cmd            2 \
+    --analysis       run002_analysis \
     --filter-overlap 80 \
-    --at-bin    4 8 \
-    --split-sum 1 \
-    --apix      1.63 \
-    --gpu       0 1 2 3 \
-    --aretomo3  /opt/AreTomo3/AreTomo3 \
-    2>&1 | tee run002.log
+    --at-bin         4 8 \
+    --split-sum      1 \
+    --apix           1.63 \
+    --gpu            0 1 2 3 \
+    --aretomo3       /opt/AreTomo3/AreTomo3 \
+    2>&1 | tee run003.log
 # --select-ts is auto-loaded from project.json
 ```
 
 ---
 
-### Stage 8 — cryoCARE denoising (optional)
+### Stage 10 — cryoCARE denoising *(optional)*
 
 ```bash
 aretomo3-preprocess cryocare train \
@@ -199,41 +271,22 @@ aretomo3-preprocess cryocare train \
 
 ---
 
-## Per-lamella reconstruction (run-aretomo3-per-ts)
-
-For datasets with multiple lamellae at different tilt-axis angles, use the
-per-TS command after running `analyse` (which clusters by stage position):
-
-```bash
-aretomo3-preprocess run-aretomo3-per-ts \
-    --mrcdir  run001 \
-    --output  run002 \
-    --analysis run001_analysis \
-    --cmd     1 \
-    --at-bin  4 8 \
-    --apix    1.63 \
-    --gpu     0 1 2 3 \
-    --aretomo3 /opt/AreTomo3/AreTomo3 \
-    2>&1 | tee run002.log
-# --select-ts is auto-loaded from project.json
-```
-
----
-
 ## Command reference
 
 | Command | Stage | Description |
 |---|---|---|
-| `check-gain-transform` | 0 | Test 4 gain orientations; outputs -RotGain/-FlipGain |
+| `check-gain-transform` | 0 *(optional)* | Test 4 gain orientations; outputs -RotGain/-FlipGain |
 | `validate-mdoc` | 1 | Check mdoc files; fix missing ExposureDose or too-short files |
 | `rename-ts` | 2 | Create ts-XXXX.mdoc symlinks from Position_*.mdoc |
-| `enrich` | 3.5 | Attach mdoc metadata to alignment .aln output |
-| `run-aretomo3` | 3/7 | Batch AreTomo3 wrapper (all cmds) |
-| `run-aretomo3-per-ts` | 3/7 | Per-TS AreTomo3 wrapper with per-lamella parameters |
-| `analyse` | 5 | Parse .aln outputs; QC plots and interactive HTML |
-| `select-ts` | 6 | Filter TS by quality criteria; saves selection to project.json |
+| `run-aretomo3 --cmd 0` | 3 | Batch motion correction + initial alignment |
+| `enrich` | 4 *(optional)* | Attach mdoc metadata (dose, stage pos, defocus) to .aln output |
+| `analyse` | 5 / 7 | Parse .aln outputs; QC plots and interactive HTML |
+| `run-aretomo3 --cmd 1` | 6 | Re-alignment with refined TiltAxis/AlignZ (global) |
+| `run-aretomo3-per-ts --cmd 1` | 6 | Re-alignment with per-lamella TiltAxis/AlignZ |
+| `select-ts` | 8 | Filter TS by quality criteria; saves selection to project.json |
+| `run-aretomo3 --cmd 2` | 9 | Final reconstruction of selected TS |
 | `trim-ts` | post | Trim IMOD support files to match a subset of tilt series |
-| `cryocare` | 8 | Train and apply cryoCARE denoising |
+| `cryocare` | 10 *(optional)* | Train and apply cryoCARE denoising |
 
 ---
 
