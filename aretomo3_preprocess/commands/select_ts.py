@@ -155,6 +155,9 @@ def add_parser(subparsers):
                         'Auto-read from project.json if omitted.')
     p.add_argument('--output', '-o', default='ts_selection.csv',
                    help='Output CSV file path (default: ts_selection.csv)')
+    p.add_argument('--dry-run', action='store_true',
+                   help='Print what would be selected/excluded without writing '
+                        'CSV or updating project.json')
 
     p.add_argument('--overlap-thres', type=float, default=None, metavar='PCT',
                    help='Minimum overlap_pct for a frame to count as a usable '
@@ -259,6 +262,29 @@ def run(args):
             'alpha_deg':      _fmt(stats['alpha_deg']),
             'exclude_reason': '; '.join(reasons),
         })
+
+    # ── Dry-run: print per-TS detail and stop ────────────────────────────────
+    if args.dry_run:
+        tag = '[DRY RUN] '
+        w   = max(len(ts) for ts in ts_names)
+        for row in rows:
+            status = 'SELECT' if row['selected'] else f'EXCLUDE ({row["exclude_reason"]})'
+            tilts  = f'{row["n_tilts"]}/{row["n_frames"]} tilts'
+            thick  = (f'  {row["thickness_px"]}px / {row["thickness_angst"]}Å'
+                      if row['thickness_px'] != '' else '')
+            defoc  = (f'  defocus={row["ref_defocus_um"]}μm'
+                      if row['ref_defocus_um'] != '' else '')
+            rot    = (f'  rot={row["rot_deg"]}°' if row['rot_deg'] != '' else '')
+            print(f'{tag}{row["ts_name"]:{w}}  {status:<35}  {tilts}{thick}{defoc}{rot}')
+        print()
+        print(f'{tag}Would select {len(selected_names)} / {len(ts_names)}  '
+              f'({n_excluded} excluded)')
+        if n_excluded and reason_counts:
+            print()
+            print(f'{tag}Exclusion reasons:')
+            for reason, count in sorted(reason_counts.items()):
+                print(f'{tag}  {reason}: {count}')
+        return
 
     # ── Write CSV ────────────────────────────────────────────────────────────
     out_path   = Path(args.output)
