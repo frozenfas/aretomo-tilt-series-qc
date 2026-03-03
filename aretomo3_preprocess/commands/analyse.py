@@ -632,7 +632,8 @@ def plot_global_summary(all_ts, threshold, global_ranges, out_path, prev_ts=None
 # HTML viewer
 # ─────────────────────────────────────────────────────────────────────────────
 
-def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None):
+def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
+              ratings=None):
     """
     Generate the HTML report.
 
@@ -646,6 +647,10 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None):
                                  added before the tilt-series viewer.
     selection   : dict or None   {ts_name: bool} from select-ts; when provided
                                  a 'Selected only' toggle is shown in the viewer.
+    ratings     : dict or None   {ts_name: int} loaded from ts_ratings.csv;
+                                 pre-populates star ratings on page load
+                                 (localStorage overrides for any TS the user
+                                 re-rates interactively).
     """
     # Determine per-entry selected flag (summary/lamella entries are always selected)
     def _is_selected(e):
@@ -751,8 +756,9 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None):
         None if e['name'].startswith('[') else e['name']
         for e in ts_entries
     ]
-    ts_names_js = json.dumps(ts_names_for_rating)
-    session_key = Path(out_path).parent.name or 'aretomo'
+    ts_names_js    = json.dumps(ts_names_for_rating)
+    embedded_ratings_js = json.dumps(ratings or {})
+    session_key    = Path(out_path).parent.name or 'aretomo'
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -966,9 +972,13 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None):
     rebuildVis();
 
     // ── Star ratings ──────────────────────────────────────────────────────
-    const tsNames    = {ts_names_js};
-    const storageKey = 'aretomo_ratings_{session_key}';
-    let   ratings    = JSON.parse(localStorage.getItem(storageKey) || '{{}}');
+    const tsNames        = {ts_names_js};
+    const storageKey     = 'aretomo_ratings_{session_key}';
+    const embeddedRatings = {embedded_ratings_js};
+    // Merge: embedded CSV ratings are the baseline; localStorage overrides
+    // any TS the user has re-rated in this browser session.
+    let   ratings    = Object.assign({{}}, embeddedRatings,
+                           JSON.parse(localStorage.getItem(storageKey) || '{{}}'));
 
     const stars     = document.querySelectorAll('.star');
     const ratingLbl = document.getElementById('rating-label');
@@ -1906,10 +1916,24 @@ def run(args):
     else:
         selection = None
 
+    # ── Load ratings from ts_ratings.csv if present ───────────────────────────
+    ratings_csv = out_dir / 'ts_ratings.csv'
+    saved_ratings = {}
+    if ratings_csv.exists():
+        import csv as _csv
+        with open(ratings_csv, newline='') as _fh:
+            for row in _csv.DictReader(_fh):
+                try:
+                    saved_ratings[row['ts_name']] = int(row['rating'])
+                except (KeyError, ValueError):
+                    pass
+        print(f'Loaded {len(saved_ratings)} ratings from {ratings_csv.name}')
+
     # HTML
     _tp = time.perf_counter()
     html_path = out_dir / 'index.html'
-    make_html(ts_entries, str(html_path), args.threshold, gain_check, selection)
+    make_html(ts_entries, str(html_path), args.threshold, gain_check, selection,
+              ratings=saved_ratings or None)
     _t2_html = time.perf_counter() - _tp
 
     # ── Project JSON ──────────────────────────────────────────────────────────
