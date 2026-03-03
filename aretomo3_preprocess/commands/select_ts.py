@@ -7,12 +7,14 @@ to aretomo3_project.json so downstream commands (run-aretomo3,
 run-aretomo3-per-ts, cryocare) can pick it up automatically.
 
 CSV columns:
-  ts_name, selected, n_frames, n_tilts, rot_deg, thickness_px,
+  ts_name, selected, n_frames, n_tilts, rating, rot_deg, thickness_px,
   thickness_angst, thickness_nm, ref_defocus_um, alpha_deg, exclude_reason
 
   n_frames  total aligned frames in the .aln (AreTomo3 dark frames excluded)
   n_tilts   frames with overlap_pct >= --overlap-thres (usable after overlap
             filtering); equals n_frames when --overlap-thres is not given
+  rating    star rating from ts_ratings.csv in the analysis dir (empty if
+            not rated or file not present)
 """
 
 import csv
@@ -27,6 +29,26 @@ from aretomo3_preprocess.shared.project_json import (
     update_section, args_to_dict, load as load_project,
 )
 from aretomo3_preprocess.shared.project_state import get_latest_analysis_dir
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ratings loader
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _load_ratings(analysis_dir: Path) -> dict:
+    """Load ts_ratings.csv from analysis_dir; return {ts_name: int} or {}."""
+    path = analysis_dir / 'ts_ratings.csv'
+    if not path.exists():
+        return {}
+    ratings = {}
+    with open(path, newline='') as fh:
+        reader = csv.DictReader(fh)
+        for row in reader:
+            try:
+                ratings[row['ts_name']] = int(row['rating'])
+            except (KeyError, ValueError):
+                pass
+    return ratings
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -101,6 +123,16 @@ def _apply_filters(stats, args):
     """Return list of exclusion reasons (empty list = TS is selected)."""
     reasons = []
 
+    if args.select_by_rating is not None:
+        lo, hi = args.select_by_rating
+        rating = stats.get('rating')
+        if rating is None:
+            reasons.append('unrated')
+        elif rating < lo:
+            reasons.append(f'rating<{lo:.0f}')
+        elif rating > hi:
+            reasons.append(f'rating>{hi:.0f}')
+
     if args.select_by_tilts is not None:
         lo, hi = args.select_by_tilts
         if stats['n_tilts'] < lo:
@@ -166,6 +198,11 @@ def add_parser(subparsers):
                         'filter_overlap value used in the last run-aretomo3 run.')
 
     sel = p.add_argument_group('selection filters (all optional; provide MIN MAX)')
+    sel.add_argument('--select-by-rating', type=float, nargs=2,
+                     metavar=('MIN', 'MAX'),
+                     help='Keep TS with star rating in [MIN, MAX] '
+                          '(reads ts_ratings.csv from the analysis directory; '
+                          'TS without a rating are excluded)')
     sel.add_argument('--select-by-tilts', type=float, nargs=2,
                      metavar=('MIN', 'MAX'),
                      help='Keep TS with n_tilts (usable frames after overlap '
@@ -215,6 +252,15 @@ def run(args):
     ts_names = sorted(alignment_data.keys())
     print(f'Loaded {len(ts_names)} tilt series from {analysis_dir}/alignment_data.json')
 
+    # ── Load ratings ─────────────────────────────────────────────────────────
+    ratings = _load_ratings(analysis_dir)
+    if ratings:
+        print(f'Loaded ratings for {len(ratings)} tilt series from '
+              f'{analysis_dir}/ts_ratings.csv')
+    elif args.select_by_rating is not None:
+        print(f'WARNING: --select-by-rating given but {analysis_dir}/ts_ratings.csv '
+              f'not found — all TS will be excluded as unrated.')
+
     # ── Overlap threshold consistency check ──────────────────────────────────
     if args.overlap_thres is not None:
         proj         = load_project()
@@ -237,9 +283,10 @@ def run(args):
     reason_counts  = Counter()
 
     for ts_name in ts_names:
-        stats   = _compute_ts_stats(ts_name, alignment_data[ts_name],
-                                    args.overlap_thres)
-        reasons = _apply_filters(stats, args)
+        stats          = _compute_ts_stats(ts_name, alignment_data[ts_name],
+                                           args.overlap_thres)
+        stats['rating'] = ratings.get(ts_name)   # None if unrated
+        reasons        = _apply_filters(stats, args)
         selected = len(reasons) == 0
 
         if selected:
@@ -254,6 +301,7 @@ def run(args):
             'selected':       1 if selected else 0,
             'n_frames':       stats['n_frames'],
             'n_tilts':        stats['n_tilts'],
+            'rating':         stats['rating'] if stats['rating'] is not None else '',
             'rot_deg':        _fmt(stats['rot_deg']),
             'thickness_px':   _fmt(stats['thickness_px']),
             'thickness_angst':_fmt(stats['thickness_angst']),
@@ -270,12 +318,13 @@ def run(args):
         for row in rows:
             status = 'SELECT' if row['selected'] else f'EXCLUDE ({row["exclude_reason"]})'
             tilts  = f'{row["n_tilts"]}/{row["n_frames"]} tilts'
+            stars  = (f'  {row["rating"]}★' if row['rating'] != '' else '  -★')
             thick  = (f'  {row["thickness_px"]}px / {row["thickness_angst"]}Å'
                       if row['thickness_px'] != '' else '')
             defoc  = (f'  defocus={row["ref_defocus_um"]}μm'
                       if row['ref_defocus_um'] != '' else '')
             rot    = (f'  rot={row["rot_deg"]}°' if row['rot_deg'] != '' else '')
-            print(f'{tag}{row["ts_name"]:{w}}  {status:<35}  {tilts}{thick}{defoc}{rot}')
+            print(f'{tag}{row["ts_name"]:{w}}  {status:<35}  {tilts}{stars}{thick}{defoc}{rot}')
         print()
         print(f'{tag}Would select {len(selected_names)} / {len(ts_names)}  '
               f'({n_excluded} excluded)')
@@ -289,7 +338,7 @@ def run(args):
     # ── Write CSV ────────────────────────────────────────────────────────────
     out_path   = Path(args.output)
     fieldnames = [
-        'ts_name', 'selected', 'n_frames', 'n_tilts',
+        'ts_name', 'selected', 'n_frames', 'n_tilts', 'rating',
         'rot_deg', 'thickness_px', 'thickness_angst', 'thickness_nm',
         'ref_defocus_um', 'alpha_deg', 'exclude_reason',
     ]
