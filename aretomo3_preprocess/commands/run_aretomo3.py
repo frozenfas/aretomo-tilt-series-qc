@@ -14,15 +14,13 @@ Each mode expects different inputs and handles stacks / .aln files differently:
    0   frames/ts-           mdoc         (none — mdoc mode)       raw movies via mdoc    created in --output
    1   <cmd0 output>/ts-    mrc          _CTF,_Vol,_EVN,_ODD      already in --in-prefix created in --output
    2   <prev run>/ts-       mrc          _CTF,_Vol,_EVN,_ODD      symlinked into         pre-exist in
-                                                                   staging dir            --in-prefix dir
-                                                                   (--output/_input/)
+                                                                   --output/              --in-prefix dir
 
 For cmd=2, AreTomo3 reads the existing .aln from the --in-prefix directory and
 writes new volumes (at the requested --at-bin / --split-sum) to --output.
-A staging directory (--output/_input/) is created containing symlinks to the
-.aln files (from --in-prefix) and .mrc/.TLT stacks (from project.json or
---mrcdir).  AreTomo3 is pointed at the staging directory so the source run is
-never modified.
+Symlinks to the .aln files (from --in-prefix) and .mrc/.TLT stacks (from
+project.json or --mrcdir) are created directly in --output/.  AreTomo3 is
+pointed at --output/ so the source run is never modified.
 
 TiltAxis and AlignZ (cmd=1/2)
 ------------------------------
@@ -196,7 +194,7 @@ def _build_cmd(args) -> list:
     cmd += ['-InPrefix', args.in_prefix]
     cmd += ['-InSuffix', args.in_suffix]
     # Only pass file-type skip patterns to AreTomo3 (e.g. _CTF, _Vol).
-    # TS-name patterns (e.g. ts-008) are handled by not staging those files,
+    # TS-name patterns (e.g. ts-008) are handled by not symlinking those files,
     # so passing them to -InSkips is unnecessary and overflows AreTomo3's buffer.
     skips = [s for s in (args.in_skips or []) if s and not s.startswith('ts-')]
     if skips:
@@ -291,9 +289,9 @@ def _setup_cmd2_staging(out_dir: Path, src_in_dir: Path,
                         mrcdir: Path = None, in_skips: list = None,
                         dry_run: bool = False, selected_ts: set = None) -> Path:
     """
-    Create a staging directory out_dir/_input/ for cmd=2 runs.
+    Populate the output directory with symlinks for cmd=2 runs.
 
-    Populates it with symlinks to:
+    Creates symlinks directly in out_dir to:
       - ts-xxx.aln      →  src_in_dir/ts-xxx.aln         (alignment files)
       - ts-xxx.mrc      →  <source>/ts-xxx.mrc            (tilt-series stacks)
       - ts-xxx_TLT.txt  →  <source>/ts-xxx_TLT.txt       (frame ordering)
@@ -302,13 +300,11 @@ def _setup_cmd2_staging(out_dir: Path, src_in_dir: Path,
     or the explicit --mrcdir fallback.
 
     src_in_dir (e.g. run003) is NEVER modified — only read.
-    Symlinks are created even during --dry-run because the staging directory
-    is inside the output dir (cheap and easily removed).
 
-    Returns the staging directory path.
+    Returns out_dir (the directory AreTomo3 should be pointed at).
     """
     sep = '═' * 70
-    staging_dir = out_dir / '_input'
+    staging_dir = out_dir
 
     # ── Source for MRC stacks and _TLT.txt ────────────────────────────────
     proj   = load_or_create()
@@ -374,11 +370,11 @@ def _setup_cmd2_staging(out_dir: Path, src_in_dir: Path,
                 to_link_tlt.append((ts_name, tlt_src.resolve()))
 
     if not to_link_aln and not to_link_mrc and not to_link_tlt:
-        print(f'  Staging dir {staging_dir}/ already populated — skipping symlink creation.')
+        print(f'  Output dir {staging_dir}/ already populated — skipping symlink creation.')
         return staging_dir
 
     print(sep)
-    print(f'  CMD=2 STAGING DIRECTORY  →  {staging_dir}/')
+    print(f'  CMD=2 OUTPUT DIRECTORY  →  {staging_dir}/')
     print(f'  .aln source    : {src_in_dir}/')
     if src_root is not None:
         print(f'  MRC/TLT source : {source_label}')
@@ -845,8 +841,8 @@ def add_parser(subparsers):
                      help='cmd=2 only: before reconstruction, demote frames '
                           'with overlap_pct < PCT to DarkFrame in each .aln '
                           'file (reads alignment_data.json from --analysis). '
-                          'Modified .aln files are written to the staging dir '
-                          '(--output/_input/); the source run is never touched.')
+                          'Modified .aln files are written to --output/; '
+                          'the source run is never touched.')
     ali.add_argument('--tilt-axis', type=float, nargs='+', default=None,
                      metavar='ANGLE',
                      help='Tilt axis angle [REFINE_FLAG]; overrides --analysis; '
@@ -893,10 +889,10 @@ def run(args):
     # ── Staging directory (cmd=2 only) ────────────────────────────────────
     # cmd=1: --in-prefix points at the cmd=0 output dir which has the stacks;
     #        no staging needed, fresh .aln is written to OutDir.
-    # cmd=2: a staging dir (--output/_input/) is created with symlinks to the
-    #        .aln files (from src_in_dir) and .mrc/.TLT stacks (from project.json
-    #        or --mrcdir).  AreTomo3 is pointed at the staging dir.  src_in_dir
-    #        (e.g. run003) is NEVER modified.
+    # cmd=2: symlinks to the .aln files (from src_in_dir) and .mrc/.TLT stacks
+    #        (from project.json or --mrcdir) are created directly in --output/.
+    #        AreTomo3 is pointed at --output/.  src_in_dir (e.g. run003) is
+    #        NEVER modified.
     if args.in_suffix == 'mrc' and args.cmd == 2:
         mrcdir      = Path(args.mrcdir) if args.mrcdir is not None else None
         selected_ts = resolve_selected_ts(getattr(args, 'select_ts', None))
