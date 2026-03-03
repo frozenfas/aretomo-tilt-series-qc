@@ -7,12 +7,12 @@ to aretomo3_project.json so downstream commands (run-aretomo3,
 run-aretomo3-per-ts, cryocare) can pick it up automatically.
 
 CSV columns:
-  ts_name, selected, n_frames, n_neg_frames, n_pos_frames, alpha_deg,
-  thickness_nm, rot_deg, ref_defocus_um, exclude_reason
+  ts_name, selected, n_frames, n_tilts, rot_deg, thickness_px,
+  thickness_angst, thickness_nm, ref_defocus_um, alpha_deg, exclude_reason
 
-The tilt-balance filters (--min-neg-frames, --min-pos-frames) are the most
-important: AreTomo3 crashes during WBP reconstruction when there are fewer
-than ~2 frames on either the positive or negative tilt side.
+  n_frames  total aligned frames in the .aln (AreTomo3 dark frames excluded)
+  n_tilts   frames with overlap_pct >= --overlap-thres (usable after overlap
+            filtering); equals n_frames when --overlap-thres is not given
 """
 
 import csv
@@ -23,7 +23,9 @@ from pathlib import Path
 import argparse
 import json
 
-from aretomo3_preprocess.shared.project_json import update_section, args_to_dict
+from aretomo3_preprocess.shared.project_json import (
+    update_section, args_to_dict, load as load_project,
+)
 from aretomo3_preprocess.shared.project_state import get_latest_analysis_dir
 
 
@@ -31,54 +33,63 @@ from aretomo3_preprocess.shared.project_state import get_latest_analysis_dir
 # Per-TS statistics
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _compute_ts_stats(ts_name, ts_data, tilt_threshold):
+def _compute_ts_stats(ts_name, ts_data, overlap_thres):
     """Compute per-TS summary statistics from an alignment_data.json entry."""
-    frames = ts_data.get('frames', [])
-    n_frames = len(frames)
+    frames       = ts_data.get('frames', [])
+    n_frames     = len(frames)
+    angpix       = ts_data.get('angpix')
+    thickness_nm = ts_data.get('thickness_nm')
+
+    if thickness_nm is not None and angpix is not None and angpix > 0:
+        thickness_px    = round(thickness_nm * 10.0 / angpix, 1)
+        thickness_angst = round(thickness_nm * 10.0, 1)
+    else:
+        thickness_px    = None
+        thickness_angst = None
 
     if n_frames == 0:
         return {
             'ts_name':        ts_name,
             'n_frames':       0,
-            'n_neg_frames':   0,
-            'n_pos_frames':   0,
-            'alpha_deg':      ts_data.get('alpha_offset'),
-            'thickness_nm':   ts_data.get('thickness_nm'),
+            'n_tilts':        0,
             'rot_deg':        None,
+            'thickness_px':   thickness_px,
+            'thickness_angst':thickness_angst,
+            'thickness_nm':   thickness_nm,
             'ref_defocus_um': None,
+            'alpha_deg':      ts_data.get('alpha_offset'),
         }
 
-    tilts = [f['tilt'] for f in frames]
-    rots  = [f['rot']  for f in frames]
-
-    n_neg = sum(1 for t in tilts if t < -tilt_threshold)
-    n_pos = sum(1 for t in tilts if t >  tilt_threshold)
+    rots    = [f['rot'] for f in frames if 'rot' in f]
     rot_deg = round(sum(rots) / len(rots), 3) if rots else None
 
-    # Reference-frame defocus: prefer first-acquired frame (acq_order=1),
-    # then is_reference=True, then frame closest to 0°.
-    ref_frame = None
+    # n_tilts: frames not eliminated by overlap threshold
+    if overlap_thres is not None:
+        n_tilts = sum(
+            1 for f in frames
+            if f.get('overlap_pct') is None or f.get('overlap_pct') >= overlap_thres
+        )
+    else:
+        n_tilts = n_frames
+
+    # Defocus of first acquisition (acq_order == 1)
     acq1 = [f for f in frames if f.get('acq_order') == 1]
     if acq1:
         ref_frame = acq1[0]
     else:
-        ref_list = [f for f in frames if f.get('is_reference')]
-        if ref_list:
-            ref_frame = ref_list[0]
-        else:
-            ref_frame = min(frames, key=lambda f: abs(f['tilt']))
-
+        ref_frame = min(frames, key=lambda f: abs(f.get('tilt', 0)))
     ref_defocus = ref_frame.get('mean_defocus_um') if ref_frame else None
 
     return {
         'ts_name':        ts_name,
         'n_frames':       n_frames,
-        'n_neg_frames':   n_neg,
-        'n_pos_frames':   n_pos,
-        'alpha_deg':      ts_data.get('alpha_offset'),
-        'thickness_nm':   ts_data.get('thickness_nm'),
+        'n_tilts':        n_tilts,
         'rot_deg':        rot_deg,
+        'thickness_px':   thickness_px,
+        'thickness_angst':thickness_angst,
+        'thickness_nm':   thickness_nm,
         'ref_defocus_um': ref_defocus,
+        'alpha_deg':      ts_data.get('alpha_offset'),
     }
 
 
@@ -90,43 +101,40 @@ def _apply_filters(stats, args):
     """Return list of exclusion reasons (empty list = TS is selected)."""
     reasons = []
 
-    if args.min_frames is not None and stats['n_frames'] < args.min_frames:
-        reasons.append(f'frames<{args.min_frames}')
-    if args.max_frames is not None and stats['n_frames'] > args.max_frames:
-        reasons.append(f'frames>{args.max_frames}')
+    if args.select_by_tilts is not None:
+        lo, hi = args.select_by_tilts
+        if stats['n_tilts'] < lo:
+            reasons.append(f'tilts<{lo:.0f}')
+        if stats['n_tilts'] > hi:
+            reasons.append(f'tilts>{hi:.0f}')
 
-    if stats['n_neg_frames'] < args.min_neg_frames:
-        reasons.append(f'neg_frames<{args.min_neg_frames}')
-    if stats['n_pos_frames'] < args.min_pos_frames:
-        reasons.append(f'pos_frames<{args.min_pos_frames}')
+    if args.select_by_tilt_axis is not None and stats['rot_deg'] is not None:
+        lo, hi = args.select_by_tilt_axis
+        if stats['rot_deg'] < lo:
+            reasons.append(f'rot<{lo}')
+        if stats['rot_deg'] > hi:
+            reasons.append(f'rot>{hi}')
 
-    if args.min_alpha is not None and stats['alpha_deg'] is not None:
-        if stats['alpha_deg'] < args.min_alpha:
-            reasons.append(f'alpha<{args.min_alpha}')
-    if args.max_alpha is not None and stats['alpha_deg'] is not None:
-        if stats['alpha_deg'] > args.max_alpha:
-            reasons.append(f'alpha>{args.max_alpha}')
+    if args.select_by_thickness_px is not None and stats['thickness_px'] is not None:
+        lo, hi = args.select_by_thickness_px
+        if stats['thickness_px'] < lo:
+            reasons.append(f'thickness<{lo:.0f}px')
+        if stats['thickness_px'] > hi:
+            reasons.append(f'thickness>{hi:.0f}px')
 
-    if args.min_thickness is not None and stats['thickness_nm'] is not None:
-        if stats['thickness_nm'] < args.min_thickness:
-            reasons.append(f'thickness<{args.min_thickness}nm')
-    if args.max_thickness is not None and stats['thickness_nm'] is not None:
-        if stats['thickness_nm'] > args.max_thickness:
-            reasons.append(f'thickness>{args.max_thickness}nm')
+    if args.select_by_thickness_angst is not None and stats['thickness_angst'] is not None:
+        lo, hi = args.select_by_thickness_angst
+        if stats['thickness_angst'] < lo:
+            reasons.append(f'thickness<{lo:.0f}Å')
+        if stats['thickness_angst'] > hi:
+            reasons.append(f'thickness>{hi:.0f}Å')
 
-    if args.min_defocus is not None and stats['ref_defocus_um'] is not None:
-        if stats['ref_defocus_um'] < args.min_defocus:
-            reasons.append(f'defocus<{args.min_defocus}um')
-    if args.max_defocus is not None and stats['ref_defocus_um'] is not None:
-        if stats['ref_defocus_um'] > args.max_defocus:
-            reasons.append(f'defocus>{args.max_defocus}um')
-
-    if args.min_rot is not None and stats['rot_deg'] is not None:
-        if stats['rot_deg'] < args.min_rot:
-            reasons.append(f'rot<{args.min_rot}')
-    if args.max_rot is not None and stats['rot_deg'] is not None:
-        if stats['rot_deg'] > args.max_rot:
-            reasons.append(f'rot>{args.max_rot}')
+    if args.select_by_defocus is not None and stats['ref_defocus_um'] is not None:
+        lo, hi = args.select_by_defocus
+        if stats['ref_defocus_um'] < lo:
+            reasons.append(f'defocus<{lo}μm')
+        if stats['ref_defocus_um'] > hi:
+            reasons.append(f'defocus>{hi}μm')
 
     return reasons
 
@@ -139,45 +147,38 @@ def add_parser(subparsers):
     p = subparsers.add_parser(
         'select-ts',
         help='Filter tilt series by quality criteria; writes ts_selection.csv',
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
         description=__doc__,
     )
     p.add_argument('--analysis', '-A', default=None,
                    help='analyse output directory containing alignment_data.json. '
                         'Auto-read from project.json if omitted.')
     p.add_argument('--output', '-o', default='ts_selection.csv',
-                   help='Output CSV file path')
+                   help='Output CSV file path (default: ts_selection.csv)')
 
-    bal = p.add_argument_group('tilt balance (prevents AreTomo3 WBP crashes)')
-    bal.add_argument('--tilt-threshold', type=float, default=2.0,
-                     help='Frames with |tilt| <= this are not counted as '
-                          'positive or negative (degrees)')
-    bal.add_argument('--min-neg-frames', type=int, default=2,
-                     help='Minimum frames with tilt < -threshold')
-    bal.add_argument('--min-pos-frames', type=int, default=2,
-                     help='Minimum frames with tilt > +threshold')
-    bal.add_argument('--min-frames', type=int, default=None,
-                     help='Minimum total aligned frames')
-    bal.add_argument('--max-frames', type=int, default=None,
-                     help='Maximum total aligned frames')
+    p.add_argument('--overlap-thres', type=float, default=None, metavar='PCT',
+                   help='Minimum overlap_pct for a frame to count as a usable '
+                        'tilt (sets n_tilts column and is used by '
+                        '--select-by-tilts).  Warn if different from the '
+                        'filter_overlap value used in the last run-aretomo3 run.')
 
-    qfil = p.add_argument_group('quality filters (optional)')
-    qfil.add_argument('--min-alpha', type=float, default=None,
-                      help='Minimum alpha offset (tilt axis offset) in degrees')
-    qfil.add_argument('--max-alpha', type=float, default=None,
-                      help='Maximum alpha offset in degrees')
-    qfil.add_argument('--min-thickness', type=float, default=None,
-                      help='Minimum estimated sample thickness in nm')
-    qfil.add_argument('--max-thickness', type=float, default=None,
-                      help='Maximum estimated sample thickness in nm')
-    qfil.add_argument('--min-defocus', type=float, default=None,
-                      help='Minimum reference-frame defocus in μm')
-    qfil.add_argument('--max-defocus', type=float, default=None,
-                      help='Maximum reference-frame defocus in μm')
-    qfil.add_argument('--min-rot', type=float, default=None,
-                      help='Minimum mean tilt-axis rotation (rot) in degrees')
-    qfil.add_argument('--max-rot', type=float, default=None,
-                      help='Maximum mean tilt-axis rotation (rot) in degrees')
+    sel = p.add_argument_group('selection filters (all optional; provide MIN MAX)')
+    sel.add_argument('--select-by-tilts', type=float, nargs=2,
+                     metavar=('MIN', 'MAX'),
+                     help='Keep TS with n_tilts (usable frames after overlap '
+                          'filtering) in [MIN, MAX]')
+    sel.add_argument('--select-by-tilt-axis', type=float, nargs=2,
+                     metavar=('MIN', 'MAX'),
+                     help='Keep TS with mean tilt-axis rotation in [MIN, MAX] degrees')
+    sel.add_argument('--select-by-thickness-px', type=float, nargs=2,
+                     metavar=('MIN', 'MAX'),
+                     help='Keep TS with estimated sample thickness in [MIN, MAX] pixels')
+    sel.add_argument('--select-by-thickness-angst', type=float, nargs=2,
+                     metavar=('MIN', 'MAX'),
+                     help='Keep TS with estimated sample thickness in [MIN, MAX] Å')
+    sel.add_argument('--select-by-defocus', type=float, nargs=2,
+                     metavar=('MIN', 'MAX'),
+                     help='Keep TS with first-acquisition defocus in [MIN, MAX] μm')
 
     p.set_defaults(func=run)
     return p
@@ -199,8 +200,8 @@ def run(args):
         print('       Run analyse first, or supply --analysis explicitly.')
         sys.exit(1)
 
-    analysis_dir   = Path(analysis_dir)
-    json_path      = analysis_dir / 'alignment_data.json'
+    analysis_dir = Path(analysis_dir)
+    json_path    = analysis_dir / 'alignment_data.json'
     if not json_path.exists():
         print(f'ERROR: alignment_data.json not found in {analysis_dir}')
         sys.exit(1)
@@ -210,6 +211,20 @@ def run(args):
 
     ts_names = sorted(alignment_data.keys())
     print(f'Loaded {len(ts_names)} tilt series from {analysis_dir}/alignment_data.json')
+
+    # ── Overlap threshold consistency check ──────────────────────────────────
+    if args.overlap_thres is not None:
+        proj         = load_project()
+        saved_thres  = (proj.get('run_aretomo3', {})
+                            .get('args', {})
+                            .get('filter_overlap'))
+        if saved_thres is not None and saved_thres != args.overlap_thres:
+            print(f'WARNING: --overlap-thres {args.overlap_thres} differs from '
+                  f'filter_overlap={saved_thres} used in the last run-aretomo3 run.')
+            print(f'         n_tilts counts may not match the frames actually '
+                  f'used in reconstruction.')
+        print(f'Overlap threshold: {args.overlap_thres}%  '
+              f'(frames below this are excluded from n_tilts)')
     print()
 
     # ── Apply filters ────────────────────────────────────────────────────────
@@ -220,7 +235,7 @@ def run(args):
 
     for ts_name in ts_names:
         stats   = _compute_ts_stats(ts_name, alignment_data[ts_name],
-                                    args.tilt_threshold)
+                                    args.overlap_thres)
         reasons = _apply_filters(stats, args)
         selected = len(reasons) == 0
 
@@ -235,20 +250,22 @@ def run(args):
             'ts_name':        ts_name,
             'selected':       1 if selected else 0,
             'n_frames':       stats['n_frames'],
-            'n_neg_frames':   stats['n_neg_frames'],
-            'n_pos_frames':   stats['n_pos_frames'],
-            'alpha_deg':      _fmt(stats['alpha_deg']),
-            'thickness_nm':   _fmt(stats['thickness_nm']),
+            'n_tilts':        stats['n_tilts'],
             'rot_deg':        _fmt(stats['rot_deg']),
+            'thickness_px':   _fmt(stats['thickness_px']),
+            'thickness_angst':_fmt(stats['thickness_angst']),
+            'thickness_nm':   _fmt(stats['thickness_nm']),
             'ref_defocus_um': _fmt(stats['ref_defocus_um']),
+            'alpha_deg':      _fmt(stats['alpha_deg']),
             'exclude_reason': '; '.join(reasons),
         })
 
     # ── Write CSV ────────────────────────────────────────────────────────────
     out_path   = Path(args.output)
     fieldnames = [
-        'ts_name', 'selected', 'n_frames', 'n_neg_frames', 'n_pos_frames',
-        'alpha_deg', 'thickness_nm', 'rot_deg', 'ref_defocus_um', 'exclude_reason',
+        'ts_name', 'selected', 'n_frames', 'n_tilts',
+        'rot_deg', 'thickness_px', 'thickness_angst', 'thickness_nm',
+        'ref_defocus_um', 'alpha_deg', 'exclude_reason',
     ]
     with open(out_path, 'w', newline='') as fh:
         writer = csv.DictWriter(fh, fieldnames=fieldnames)
