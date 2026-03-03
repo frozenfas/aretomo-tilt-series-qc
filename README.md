@@ -12,7 +12,7 @@ Pre-processing pipeline for AreTomo3 cryo-ET tilt-series data: from raw TIFF mov
 git clone https://github.com/frozenfas/aretomo-tilt-series-qc.git
 cd aretomo-tilt-series-qc
 conda env create -f environment.yml
-conda activate aretomo-parse
+conda activate aretomo3-preprocess
 pip install -e .
 ```
 
