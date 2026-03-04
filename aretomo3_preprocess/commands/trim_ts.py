@@ -28,6 +28,7 @@ import os
 import sys
 import json
 import math
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -235,9 +236,13 @@ def add_parser(subparsers):
                    help='Run submfg on the generated .com files after writing them. '
                         '"nodark" runs newst_nodark.com, "clean" runs newst_clean.com, '
                         '"both" runs both (default: none).')
+    p.add_argument('--clean', action='store_true',
+                   help='Remove existing _Imod/, nodark_ts/, and clean_ts/ '
+                        'directories in --output before running.')
     p.add_argument('--dry-run', action='store_true',
                    help='Print what would be done without writing any files or '
-                        'creating any symlinks.')
+                        'creating any symlinks.  Lists stale directories that '
+                        '--clean would remove.')
     p.set_defaults(func=run)
     return p
 
@@ -272,21 +277,29 @@ def run(args):
     dry_run = args.dry_run
     tag     = '[DRY RUN] ' if dry_run else ''
 
+    # ── Check for stale output directories ────────────────────────────────────
+    stale = ([out_dir / v for v in ('nodark_ts', 'clean_ts') if (out_dir / v).is_dir()]
+             + sorted(d for d in out_dir.glob('*_Imod') if d.is_dir()))
+    if stale:
+        if dry_run or args.clean:
+            label = 'Would remove' if dry_run else 'Removing'
+            print(f'{tag}{label} stale output directories:')
+            for d in stale:
+                print(f'{tag}  {d.name}/')
+                if not dry_run:
+                    shutil.rmtree(d)
+            print()
+        else:
+            print(f'ERROR: stale output directories found in {out_dir}/:')
+            for d in stale:
+                print(f'  {d.name}/')
+            print(f'\nRe-run with --clean to remove them automatically.')
+            sys.exit(1)
+
     print(f'{tag}Trimming IMOD support files into : {out_dir}')
     print(f'{tag}Source _Imod directories         : {in_dir}')
     print(f'{tag}Bin factor                       : {args.bin}')
     print(f'{tag}Overlap threshold                : {args.threshold}%\n')
-
-    # Wipe link folders now so they are never stale even if the run is
-    # interrupted before reaching the link-creation section at the end.
-    import shutil as _shutil
-    if not dry_run:
-        for _variant in ('clean', 'nodark'):
-            _link_dir = out_dir / f'{_variant}_ts'
-            if _link_dir.exists():
-                _shutil.rmtree(_link_dir)
-                print(f'Cleared {_link_dir.name}/')
-        print()
 
     sep = '─' * 68
     n_done = n_skip = 0
@@ -448,7 +461,7 @@ def run(args):
         # Remove and recreate on every run so stale links from a previous
         # run (different TS set or different filter) don't accumulate.
         if link_dir.exists():
-            _shutil.rmtree(link_dir)
+            shutil.rmtree(link_dir)
         link_dir.mkdir()
         n_tlt = n_ali = 0
         for ts_name in processed_ts:
