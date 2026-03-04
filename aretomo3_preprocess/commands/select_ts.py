@@ -2,9 +2,7 @@
 select-ts — filter tilt series by quality criteria from an analyse output.
 
 Reads alignment_data.json from a previous analyse run, applies quality
-filters, and writes a ts_selection.csv file.  The selection is also saved
-to aretomo3_project.json so downstream commands (run-aretomo3,
-run-aretomo3-per-ts, cryocare) can pick it up automatically.
+filters, and writes a ts_selection.csv file.
 
 CSV columns:
   ts_name, selected, n_frames, n_tilts, rating, rot_deg, thickness_px,
@@ -19,15 +17,12 @@ CSV columns:
 
 import csv
 import sys
-import datetime
 from collections import Counter
 from pathlib import Path
 import argparse
 import json
 
-from aretomo3_preprocess.shared.project_json import (
-    update_section, args_to_dict, load as load_project,
-)
+from aretomo3_preprocess.shared.project_json import load as load_project
 from aretomo3_preprocess.shared.project_state import get_latest_analysis_dir
 
 
@@ -188,8 +183,7 @@ def add_parser(subparsers):
     p.add_argument('--output', '-o', default='ts_selection.csv',
                    help='Output CSV file path (default: ts_selection.csv)')
     p.add_argument('--dry-run', action='store_true',
-                   help='Print what would be selected/excluded without writing '
-                        'CSV or updating project.json')
+                   help='Print what would be selected/excluded without writing CSV')
 
     p.add_argument('--overlap-thres', type=float, default=None, metavar='PCT',
                    help='Minimum overlap_pct for a frame to count as a usable '
@@ -356,23 +350,6 @@ def run(args):
         print('Exclusion reasons:')
         for reason, count in sorted(reason_counts.items()):
             print(f'  {reason}: {count}')
-
-    # ── Save to project.json ─────────────────────────────────────────────────
-    update_section(
-        section='select_ts',
-        values={
-            'command':      ' '.join(sys.argv),
-            'args':         args_to_dict(args),
-            'timestamp':    datetime.datetime.now().isoformat(timespec='seconds'),
-            'analysis_dir': str(analysis_dir.resolve()),
-            'csv_path':     str(out_path.resolve()),
-            'n_total':      len(ts_names),
-            'n_selected':   len(selected_names),
-            'n_excluded':   n_excluded,
-            'ts_names':     selected_names,
-        },
-    )
-    print(f'\nSaved selection to project.json  [select_ts]')
 
 
 def _fmt(v):

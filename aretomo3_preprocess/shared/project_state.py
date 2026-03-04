@@ -92,57 +92,28 @@ def get_gain_check_dir() -> Optional[Path]:
     return Path(value) if value else None
 
 
-def load_selected_ts() -> Optional[Set[str]]:
-    """
-    Return the set of selected TS names from the last select-ts run, or None.
-
-    None means no selection has been stored (= process all TS).
-    An empty set means all TS were excluded.
-    """
-    data = _load()
-    ts_names = data.get('select_ts', {}).get('ts_names')
-    if ts_names is None:
-        return None
-    return set(ts_names)
-
-
 def resolve_selected_ts(csv_path: Optional[str] = None) -> Optional[Set[str]]:
     """
-    Resolve the active TS selection set.
+    Load the TS selection set from a ts_selection.csv file.
 
-    Priority:
-      1. Explicit csv_path (from --select-ts): read 'selected'==1 rows.
-      2. project.json select_ts.ts_names (from a prior select-ts run).
-      3. None (= no filter; process all TS).
-
-    Prints an informational note when auto-loading from project.json.
+    Returns the set of selected TS names (selected==1), or None if no
+    csv_path is given or the file cannot be read.
     """
-    if csv_path is not None:
-        p = Path(csv_path)
-        if not p.exists():
-            print(f'WARNING: --select-ts {p} not found; processing all TS')
-            return None
-        selected = set()
-        with open(p) as fh:
-            reader = _csv_module.DictReader(fh)
-            for row in reader:
-                if row.get('selected', '').strip() == '1':
-                    selected.add(row['ts_name'])
-        n = len(selected)
-        print(f'TS selection: {n} selected from {p}')
-        return selected if selected else None
-
-    # Auto-load from project.json
-    data     = _load()
-    section  = data.get('select_ts', {})
-    ts_names = section.get('ts_names')
-    if ts_names is not None:
-        s       = set(ts_names)
-        n_total = section.get('n_total', '?')
-        print(f'Note: applying TS selection from project.json '
-              f'({len(s)}/{n_total} selected)')
-        return s if s else None
-    return None
+    if csv_path is None:
+        return None
+    p = Path(csv_path)
+    if not p.exists():
+        print(f'WARNING: --select-ts {p} not found; processing all TS')
+        return None
+    selected = set()
+    with open(p) as fh:
+        reader = _csv_module.DictReader(fh)
+        for row in reader:
+            if row.get('selected', '').strip() == '1':
+                selected.add(row['ts_name'])
+    n = len(selected)
+    print(f'TS selection: {n} selected from {p}')
+    return selected if selected else None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
