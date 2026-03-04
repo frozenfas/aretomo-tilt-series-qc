@@ -372,18 +372,27 @@ def run(args):
         n_total  = len(all_sec_idx)
         n_dark   = len(dark_secs)
         n_extra  = len(flagged_secs - dark_secs)
-        _pwrite(f'{sep}')
-        _pwrite(f'  {tag}{ts_name}')
-        _pwrite(f'    Total sections         : {n_total}')
-        _pwrite(f'    Dark excluded          : {n_dark}')
-        _pwrite(f'    Misaligned (extra)     : {n_extra}')
-        _pwrite(f'    nodark keeps           : {len(nodark_keep)}  sections')
-        _pwrite(f'    clean  keeps           : {len(clean_keep)}  sections')
 
         if dry_run:
-            _pwrite(f'    [DRY RUN] would write: _nodark/.tlt/.xtilt/_order_list.csv/newst.com')
-            _pwrite(f'    [DRY RUN] would write: _clean/.tlt/.xtilt/_order_list.csv/newst.com')
+            # Show full detail for the first TS only; remaining are counted silently
+            if n_done == 0:
+                _pwrite(f'{sep}')
+                _pwrite(f'  [DRY RUN] example — {ts_name}')
+                _pwrite(f'    Total sections         : {n_total}')
+                _pwrite(f'    Dark excluded          : {n_dark}')
+                _pwrite(f'    Misaligned (extra)     : {n_extra}')
+                _pwrite(f'    nodark keeps           : {len(nodark_keep)}  sections')
+                _pwrite(f'    clean  keeps           : {len(clean_keep)}  sections')
+                _pwrite(f'    would write: _nodark/.tlt/.xtilt/_order_list.csv/newst.com')
+                _pwrite(f'    would write: _clean/.tlt/.xtilt/_order_list.csv/newst.com')
         else:
+            _pwrite(f'{sep}')
+            _pwrite(f'  {ts_name}')
+            _pwrite(f'    Total sections         : {n_total}')
+            _pwrite(f'    Dark excluded          : {n_dark}')
+            _pwrite(f'    Misaligned (extra)     : {n_extra}')
+            _pwrite(f'    nodark keeps           : {len(nodark_keep)}  sections')
+            _pwrite(f'    clean  keeps           : {len(clean_keep)}  sections')
             # Write nodark variant
             write_tlt(ts_out / f'{ts_name}_nodark.tlt', sorted_secs, set(nodark_keep))
             write_order_list(ts_out / f'{ts_name}_nodark_order_list.csv',
@@ -427,10 +436,11 @@ def run(args):
         n_done += 1
 
     print(sep)
-    print(f'\n{tag}Done: {n_done} TS processed, {n_skip} skipped')
-
     if dry_run:
+        print(f'\n[DRY RUN] Would process {n_done} TS ({n_skip} skipped).')
+        print(f'          (example above shows first TS; re-run without --dry-run to write files)')
         return
+    print(f'\nDone: {n_done} TS processed, {n_skip} skipped')
 
     # ── Create clean_ts/ and nodark_ts/ link folders ──────────────────────────
     for variant in ('clean', 'nodark'):
