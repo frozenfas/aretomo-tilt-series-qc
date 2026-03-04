@@ -870,6 +870,11 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
               style="font-size:0.82em;background:#37474f;{'display:none' if not has_selection else ''}">
         Selected only ({n_sel})
       </button>
+      <button class="nav-btn" id="btn-reload-sel"
+              style="font-size:0.82em;background:#37474f;"
+              title="Re-fetch ts-select.csv from this directory">
+        &#8635; Reload selection
+      </button>
     </div>
 
     <div id="progress"><div id="progress-bar"></div></div>
@@ -1099,6 +1104,13 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
       .then(r => r.ok ? r.text() : Promise.reject())
       .then(text => _applySelectionCSV(text))
       .catch(() => {{}});
+
+    document.getElementById('btn-reload-sel').addEventListener('click', () => {{
+      fetch('./ts-select.csv?_=' + Date.now())
+        .then(r => r.ok ? r.text() : Promise.reject())
+        .then(text => {{ _applySelectionCSV(text); }})
+        .catch(() => {{ alert('ts-select.csv not found in this directory.'); }});
+    }});
 
     show(0);
   </script>
