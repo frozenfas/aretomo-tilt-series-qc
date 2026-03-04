@@ -19,7 +19,7 @@ Each mode expects different inputs and handles stacks / .aln files differently:
 For cmd=2, AreTomo3 reads the existing .aln from the --in-prefix directory and
 writes new volumes (at the requested --at-bin / --split-sum) to --output.
 Symlinks to the .aln files (from --in-prefix) and .mrc/.TLT stacks (from
-project.json or --mrcdir) are created directly in --output/.  AreTomo3 is
+project.json input_stacks) are created directly in --output/.  AreTomo3 is
 pointed at --output/ so the source run is never modified.
 
 TiltAxis and AlignZ (cmd=1/2)
@@ -42,7 +42,7 @@ Parameter mismatches are reported as warnings that block execution unless
 
 On success, saves the invocation to aretomo3_project.json.  After a cmd=0
 run the output stacks are also registered under input_stacks so that
-subsequent cmd=2 runs can locate them without --mrcdir.
+subsequent cmd=2 runs can locate them automatically.
 
 Typical usage
 -------------
@@ -61,7 +61,7 @@ Typical usage
   # cmd=2 — reconstruct only (reuse run003 .aln, bin4+bin8, with EVN/ODD)
   aretomo3-preprocess run-aretomo3 \\
       --in-prefix run003/ts- --in-suffix mrc \\
-      --output run004 --mrcdir run001 \\
+      --output run004 \\
       --cmd 2 --at-bin 4 8 --split-sum 1 \\
       --apix 1.63 --gpu 0 1 2 3 --dry-run
 """
@@ -286,7 +286,7 @@ def _find_input_files(in_prefix: str, in_suffix: str,
 
 
 def _setup_cmd2_staging(out_dir: Path, src_in_dir: Path,
-                        mrcdir: Path = None, in_skips: list = None,
+                        in_skips: list = None,
                         dry_run: bool = False, selected_ts: set = None) -> Path:
     """
     Populate the output directory with symlinks for cmd=2 runs.
@@ -296,8 +296,8 @@ def _setup_cmd2_staging(out_dir: Path, src_in_dir: Path,
       - ts-xxx.mrc      →  <source>/ts-xxx.mrc            (tilt-series stacks)
       - ts-xxx_TLT.txt  →  <source>/ts-xxx_TLT.txt       (frame ordering)
 
-    The MRC/TLT source is project.json input_stacks (from a prior cmd=0 run)
-    or the explicit --mrcdir fallback.
+    The MRC/TLT source is project.json input_stacks (from a prior cmd=0 run).
+    If not present, exits with an actionable error.
 
     src_in_dir (e.g. run003) is NEVER modified — only read.
 
@@ -317,24 +317,12 @@ def _setup_cmd2_staging(out_dir: Path, src_in_dir: Path,
         all_ts       = sorted(stacks)
         mrc_sources  = {ts: Path(stacks[ts]['path']) for ts in all_ts}
 
-    elif mrcdir is not None:
-        if not mrcdir.is_dir():
-            print(f'ERROR: --mrcdir {mrcdir} not found')
-            sys.exit(1)
-        skips        = [s for s in (in_skips or []) if s]
-        src_root     = mrcdir.resolve()
-        source_label = f'--mrcdir  {src_root}'
-        src_files    = [f for f in sorted(mrcdir.glob('ts-*.mrc'))
-                        if not any(s in f.stem for s in skips)]
-        all_ts       = [f.stem for f in src_files]
-        mrc_sources  = {f.stem: f.resolve() for f in src_files}
-
     else:
-        # No MRC source — still create ALN symlinks (mrc validation will handle error)
-        source_label = 'none'
-        src_root     = None
-        all_ts       = sorted(p.stem for p in src_in_dir.glob('ts-*.aln'))
-        mrc_sources  = {}
+        print('ERROR: input_stacks not found in project.json.')
+        print('       MRC stacks must be registered before running cmd=2.')
+        print('       Register the cmd=0 output directory:')
+        print('         aretomo3-preprocess enrich --mrc-data <run001/>')
+        sys.exit(1)
 
     # ── Apply TS selection filter ──────────────────────────────────────────
     if selected_ts is not None:
@@ -625,25 +613,18 @@ def _validate(args) -> tuple:
         errors.append(f'Input directory not found: {in_dir}/')
     elif not mdoc_files:
         if args.in_suffix == 'mrc' and args.cmd == 2:
-            # cmd=2 dry-run: symlinks not yet created — check project.json/mrcdir
+            # cmd=2 dry-run: symlinks not yet created — check project.json
             proj_stacks = load_or_create().get('input_stacks', {}).get('stacks', {})
-            mrcdir_ok   = args.mrcdir is not None and Path(args.mrcdir).is_dir()
             if proj_stacks:
                 print(f'  Input files     : {len(proj_stacks)} stacks in '
                       f'project.json (symlinks will be created before run)')
-            elif mrcdir_ok:
-                n = len([f for f in Path(args.mrcdir).glob('ts-*.mrc')
-                         if not any(s in f.stem for s in (args.in_skips or []))])
-                print(f'  Input files     : {n} stacks from --mrcdir '
-                      f'(symlinks will be created before run)')
             else:
                 errors.append(
-                    f'No .mrc files found in {in_dir}/ and no stack source '
-                    f'available.\n'
-                    f'       Options:\n'
-                    f'         1. Run --cmd 0 first (registers stacks in '
-                    f'project.json automatically)\n'
-                    f'         2. Add --mrcdir /path/to/stacks'
+                    f'No .mrc files found in {in_dir}/ and input_stacks not in '
+                    f'project.json.\n'
+                    f'       Run --cmd 0 first (registers stacks automatically), '
+                    f'or register manually:\n'
+                    f'         aretomo3-preprocess enrich --mrc-data <run001/>'
                 )
         else:
             errors.append(
@@ -766,11 +747,6 @@ def add_parser(subparsers):
                      help='Filename stem substrings to exclude from input discovery '
                           '(-InSkips). Default excludes AreTomo3 side outputs. '
                           'Pass an empty string to disable.')
-    inp.add_argument('--mrcdir', default=None,
-                     help='Directory containing ts-xxx.mrc stacks; only needed '
-                          'when stacks are not registered in project.json (e.g. '
-                          'stacks produced outside this tool). Stacks are '
-                          'symlinked into --in-prefix directory.')
     inp.add_argument('--select-ts', default=None, metavar='CSV',
                      help='Path to ts_selection.csv from select-ts; only the '
                           'selected TS are staged for cmd=2 runs. '
@@ -890,16 +866,14 @@ def run(args):
     # cmd=1: --in-prefix points at the cmd=0 output dir which has the stacks;
     #        no staging needed, fresh .aln is written to OutDir.
     # cmd=2: symlinks to the .aln files (from src_in_dir) and .mrc/.TLT stacks
-    #        (from project.json or --mrcdir) are created directly in --output/.
+    #        (from project.json input_stacks) are created directly in --output/.
     #        AreTomo3 is pointed at --output/.  src_in_dir (e.g. run003) is
     #        NEVER modified.
     if args.in_suffix == 'mrc' and args.cmd == 2:
-        mrcdir      = Path(args.mrcdir) if args.mrcdir is not None else None
         selected_ts = resolve_selected_ts(getattr(args, 'select_ts', None))
         staging_dir = _setup_cmd2_staging(
             out_dir     = out_dir,
             src_in_dir  = src_in_dir,
-            mrcdir      = mrcdir,
             in_skips    = args.in_skips,
             dry_run     = args.dry_run,
             selected_ts = selected_ts,

@@ -21,15 +21,6 @@ try:
 except ImportError:
     def _tqdm(it, **kw): return it  # type: ignore[assignment]
 
-try:
-    import logging as _logging
-    import mdocfile as _mdocfile
-    _HAS_MDOCFILE = True
-    # mdocfile uses logging.warning() (not warnings.warn) for every key-name
-    # remap (e.g. FrameDosesAndNumber → FrameDosesAndNumbers); silence it.
-    _logging.getLogger('mdocfile').setLevel(_logging.ERROR)
-except ImportError:
-    _HAS_MDOCFILE = False
 
 
 from aretomo3_preprocess.shared.project_json import (
@@ -37,10 +28,10 @@ from aretomo3_preprocess.shared.project_json import (
     update_section, update_section_once, args_to_dict,
 )
 from aretomo3_preprocess.shared.project_state import (
-    get_angpix, get_frames_dir, get_cmd0_outdir, get_tlt_dir, get_gain_check_dir,
+    get_angpix, get_tlt_dir, get_gain_check_dir,
 )
 from aretomo3_preprocess.shared.parsers import (
-    parse_aln_file, parse_ctf_file, parse_tlt_file, parse_mdoc_file,
+    parse_aln_file, parse_ctf_file, parse_tlt_file,
     _float_or_none,
 )
 from aretomo3_preprocess.shared.geometry import compute_overlap, rotated_rect_corners
@@ -1455,27 +1446,10 @@ def add_parser(subparsers):
                    help='Output directory for plots, JSON, TSV, and HTML')
     p.add_argument('--threshold', '-t', type=float, default=80.0,
                    help='%% overlap below which a frame is flagged')
-    p.add_argument('--mdocdir',   '-m', default=None,
-                   help='Directory containing per-TS .mdoc files '
-                        '(ts-xxx.mdoc expected; skip enrichment if absent). '
-                        'Auto-read from project.json (rename_ts.input) if omitted; '
-                        'falls back to "frames".')
     p.add_argument('--angpix',    '-a', type=float, default=None,
                    help='Pixel size in Å/px — used to convert thickness from '
                         'pixels to nm.  Auto-read from project.json (mdoc_data) '
-                        'if omitted; then from mdoc PixelSpacing.')
-    p.add_argument('--mrcdir',    '-r', default=None,
-                   help='Directory containing ts-xxx.mrc raw stacks for MRC '
-                        'header sanity checks (nx/ny/nz vs .aln).  '
-                        'Auto-read from project.json (input_stacks.cmd0_outdir) '
-                        'if omitted; defaults to --input.')
-    p.add_argument('--tltdir',    '-T', default=None,
-                   help='Directory containing ts-xxx_TLT.txt files.  '
-                        'Auto-read from project.json (input_stacks.tlt_dir, '
-                        'saved automatically by run-aretomo3 --cmd 0) if omitted.  '
-                        'AreTomo3 only writes _TLT.txt for --cmd 0; for '
-                        're-alignment runs (--cmd 1) point to the prior cmd=0 '
-                        'output directory.')
+                        'if omitted.')
     p.add_argument('--n-lamellae', '-n', type=int, default=None,
                    help='Expected number of lamellae on the grid.  When set, '
                         'K-means clustering is applied to the stage X-Y '
@@ -1510,69 +1484,41 @@ def run(args):
         print(f'No .aln files found in {in_dir}')
         return
 
-    # ── Auto-fill from project.json if not given on CLI ──────────────────────
-    if args.mdocdir is None:
-        _fd = get_frames_dir()
-        args.mdocdir = str(_fd) if _fd is not None else 'frames'
-
     if args.angpix is None:
         args.angpix = get_angpix()
 
-    _cmd0_outdir = get_cmd0_outdir()
-    if args.mrcdir is None and _cmd0_outdir is not None:
-        args.mrcdir = str(_cmd0_outdir)
-
-    mdoc_dir = Path(args.mdocdir)
-    if not _HAS_MDOCFILE:
-        print('WARNING: mdocfile not installed — mdoc enrichment skipped\n')
-    elif not mdoc_dir.exists():
-        print(f'WARNING: --mdocdir {mdoc_dir} not found — mdoc enrichment skipped\n')
-
-    # MRC directory: explicit --mrcdir, else same directory as the .aln files.
-    # Per-TS MRC checks are silently skipped if the .mrc file is absent.
-    mrc_dir = Path(args.mrcdir) if args.mrcdir else in_dir
-    if args.mrcdir and not mrc_dir.exists():
-        print(f'WARNING: --mrcdir {mrc_dir} not found — MRC checks skipped\n')
-        mrc_dir = None
-
-    # TLT directory resolution (priority: --tltdir > project.json > in_dir):
-    #   AreTomo3 only writes _TLT.txt for --cmd 0 (raw movies).  Re-alignment
-    #   runs (--cmd 1/2) need to point at the cmd=0 output directory.
-    #   run-aretomo3 saves that path automatically; analyse picks it up here.
-    if args.tltdir is not None:
-        tlt_dir = Path(args.tltdir)
-        if not tlt_dir.exists():
-            print(f'WARNING: --tltdir {tlt_dir} not found — TLT enrichment skipped\n')
-            tlt_dir = in_dir
-    elif any(in_dir.glob('*_TLT.txt')):
+    # ── TLT directory: check --input first (direct cmd=0 case), then project.json ──
+    if any(in_dir.glob('*_TLT.txt')):
         tlt_dir = in_dir
     else:
         _proj_tlt = get_tlt_dir()
         if _proj_tlt is not None and _proj_tlt.exists() and any(_proj_tlt.glob('*_TLT.txt')):
             tlt_dir = _proj_tlt
-            print(f'Note: --tltdir not given; using cmd=0 TLT dir from project.json '
-                  f'→ {tlt_dir}\n')
+            print(f'Note: using cmd=0 TLT dir from project.json → {tlt_dir}\n')
         else:
-            tlt_dir = in_dir
-            _hint = (f'\n         cmd=0 dir {_proj_tlt} has no _TLT.txt files.'
+            _hint = (f'\n       (project.json tlt_dir {_proj_tlt} also has no _TLT.txt files)'
                      if _proj_tlt is not None else '')
-            print(f'WARNING: no _TLT.txt files found in {in_dir}.{_hint}\n'
-                  f'         TLT enrichment (stage positions, dose, z_value) will be '
-                  f'skipped.\n'
-                  f'         If this is a re-alignment run, supply the cmd=0 output '
-                  f'directory:\n'
-                  f'           --tltdir <cmd0-output-dir>\n')
+            print(f'ERROR: no _TLT.txt files found in {in_dir}.{_hint}')
+            print(f'       TLT files are required for dose, z_value, and stage position enrichment.')
+            print(f'       Register the cmd=0 output directory:')
+            print(f'         aretomo3-preprocess enrich --tlt-data <cmd0-output-dir>')
+            sys.exit(1)
 
-    angpix_str = f'{args.angpix} Å/px' if args.angpix else 'from mdoc (or None)'
-    tlt_note   = f'  |  TLT dir = {tlt_dir}' if args.tltdir else ''
-    print(f'Found {len(aln_files)} .aln files  |  threshold = {args.threshold}%  '
-          f'|  pixel size = {angpix_str}{tlt_note}\n')
-
-    # ── Load project.json once — used for mdoc cache and lamella assignments ──
+    # ── Load project.json — mdoc cache, lamella assignments, MRC stack paths ──
     _proj        = _load_project()
-    _cached_mdoc = _proj.get('mdoc_data', {}).get('per_ts', {})
+    _cached_mdoc = _proj.get('mdoc_data', {}).get('per_ts')
+    if not _cached_mdoc:
+        print(f'ERROR: mdoc_data not found in project.json.')
+        print(f'       Run validate-mdoc first to populate it, or register manually:')
+        print(f'         aretomo3-preprocess enrich --mdoc-data <frames/>')
+        sys.exit(1)
+
+    _stacks        = _proj.get('input_stacks', {}).get('stacks', {})
     _n_mdoc_cached = 0
-    _n_mdoc_file   = 0
+
+    angpix_str = f'{args.angpix} Å/px' if args.angpix else 'from mdoc_data'
+    print(f'Found {len(aln_files)} .aln files  |  threshold = {args.threshold}%  '
+          f'|  pixel size = {angpix_str}  |  TLT dir = {tlt_dir}\n')
 
     # ── Pass 1: parse all files, attach overlap + CTF + TLT + mdoc ───────────
     all_ts = {}
@@ -1604,20 +1550,11 @@ def run(args):
         _timing['tlt'] += time.perf_counter() - _t
 
         _t = time.perf_counter()
-        if ts_name in _cached_mdoc:
-            # Use metadata cached in project.json by validate-mdoc
-            _cm        = _cached_mdoc[ts_name]
-            mdoc_data  = {int(k): v for k, v in _cm.get('frames', {}).items()}
-            mdoc_angpix = _cm.get('angpix')
+        _cm         = _cached_mdoc.get(ts_name, {})
+        mdoc_data   = {int(k): v for k, v in _cm.get('frames', {}).items()}
+        mdoc_angpix = _cm.get('angpix')
+        if _cm:
             _n_mdoc_cached += 1
-        else:
-            # Fallback: parse file directly (no project.json cache yet)
-            mdoc_path = mdoc_dir / f'{ts_name}.mdoc'
-            if _HAS_MDOCFILE and mdoc_path.exists():
-                mdoc_data, mdoc_angpix = parse_mdoc_file(mdoc_path)
-            else:
-                mdoc_data, mdoc_angpix = {}, None
-            _n_mdoc_file += 1
         _timing['mdoc'] += time.perf_counter() - _t
 
         # Resolve pixel size: CLI arg → mdoc PixelSpacing → None
@@ -1694,9 +1631,10 @@ def run(args):
 
         _timing['enrich'] += time.perf_counter() - _t
 
-        # Sanity checks
+        # Sanity checks (MRC path from input_stacks if registered; silently skipped if absent)
         _t = time.perf_counter()
-        mrc_path = (mrc_dir / f'{ts_name}.mrc') if mrc_dir else None
+        _mrc_info = _stacks.get(ts_name)
+        mrc_path  = Path(_mrc_info['path']) if _mrc_info else None
         data['warnings'] = _validate_ts(data, tlt_data, mdoc_data, mrc_path)
         _timing['mrc_val'] += time.perf_counter() - _t
 
@@ -1717,11 +1655,7 @@ def run(args):
         _pct  = 100 * _secs / _t1_total if _t1_total > 0 else 0
         _bar  = '█' * int(_pct / 2.5)
         print(f'  {_label:<12}  {_secs:6.2f}s  {_pct:5.1f}%  {_bar}')
-    if _n_mdoc_cached:
-        print(f'  mdoc: {_n_mdoc_cached} TS from project.json cache'
-              + (f', {_n_mdoc_file} from file' if _n_mdoc_file else ''))
-    if _n_mdoc_file and not _n_mdoc_cached:
-        print(f'  NOTE: mdoc data not in project.json — run validate-mdoc to cache it')
+    print(f'  mdoc: {_n_mdoc_cached} / {len(all_ts)} TS enriched from project.json')
     print()
 
     # ── Compute global axis ranges ────────────────────────────────────────────

@@ -201,6 +201,11 @@ def register_input_stacks(out_dir: Path, in_skips: list = None,
     }
     if tlt_dir is not None:
         values['tlt_dir'] = str(tlt_dir.resolve())
+    else:
+        # Preserve existing tlt_dir so it is not lost when stacks are re-registered
+        existing_tlt = _load().get('input_stacks', {}).get('tlt_dir')
+        if existing_tlt:
+            values['tlt_dir'] = existing_tlt
 
     update_section(section='input_stacks', values=values)
     print(f'Registered {len(stacks)} input stacks in project.json  [input_stacks]')
