@@ -24,6 +24,7 @@ Requires:
     Source _Imod directories present in <input>/ts-xxx_Imod/
 """
 
+import os
 import sys
 import json
 import math
@@ -234,6 +235,9 @@ def add_parser(subparsers):
                    help='Run submfg on the generated .com files after writing them. '
                         '"nodark" runs newst_nodark.com, "clean" runs newst_clean.com, '
                         '"both" runs both (default: none).')
+    p.add_argument('--dry-run', action='store_true',
+                   help='Print what would be done without writing any files or '
+                        'creating any symlinks.')
     p.set_defaults(func=run)
     return p
 
@@ -265,20 +269,24 @@ def run(args):
         print('         aretomo3-preprocess enrich --mrc-data <run001/>')
         sys.exit(1)
 
-    print(f'Trimming IMOD support files into : {out_dir}')
-    print(f'Source _Imod directories         : {in_dir}')
-    print(f'Bin factor                       : {args.bin}')
-    print(f'Overlap threshold                : {args.threshold}%\n')
+    dry_run = args.dry_run
+    tag     = '[DRY RUN] ' if dry_run else ''
+
+    print(f'{tag}Trimming IMOD support files into : {out_dir}')
+    print(f'{tag}Source _Imod directories         : {in_dir}')
+    print(f'{tag}Bin factor                       : {args.bin}')
+    print(f'{tag}Overlap threshold                : {args.threshold}%\n')
 
     # Wipe link folders now so they are never stale even if the run is
     # interrupted before reaching the link-creation section at the end.
     import shutil as _shutil
-    for _variant in ('clean', 'nodark'):
-        _link_dir = out_dir / f'{_variant}_ts'
-        if _link_dir.exists():
-            _shutil.rmtree(_link_dir)
-            print(f'Cleared {_link_dir.name}/')
-    print()
+    if not dry_run:
+        for _variant in ('clean', 'nodark'):
+            _link_dir = out_dir / f'{_variant}_ts'
+            if _link_dir.exists():
+                _shutil.rmtree(_link_dir)
+                print(f'Cleared {_link_dir.name}/')
+        print()
 
     sep = '─' * 68
     n_done = n_skip = 0
@@ -329,79 +337,100 @@ def run(args):
         out_x, out_y = _calc_output_size(W, H, rot, args.bin) if (W and H and rot) else (None, None)
 
         ts_out = out_dir / f'{ts_name}_Imod'
-        ts_out.mkdir(exist_ok=True)
+        if not dry_run:
+            ts_out.mkdir(exist_ok=True)
 
-        # Symlink raw stack and full .xf
+        # Symlink raw stack — check existing link, create if absent
         mrc_link = ts_out / f'{ts_name}.mrc'
-        if not mrc_link.exists():
-            mrc_info = stacks.get(ts_name)
-            if mrc_info:
-                mrc_src = Path(mrc_info['path'])
-                mrc_link.symlink_to(mrc_src)
+        mrc_info = stacks.get(ts_name)
+        if mrc_info:
+            mrc_src = Path(mrc_info['path']).resolve()
+            if mrc_link.is_symlink():
+                # Verify it points to the expected location
+                raw = Path(os.readlink(str(mrc_link)))
+                actual = (mrc_link.parent / raw).resolve() if not raw.is_absolute() else raw.resolve()
+                if actual != mrc_src:
+                    _pwrite(f'ERROR: {ts_name}.mrc symlink exists but points to:')
+                    _pwrite(f'         {actual}')
+                    _pwrite(f'       Expected (from project.json):')
+                    _pwrite(f'         {mrc_src}')
+                    sys.exit(1)
+                # else: already correct — nothing to do
+            elif not mrc_link.exists():
+                if not dry_run:
+                    mrc_link.symlink_to(mrc_src)
                 if not mrc_src.exists():
                     _pwrite(f'  WARNING {ts_name}: source .mrc not found at {mrc_src}')
-            else:
-                _pwrite(f'  WARNING {ts_name}: not in project.json input_stacks'
-                        f' — .mrc symlink skipped')
+        else:
+            _pwrite(f'  WARNING {ts_name}: not in project.json input_stacks'
+                    f' — .mrc symlink skipped')
 
         xf_link = ts_out / f'{ts_name}_st.xf'
-        if not xf_link.exists():
+        if not xf_link.exists() and not dry_run:
             xf_link.symlink_to(xf_src)
-
-        # Write nodark variant
-        write_tlt(ts_out / f'{ts_name}_nodark.tlt', sorted_secs, set(nodark_keep))
-        write_order_list(ts_out / f'{ts_name}_nodark_order_list.csv',
-                         sorted_secs, set(nodark_keep))
-        if xtilt_lines:
-            write_trimmed(ts_out / f'{ts_name}_nodark.xtilt', xtilt_lines, nodark_keep)
-
-        write_newst(
-            ts_out / 'newst_nodark.com',
-            ts_name,
-            xf_name      = f'{ts_name}_st.xf',
-            output_ali   = f'{ts_name}_nodark.ali',
-            bin_factor   = args.bin,
-            keep_indices = nodark_keep,
-            out_x        = out_x,
-            out_y        = out_y,
-        )
-
-        # Write clean variant
-        write_tlt(ts_out / f'{ts_name}_clean.tlt', sorted_secs, set(clean_keep))
-        write_order_list(ts_out / f'{ts_name}_clean_order_list.csv',
-                         sorted_secs, set(clean_keep))
-        if xtilt_lines:
-            write_trimmed(ts_out / f'{ts_name}_clean.xtilt', xtilt_lines, clean_keep)
-
-        write_newst(
-            ts_out / 'newst_clean.com',
-            ts_name,
-            xf_name      = f'{ts_name}_st.xf',
-            output_ali   = f'{ts_name}_clean.ali',
-            bin_factor   = args.bin,
-            keep_indices = clean_keep,
-            out_x        = out_x,
-            out_y        = out_y,
-        )
 
         n_total  = len(all_sec_idx)
         n_dark   = len(dark_secs)
         n_extra  = len(flagged_secs - dark_secs)
         _pwrite(f'{sep}')
-        _pwrite(f'  {ts_name}')
+        _pwrite(f'  {tag}{ts_name}')
         _pwrite(f'    Total sections         : {n_total}')
         _pwrite(f'    Dark excluded          : {n_dark}')
         _pwrite(f'    Misaligned (extra)     : {n_extra}')
         _pwrite(f'    nodark keeps           : {len(nodark_keep)}  sections')
         _pwrite(f'    clean  keeps           : {len(clean_keep)}  sections')
 
-        if args.run_submfg in ('nodark', 'both'):
-            _run_submfg(ts_out, 'newst_nodark.com', ts_name, pwrite=_pwrite)
-        if args.run_submfg in ('clean', 'both'):
-            _run_submfg(ts_out, 'newst_clean.com', ts_name, pwrite=_pwrite)
+        if dry_run:
+            _pwrite(f'    [DRY RUN] would write: _nodark/.tlt/.xtilt/_order_list.csv/newst.com')
+            _pwrite(f'    [DRY RUN] would write: _clean/.tlt/.xtilt/_order_list.csv/newst.com')
+        else:
+            # Write nodark variant
+            write_tlt(ts_out / f'{ts_name}_nodark.tlt', sorted_secs, set(nodark_keep))
+            write_order_list(ts_out / f'{ts_name}_nodark_order_list.csv',
+                             sorted_secs, set(nodark_keep))
+            if xtilt_lines:
+                write_trimmed(ts_out / f'{ts_name}_nodark.xtilt', xtilt_lines, nodark_keep)
+            write_newst(
+                ts_out / 'newst_nodark.com',
+                ts_name,
+                xf_name      = f'{ts_name}_st.xf',
+                output_ali   = f'{ts_name}_nodark.ali',
+                bin_factor   = args.bin,
+                keep_indices = nodark_keep,
+                out_x        = out_x,
+                out_y        = out_y,
+            )
+
+            # Write clean variant
+            write_tlt(ts_out / f'{ts_name}_clean.tlt', sorted_secs, set(clean_keep))
+            write_order_list(ts_out / f'{ts_name}_clean_order_list.csv',
+                             sorted_secs, set(clean_keep))
+            if xtilt_lines:
+                write_trimmed(ts_out / f'{ts_name}_clean.xtilt', xtilt_lines, clean_keep)
+            write_newst(
+                ts_out / 'newst_clean.com',
+                ts_name,
+                xf_name      = f'{ts_name}_st.xf',
+                output_ali   = f'{ts_name}_clean.ali',
+                bin_factor   = args.bin,
+                keep_indices = clean_keep,
+                out_x        = out_x,
+                out_y        = out_y,
+            )
+
+            if args.run_submfg in ('nodark', 'both'):
+                _run_submfg(ts_out, 'newst_nodark.com', ts_name, pwrite=_pwrite)
+            if args.run_submfg in ('clean', 'both'):
+                _run_submfg(ts_out, 'newst_clean.com', ts_name, pwrite=_pwrite)
 
         processed_ts.append(ts_name)
         n_done += 1
+
+    print(sep)
+    print(f'\n{tag}Done: {n_done} TS processed, {n_skip} skipped')
+
+    if dry_run:
+        return
 
     # ── Create clean_ts/ and nodark_ts/ link folders ──────────────────────────
     for variant in ('clean', 'nodark'):
@@ -427,8 +456,6 @@ def run(args):
                 n_ali += 1
         print(f'{variant}_ts/  {n_tlt} .tlt links,  {n_ali} .ali links  → {link_dir}')
 
-    print(sep)
-    print(f'\nDone: {n_done} TS processed, {n_skip} skipped')
     print(f'\nFiles written per TS into {out_dir}/ts-xxx_Imod/:')
     print(f'  ts-xxx_st.xf          (symlink — full stack, unmodified)')
     print(f'  ts-xxx_nodark.xtilt / .tlt / _order_list.csv')
