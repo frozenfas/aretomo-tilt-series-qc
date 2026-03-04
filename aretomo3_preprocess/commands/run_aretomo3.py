@@ -1051,9 +1051,9 @@ def run(args):
 
     print(f'AreTomo3 finished successfully.')
 
-    # ── Register cmd=0 output stacks for use by later cmd=1/2 runs ────────
+    # ── Register cmd=0 output stacks and TLT dir for later runs ──────────
     if args.cmd == 0:
-        register_input_stacks(out_dir, in_skips=args.in_skips)
+        register_input_stacks(out_dir, in_skips=args.in_skips, tlt_dir=out_dir)
 
     # ── Save to project JSON ───────────────────────────────────────────────
     update_section(

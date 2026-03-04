@@ -37,7 +37,7 @@ from aretomo3_preprocess.shared.project_json import (
     update_section, update_section_once, args_to_dict,
 )
 from aretomo3_preprocess.shared.project_state import (
-    get_angpix, get_frames_dir, get_cmd0_outdir, get_gain_check_dir,
+    get_angpix, get_frames_dir, get_cmd0_outdir, get_tlt_dir, get_gain_check_dir,
 )
 from aretomo3_preprocess.shared.parsers import (
     parse_aln_file, parse_ctf_file, parse_tlt_file, parse_mdoc_file,
@@ -1471,11 +1471,11 @@ def add_parser(subparsers):
                         'if omitted; defaults to --input.')
     p.add_argument('--tltdir',    '-T', default=None,
                    help='Directory containing ts-xxx_TLT.txt files.  '
-                        'Auto-read from project.json (input_stacks.cmd0_outdir) '
-                        'if omitted; defaults to --input.  AreTomo3 only writes '
-                        '_TLT.txt when processing raw movies (--cmd 0); for '
-                        're-alignment runs (--cmd 1) point to the prior run that '
-                        'has them.')
+                        'Auto-read from project.json (input_stacks.tlt_dir, '
+                        'saved automatically by run-aretomo3 --cmd 0) if omitted.  '
+                        'AreTomo3 only writes _TLT.txt for --cmd 0; for '
+                        're-alignment runs (--cmd 1) point to the prior cmd=0 '
+                        'output directory.')
     p.add_argument('--n-lamellae', '-n', type=int, default=None,
                    help='Expected number of lamellae on the grid.  When set, '
                         'K-means clustering is applied to the stage X-Y '
@@ -1521,8 +1521,6 @@ def run(args):
     _cmd0_outdir = get_cmd0_outdir()
     if args.mrcdir is None and _cmd0_outdir is not None:
         args.mrcdir = str(_cmd0_outdir)
-    if args.tltdir is None and _cmd0_outdir is not None:
-        args.tltdir = str(_cmd0_outdir)
 
     mdoc_dir = Path(args.mdocdir)
     if not _HAS_MDOCFILE:
@@ -1537,21 +1535,33 @@ def run(args):
         print(f'WARNING: --mrcdir {mrc_dir} not found — MRC checks skipped\n')
         mrc_dir = None
 
-    # TLT directory: explicit --tltdir, else same directory as the .aln files.
-    # AreTomo3 only writes _TLT.txt for --cmd 0 (raw movies); for re-alignment
-    # runs (--cmd 1) point to the prior run that has them.
-    tlt_dir = Path(args.tltdir) if args.tltdir else in_dir
-    if args.tltdir and not tlt_dir.exists():
-        print(f'WARNING: --tltdir {tlt_dir} not found — TLT enrichment skipped\n')
-        tlt_dir = in_dir   # fall back to in_dir (will silently miss)
-    elif not args.tltdir and not any(in_dir.glob('*_TLT.txt')):
-        print(f'WARNING: no _TLT.txt files found in {in_dir}\n'
-              f'         TLT enrichment (stage positions, dose, z_value) will be '
-              f'skipped.\n'
-              f'         If this is a re-alignment run (--cmd 1), use\n'
-              f'           --tltdir <prior-run-dir>\n'
-              f'         to read _TLT.txt files from the run that processed '
-              f'raw movies.\n')
+    # TLT directory resolution (priority: --tltdir > project.json > in_dir):
+    #   AreTomo3 only writes _TLT.txt for --cmd 0 (raw movies).  Re-alignment
+    #   runs (--cmd 1/2) need to point at the cmd=0 output directory.
+    #   run-aretomo3 saves that path automatically; analyse picks it up here.
+    if args.tltdir is not None:
+        tlt_dir = Path(args.tltdir)
+        if not tlt_dir.exists():
+            print(f'WARNING: --tltdir {tlt_dir} not found — TLT enrichment skipped\n')
+            tlt_dir = in_dir
+    elif any(in_dir.glob('*_TLT.txt')):
+        tlt_dir = in_dir
+    else:
+        _proj_tlt = get_tlt_dir()
+        if _proj_tlt is not None and _proj_tlt.exists() and any(_proj_tlt.glob('*_TLT.txt')):
+            tlt_dir = _proj_tlt
+            print(f'Note: --tltdir not given; using cmd=0 TLT dir from project.json '
+                  f'→ {tlt_dir}\n')
+        else:
+            tlt_dir = in_dir
+            _hint = (f'\n         cmd=0 dir {_proj_tlt} has no _TLT.txt files.'
+                     if _proj_tlt is not None else '')
+            print(f'WARNING: no _TLT.txt files found in {in_dir}.{_hint}\n'
+                  f'         TLT enrichment (stage positions, dose, z_value) will be '
+                  f'skipped.\n'
+                  f'         If this is a re-alignment run, supply the cmd=0 output '
+                  f'directory:\n'
+                  f'           --tltdir <cmd0-output-dir>\n')
 
     angpix_str = f'{args.angpix} Å/px' if args.angpix else 'from mdoc (or None)'
     tlt_note   = f'  |  TLT dir = {tlt_dir}' if args.tltdir else ''
@@ -1633,17 +1643,6 @@ def run(args):
                       'target_defocus', 'datetime', 'stage_x', 'stage_y',
                       'stage_z', 'exposure_time', 'num_subframes')
 
-        # Fallback mdoc lookup for re-alignment runs without _TLT.txt.
-        # When z_value is unknown, match mdoc sections by nominal tilt angle
-        # (corrected tilt − alpha_offset ≈ nominal tilt).
-        _mdoc_by_tilt = {}   # nominal_tilt → z_value
-        _alpha_off    = data.get('alpha_offset') or 0.0
-        if not tlt_data and mdoc_data:
-            for _zval, _msec in mdoc_data.items():
-                _mt = _msec.get('tilt_angle')
-                if _mt is not None:
-                    _mdoc_by_tilt[_mt] = _zval
-
         for f in data['frames']:
             f['overlap_pct']  = compute_overlap(f['tx'], f['ty'], W, H,
                                                    rot_deg=f['rot'])
@@ -1671,15 +1670,7 @@ def run(args):
                 if tlt.get('acq_order') is not None else None
             )
 
-            if f['z_value'] is not None:
-                mdoc = mdoc_data.get(f['z_value'], {})
-            elif _mdoc_by_tilt:
-                # No TLT data: match by nominal tilt ≈ corrected_tilt − alpha_offset
-                _nom = f['tilt'] - _alpha_off
-                _best = min(_mdoc_by_tilt, key=lambda t: abs(t - _nom))
-                mdoc = mdoc_data.get(_mdoc_by_tilt[_best], {})
-            else:
-                mdoc = {}
+            mdoc = mdoc_data.get(f['z_value'], {}) if f['z_value'] is not None else {}
             for k in _MDOC_KEYS:
                 f[k] = mdoc.get(k)
 

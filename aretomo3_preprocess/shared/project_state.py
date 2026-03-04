@@ -63,6 +63,19 @@ def get_cmd0_outdir() -> Optional[Path]:
     return Path(value) if value else None
 
 
+def get_tlt_dir() -> Optional[Path]:
+    """
+    Return the directory containing _TLT.txt files, or None.
+
+    Reads input_stacks.tlt_dir (saved by cmd=0 run-aretomo3), with fallback
+    to input_stacks.cmd0_outdir (same location, older project files).
+    """
+    data = _load()
+    stored = data.get('input_stacks', {})
+    value = stored.get('tlt_dir') or stored.get('cmd0_outdir')
+    return Path(value) if value else None
+
+
 def get_input_stacks() -> Optional[dict]:
     """
     Return the stacks dict from input_stacks, or None.
@@ -136,7 +149,8 @@ def resolve_selected_ts(csv_path: Optional[str] = None) -> Optional[Set[str]]:
 # Stack registration (replaces _register_cmd0_stacks / _save_stacks_to_project)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def register_input_stacks(out_dir: Path, in_skips: list = None):
+def register_input_stacks(out_dir: Path, in_skips: list = None,
+                          tlt_dir: Path = None):
     """
     Scan out_dir for ts-*.mrc files and register them in project.json
     under 'input_stacks'.
@@ -148,6 +162,8 @@ def register_input_stacks(out_dir: Path, in_skips: list = None):
     ----------
     out_dir   : Path  Directory to scan for ts-*.mrc stacks
     in_skips  : list  Stem substrings to exclude (e.g. ['_Vol', '_CTF', '_EVN', '_ODD'])
+    tlt_dir   : Path  Directory containing _TLT.txt files (cmd=0 output dir);
+                      saved so that analyse can find them automatically.
     """
     try:
         import mrcfile
@@ -177,16 +193,19 @@ def register_input_stacks(out_dir: Path, in_skips: list = None):
                 pass
         stacks[f.stem] = info
 
-    update_section(
-        section='input_stacks',
-        values={
-            'timestamp':   datetime.datetime.now().isoformat(timespec='seconds'),
-            'cmd0_outdir': str(out_dir.resolve()),
-            'n_stacks':    len(stacks),
-            'stacks':      stacks,
-        },
-    )
+    values = {
+        'timestamp':   datetime.datetime.now().isoformat(timespec='seconds'),
+        'cmd0_outdir': str(out_dir.resolve()),
+        'n_stacks':    len(stacks),
+        'stacks':      stacks,
+    }
+    if tlt_dir is not None:
+        values['tlt_dir'] = str(tlt_dir.resolve())
+
+    update_section(section='input_stacks', values=values)
     print(f'Registered {len(stacks)} input stacks in project.json  [input_stacks]')
+    if tlt_dir is not None:
+        print(f'Registered TLT directory     in project.json  [input_stacks.tlt_dir]')
 
 
 # ─────────────────────────────────────────────────────────────────────────────
