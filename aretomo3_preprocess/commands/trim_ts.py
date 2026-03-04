@@ -24,11 +24,13 @@ Requires:
     Source _Imod directories present in <input>/ts-xxx_Imod/
 """
 
-import csv
+import sys
 import json
 import math
 import subprocess
 from pathlib import Path
+
+from aretomo3_preprocess.shared.project_state import get_input_stacks, resolve_selected_ts
 
 try:
     from tqdm import tqdm as _tqdm
@@ -216,29 +218,17 @@ def add_parser(subparsers):
         help='Trim IMOD support files for dark/misaligned frame removal',
         formatter_class=__import__('argparse').ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument('--input',     '-i', default='run002',
+    p.add_argument('--input',     '-i', required=True,
                    help='Directory containing ts-xxx_Imod subdirectories')
     p.add_argument('--output',    '-o', default='run002_analysis',
                    help='Analysis output directory (must contain alignment_data.json)')
-    p.add_argument('--mrcdir',    '-m',
-                   default='/mnt/McQueen-002/parry/bi38262-21-akinetes/relion/run002',
-                   help='Directory containing the ts-xxx.mrc raw stacks')
     p.add_argument('--threshold', '-t', type=float, default=80.0,
                    help='Overlap threshold used in the analyse step')
     p.add_argument('--bin',       '-b', type=int, default=8,
                    help='BinByFactor for newstack')
-    p.add_argument('--ratings',   '-R', default=None,
-                   help='Path to ts_ratings.csv exported from the HTML viewer.  '
-                        'When provided, only TS with rating >= --min-rating are processed.')
-    p.add_argument('--min-rating', type=int, default=1,
-                   help='Minimum star rating (1–5) required to process a TS.  '
-                        'Unrated TS are treated as 0 and skipped when this is >= 1.')
-    p.add_argument('--best-n', type=int, default=None,
-                   help='Keep only the N best-ranked tilt series (applied after '
-                        '--ratings filter).  Ranking metric set by --rank-by.')
-    p.add_argument('--rank-by', choices=['overlap', 'frames', 'both'], default='both',
-                   help='Metric for --best-n: "overlap" = mean %% overlap, '
-                        '"frames" = clean frame count, "both" = combined rank (default).')
+    p.add_argument('--select-ts', default=None, metavar='CSV',
+                   help='Path to ts_selection.csv from select-ts; only the '
+                        'selected TS are processed.')
     p.add_argument('--run-submfg', choices=['none', 'nodark', 'clean', 'both'],
                    default='none',
                    help='Run submfg on the generated .com files after writing them. '
@@ -251,7 +241,6 @@ def add_parser(subparsers):
 def run(args):
     in_dir  = Path(args.input).resolve()
     out_dir = Path(args.output).resolve()
-    mrc_dir = Path(args.mrcdir).resolve()
 
     json_path = out_dir / 'alignment_data.json'
     if not json_path.exists():
@@ -261,60 +250,23 @@ def run(args):
     with open(json_path) as fh:
         all_parsed = json.load(fh)
 
-    # ── Ratings filter ────────────────────────────────────────────────────────
-    if args.ratings:
-        ratings_path = Path(args.ratings)
-        if not ratings_path.exists():
-            print(f'WARNING: --ratings {ratings_path} not found — processing all TS')
-        else:
-            ratings = {}
-            with open(ratings_path, newline='') as fh:
-                for row in csv.DictReader(fh):
-                    ratings[row['ts_name']] = int(row['rating'])
-            min_r     = args.min_rating
-            n_before  = len(all_parsed)
-            all_parsed = {k: v for k, v in all_parsed.items()
-                          if ratings.get(k, 0) >= min_r}
-            print(f'Rating filter (>= {min_r} ★): '
-                  f'{len(all_parsed)}/{n_before} TS kept')
+    # ── TS selection filter ───────────────────────────────────────────────────
+    selected_ts = resolve_selected_ts(getattr(args, 'select_ts', None))
+    if selected_ts is not None:
+        n_before   = len(all_parsed)
+        all_parsed = {k: v for k, v in all_parsed.items() if k in selected_ts}
+        print(f'TS selection: {len(all_parsed)}/{n_before} TS kept')
 
-    # ── Best-N filter ─────────────────────────────────────────────────────────
-    if args.best_n is not None and args.best_n < len(all_parsed):
-        def _ts_score(ts_name):
-            frames   = all_parsed[ts_name].get('frames', [])
-            mean_ovl = (sum(f['overlap_pct'] for f in frames) / len(frames)
-                        if frames else 0.0)
-            n_clean  = sum(1 for f in frames if not f.get('is_flagged', False))
-            return mean_ovl, n_clean
-
-        ts_list   = list(all_parsed.keys())
-        scores    = {t: _ts_score(t) for t in ts_list}
-        by_ovl    = sorted(ts_list, key=lambda t: scores[t][0], reverse=True)
-        by_frames = sorted(ts_list, key=lambda t: scores[t][1], reverse=True)
-        rank_ovl    = {t: i for i, t in enumerate(by_ovl)}
-        rank_frames = {t: i for i, t in enumerate(by_frames)}
-
-        if args.rank_by == 'overlap':
-            final_rank = rank_ovl
-        elif args.rank_by == 'frames':
-            final_rank = rank_frames
-        else:  # both
-            final_rank = {t: (rank_ovl[t] + rank_frames[t]) / 2.0 for t in ts_list}
-
-        kept      = sorted(ts_list, key=lambda t: final_rank[t])[:args.best_n]
-        kept_set  = set(kept)
-        n_before  = len(all_parsed)
-        all_parsed = {k: v for k, v in all_parsed.items() if k in kept_set}
-
-        worst = kept[-1]
-        w_ovl, w_clean = scores[worst]
-        print(f'Best-N filter ({args.rank_by}, N={args.best_n}): '
-              f'{len(all_parsed)}/{n_before} TS kept')
-        print(f'  Worst kept — mean overlap: {w_ovl:.1f}%,  clean frames: {w_clean}')
+    # ── MRC stacks from project.json ──────────────────────────────────────────
+    stacks = get_input_stacks()
+    if stacks is None:
+        print('ERROR: input_stacks not found in project.json.')
+        print('       Register the cmd=0 MRC stacks:')
+        print('         aretomo3-preprocess enrich --mrc-data <run001/>')
+        sys.exit(1)
 
     print(f'Trimming IMOD support files into : {out_dir}')
     print(f'Source _Imod directories         : {in_dir}')
-    print(f'Raw stack symlinks → mrcdir      : {mrc_dir}')
     print(f'Bin factor                       : {args.bin}')
     print(f'Overlap threshold                : {args.threshold}%\n')
 
@@ -382,9 +334,15 @@ def run(args):
         # Symlink raw stack and full .xf
         mrc_link = ts_out / f'{ts_name}.mrc'
         if not mrc_link.exists():
-            mrc_link.symlink_to(mrc_dir / f'{ts_name}.mrc')
-        if not (mrc_dir / f'{ts_name}.mrc').exists():
-            _pwrite(f'  WARNING {ts_name}: source .mrc not found at {mrc_dir}')
+            mrc_info = stacks.get(ts_name)
+            if mrc_info:
+                mrc_src = Path(mrc_info['path'])
+                mrc_link.symlink_to(mrc_src)
+                if not mrc_src.exists():
+                    _pwrite(f'  WARNING {ts_name}: source .mrc not found at {mrc_src}')
+            else:
+                _pwrite(f'  WARNING {ts_name}: not in project.json input_stacks'
+                        f' — .mrc symlink skipped')
 
         xf_link = ts_out / f'{ts_name}_st.xf'
         if not xf_link.exists():
