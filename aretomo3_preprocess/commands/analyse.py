@@ -1040,6 +1040,75 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
       a.click();
     }});
 
+    // ── Dynamic CSV loading ────────────────────────────────────────────────
+    // Load ts_ratings.csv and ts_selection.csv from the same directory as
+    // this HTML file at page-load time.  Falls back silently to embedded
+    // data if the files are not accessible (e.g. file:// protocol in Chrome).
+    function _parseCSV(text) {{
+      const lines   = text.trim().split('\\n');
+      if (lines.length < 2) return [];
+      const headers = lines[0].split(',').map(h => h.trim());
+      return lines.slice(1).map(line => {{
+        const vals = line.split(',').map(v => v.trim());
+        const obj  = {{}};
+        headers.forEach((h, i) => {{ obj[h] = (vals[i] !== undefined ? vals[i] : ''); }});
+        return obj;
+      }});
+    }}
+
+    function _applyRatingsCSV(text) {{
+      _parseCSV(text).forEach(row => {{
+        if (row.ts_name && row.rating) {{
+          const r = parseInt(row.rating);
+          if (!isNaN(r) && r > 0) ratings[row.ts_name] = r;
+        }}
+      }});
+      for (let i = 0; i < n; i++) {{
+        const name = tsNames[i];
+        const r    = name ? (ratings[name] || 0) : 0;
+        sel.options[i].textContent = origOpts[i] + (r > 0 ? '  ' + starChars[r] : '');
+      }}
+      showRating(idx);
+    }}
+
+    function _applySelectionCSV(text) {{
+      const byName = {{}};
+      _parseCSV(text).forEach(row => {{
+        if (row.ts_name) byName[row.ts_name] = parseInt(row.selected || '0');
+      }});
+      let changed = false;
+      for (let i = 0; i < n; i++) {{
+        const name = tsNames[i];
+        if (name && name in byName && selectedFlags[i] !== byName[name]) {{
+          selectedFlags[i] = byName[name];
+          sel.options[i].setAttribute('data-selected', byName[name]);
+          changed = true;
+        }}
+      }}
+      if (changed) {{
+        rebuildVis();
+        if (!visIndices.includes(idx)) show(visIndices[0] || 0);
+        else show(idx);
+      }}
+      // Update 'Selected only' button count
+      const btnF = document.getElementById('btn-filter');
+      if (btnF) {{
+        const nSel = selectedFlags.filter(v => v !== 0).length;
+        btnF.style.display = '';
+        btnF.textContent   = 'Selected only (' + nSel + ')';
+      }}
+    }}
+
+    fetch('./ts_ratings.csv')
+      .then(r => r.ok ? r.text() : Promise.reject())
+      .then(text => _applyRatingsCSV(text))
+      .catch(() => {{}});
+
+    fetch('./ts_selection.csv')
+      .then(r => r.ok ? r.text() : Promise.reject())
+      .then(text => _applySelectionCSV(text))
+      .catch(() => {{}});
+
     show(0);
   </script>
 </body>
@@ -1564,6 +1633,17 @@ def run(args):
                       'target_defocus', 'datetime', 'stage_x', 'stage_y',
                       'stage_z', 'exposure_time', 'num_subframes')
 
+        # Fallback mdoc lookup for re-alignment runs without _TLT.txt.
+        # When z_value is unknown, match mdoc sections by nominal tilt angle
+        # (corrected tilt − alpha_offset ≈ nominal tilt).
+        _mdoc_by_tilt = {}   # nominal_tilt → z_value
+        _alpha_off    = data.get('alpha_offset') or 0.0
+        if not tlt_data and mdoc_data:
+            for _zval, _msec in mdoc_data.items():
+                _mt = _msec.get('tilt_angle')
+                if _mt is not None:
+                    _mdoc_by_tilt[_mt] = _zval
+
         for f in data['frames']:
             f['overlap_pct']  = compute_overlap(f['tx'], f['ty'], W, H,
                                                    rot_deg=f['rot'])
@@ -1591,7 +1671,15 @@ def run(args):
                 if tlt.get('acq_order') is not None else None
             )
 
-            mdoc = mdoc_data.get(f['z_value'], {}) if f['z_value'] is not None else {}
+            if f['z_value'] is not None:
+                mdoc = mdoc_data.get(f['z_value'], {})
+            elif _mdoc_by_tilt:
+                # No TLT data: match by nominal tilt ≈ corrected_tilt − alpha_offset
+                _nom = f['tilt'] - _alpha_off
+                _best = min(_mdoc_by_tilt, key=lambda t: abs(t - _nom))
+                mdoc = mdoc_data.get(_mdoc_by_tilt[_best], {})
+            else:
+                mdoc = {}
             for k in _MDOC_KEYS:
                 f[k] = mdoc.get(k)
 
