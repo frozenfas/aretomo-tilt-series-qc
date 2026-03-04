@@ -2,7 +2,7 @@
 select-ts — filter tilt series by quality criteria from an analyse output.
 
 Reads alignment_data.json from a previous analyse run, applies quality
-filters, and writes a ts_selection.csv file.
+filters, and writes a ts-select.csv file.
 
 CSV columns:
   ts_name, selected, n_frames, n_tilts, rating, rot_deg, thickness_px,
@@ -173,15 +173,15 @@ def _apply_filters(stats, args):
 def add_parser(subparsers):
     p = subparsers.add_parser(
         'select-ts',
-        help='Filter tilt series by quality criteria; writes ts_selection.csv',
+        help='Filter tilt series by quality criteria; writes ts-select.csv',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=__doc__,
     )
     p.add_argument('--analysis', '-A', default=None,
                    help='analyse output directory containing alignment_data.json. '
                         'Auto-read from project.json if omitted.')
-    p.add_argument('--output', '-o', default='ts_selection.csv',
-                   help='Output CSV file path (default: ts_selection.csv)')
+    p.add_argument('--output', '-o', default='ts-select.csv',
+                   help='Output CSV file path (default: ts-select.csv)')
     p.add_argument('--dry-run', action='store_true',
                    help='Print what would be selected/excluded without writing CSV')
 

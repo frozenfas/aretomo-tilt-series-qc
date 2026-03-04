@@ -1032,7 +1032,7 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
     }});
 
     // ── Dynamic CSV loading ────────────────────────────────────────────────
-    // Load ts_ratings.csv and ts_selection.csv from the same directory as
+    // Load ts_ratings.csv and ts-select.csv from the same directory as
     // this HTML file at page-load time.  Falls back silently to embedded
     // data if the files are not accessible (e.g. file:// protocol in Chrome).
     function _parseCSV(text) {{
@@ -1095,7 +1095,7 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
       .then(text => _applyRatingsCSV(text))
       .catch(() => {{}});
 
-    fetch('./ts_selection.csv')
+    fetch('./ts-select.csv')
       .then(r => r.ok ? r.text() : Promise.reject())
       .then(text => _applySelectionCSV(text))
       .catch(() => {{}});
