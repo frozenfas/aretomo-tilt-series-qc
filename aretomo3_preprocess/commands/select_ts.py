@@ -23,7 +23,6 @@ import argparse
 import json
 
 from aretomo3_preprocess.shared.project_json import load as load_project
-from aretomo3_preprocess.shared.project_state import get_latest_analysis_dir
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -177,11 +176,10 @@ def add_parser(subparsers):
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=__doc__,
     )
-    p.add_argument('--analysis', '-A', default=None,
-                   help='analyse output directory containing alignment_data.json. '
-                        'Auto-read from project.json if omitted.')
-    p.add_argument('--output', '-o', default='ts-select.csv',
-                   help='Output CSV file path (default: ts-select.csv)')
+    p.add_argument('--analysis', '-A', required=True,
+                   help='analyse output directory containing alignment_data.json.')
+    p.add_argument('--output', '-o', default=None,
+                   help='Output CSV file path (default: <analysis_dir>/ts-select.csv)')
     p.add_argument('--dry-run', action='store_true',
                    help='Print what would be selected/excluded without writing CSV')
 
@@ -223,18 +221,10 @@ def add_parser(subparsers):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run(args):
-    # ── Resolve analysis dir ─────────────────────────────────────────────────
-    analysis_dir = args.analysis
-    if analysis_dir is None:
-        analysis_dir = get_latest_analysis_dir()
-        if analysis_dir is not None:
-            print(f'Note: --analysis not given; using project.json → {analysis_dir}')
-    if analysis_dir is None:
-        print('ERROR: --analysis not given and no analyse output found in project.json.')
-        print('       Run analyse first, or supply --analysis explicitly.')
-        sys.exit(1)
+    # ── Resolve analysis dir and output path ─────────────────────────────────
+    analysis_dir = Path(args.analysis)
+    out_path     = Path(args.output) if args.output else analysis_dir / 'ts-select.csv'
 
-    analysis_dir = Path(analysis_dir)
     json_path    = analysis_dir / 'alignment_data.json'
     if not json_path.exists():
         print(f'ERROR: alignment_data.json not found in {analysis_dir}')
@@ -330,7 +320,6 @@ def run(args):
         return
 
     # ── Write CSV ────────────────────────────────────────────────────────────
-    out_path   = Path(args.output)
     fieldnames = [
         'ts_name', 'selected', 'n_frames', 'n_tilts', 'rating',
         'rot_deg', 'thickness_px', 'thickness_angst', 'thickness_nm',
