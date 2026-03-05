@@ -113,6 +113,7 @@ _FLAG_COMMENTS = {
     '-AtBin':        'tomogram binning factor(s); up to 3 for multi-resolution',
     '-AtPatch':      'local alignment patches (0 0=global only)',
     '-Wbp':          'reconstruction method: 1=WBP 0=SART',
+    '-Sart':         'SART iterations and projections per subset (default: 20 5)',
     '-FlipVol':      'flip tomogram for conventional orientation',
     '-TiltCor':      'apply tilt angle offset correction',
     '-DarkTol':      'dark frame rejection tolerance',
@@ -229,6 +230,8 @@ def _build_cmd(args) -> list:
     cmd += ['-AtBin']  + [_num(v) for v in args.at_bin]
     cmd += ['-AtPatch'] + [_num(v) for v in args.at_patch]
     cmd += ['-Wbp',      _num(args.wbp)]
+    if args.sart is not None and args.wbp == 0:
+        cmd += ['-Sart'] + [_num(v) for v in args.sart]
     cmd += ['-FlipVol',  _num(args.flip_vol)]
 
     cmd += ['-TiltCor', _num(args.tilt_cor)]
@@ -826,6 +829,11 @@ def add_parser(subparsers):
                      help='Local alignment patch grid; 0 0=global only (-AtPatch X Y)')
     ali.add_argument('--wbp', type=int, default=1,
                      help='Reconstruction: 1=WBP 0=SART (-Wbp)')
+    ali.add_argument('--sart', type=int, nargs=2, default=None,
+                     metavar=('ITERS', 'PROJS_PER_SUBSET'),
+                     help='SART reconstruction parameters: number of iterations '
+                          'and projections per subset (AreTomo3 defaults: 20 5). '
+                          'Only used when --wbp 0. Omit to use AreTomo3 defaults. (-Sart)')
     ali.add_argument('--flip-vol', type=int, default=1,
                      help='Flip reconstructed volume (-FlipVol)')
     ali.add_argument('--tilt-cor', type=int, default=1,
