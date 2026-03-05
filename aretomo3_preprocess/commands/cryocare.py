@@ -3,11 +3,13 @@ cryocare-train  — extract training data and train a cryoCARE denoising model.
 cryocare-predict — denoise tomograms using a trained cryoCARE model.
 
 cryoCARE requires even/odd half-set volumes produced by AreTomo3 with
--SplitSum 1 (--split-sum 1).  EVN/ODD pairs are discovered by globbing
-  ts-*{--vol-suffix}_EVN.mrc / ts-*{--vol-suffix}_ODD.mrc
-in the input directory (--vol-suffix defaults to '', matching ts-xxx_EVN.mrc).
-For multi-resolution runs (--at-bin 4 8), use e.g. --vol-suffix '_b4' to select
-the bin-4 output files.
+-SplitSum 1 (--split-sum 1).  EVN/ODD pairs are auto-detected from the
+input directory.  Two AreTomo3 naming conventions are supported:
+
+  Single --at-bin run:  ts-xxx_EVN_Vol.mrc / ts-xxx_ODD_Vol.mrc
+                        (default; --vol-suffix '' auto-detects these first)
+  Multiple --at-bin run: ts-xxx_b4_EVN.mrc / ts-xxx_b4_ODD.mrc
+                        (use --vol-suffix _b4 to select bin-4 outputs)
 
 For training, a stratified random subset of N volumes is selected to span the
 defocus range of the dataset.  Defocus is read from alignment_data.json in
@@ -62,22 +64,48 @@ from aretomo3_preprocess.shared.project_state import get_latest_analysis_dir, re
 
 def _find_evn_odd_pairs(in_dir, vol_suffix):
     """
-    Return sorted list of dicts {ts_name, evn, odd} for all EVN/ODD pairs in
-    in_dir matching ts-*{vol_suffix}_EVN.mrc / ts-*{vol_suffix}_ODD.mrc.
+    Return sorted list of dicts {ts_name, evn, odd} for all EVN/ODD pairs.
+
+    Supports two AreTomo3 naming conventions:
+      Single-bin: ts-xxx_EVN_Vol.mrc / ts-xxx_ODD_Vol.mrc
+                  (AreTomo3 single --at-bin run; auto-detected when vol_suffix='')
+      Multi-bin:  ts-xxx_b4_EVN.mrc / ts-xxx_b4_ODD.mrc
+                  (AreTomo3 multiple --at-bin run; use --vol-suffix _b4)
+
+    When vol_suffix='' (default), single-bin volumes (_EVN_Vol.mrc) are tried
+    first; falls back to _EVN.mrc if not found.
     """
     in_dir = Path(in_dir)
-    suffix_tag = f'{vol_suffix}_EVN'   # what the stem ends with
-    pairs = []
-    for evn in sorted(in_dir.glob(f'ts-*{vol_suffix}_EVN.mrc')):
-        if not evn.stem.endswith(suffix_tag):
-            continue
-        ts_name = evn.stem[: -len(suffix_tag)]
-        odd = in_dir / f'{ts_name}{vol_suffix}_ODD.mrc'
-        if odd.exists():
-            pairs.append({'ts_name': ts_name, 'evn': evn, 'odd': odd})
-        else:
-            print(f'Warning: {evn.name} has no matching ODD — skipping')
-    return pairs
+
+    def _collect(evn_glob, evn_tag, odd_suffix):
+        found = []
+        for evn in sorted(in_dir.glob(evn_glob)):
+            if not evn.stem.endswith(evn_tag):
+                continue
+            ts_name = evn.stem[:-len(evn_tag)]
+            odd = in_dir / f'{ts_name}{odd_suffix}.mrc'
+            if odd.exists():
+                found.append({'ts_name': ts_name, 'evn': evn, 'odd': odd})
+            else:
+                print(f'Warning: {evn.name} has no matching ODD — skipping')
+        return found
+
+    # Single-bin volumes: ts-xxx_EVN_Vol.mrc / ts-xxx_ODD_Vol.mrc
+    # Try first when vol_suffix is empty or explicitly '_Vol'
+    if vol_suffix in ('', '_Vol'):
+        pairs = _collect('ts-*_EVN_Vol.mrc', '_EVN_Vol', '_ODD_Vol')
+        if pairs:
+            return pairs
+
+    # Multi-bin / general pattern: ts-xxx{vol_suffix}_EVN.mrc
+    if vol_suffix != '_Vol':
+        return _collect(
+            f'ts-*{vol_suffix}_EVN.mrc',
+            f'{vol_suffix}_EVN',
+            f'{vol_suffix}_ODD',
+        )
+
+    return []
 
 
 def _load_analysis(analysis_dir, ts_names):
@@ -245,8 +273,10 @@ def _add_train_parser(subparsers):
     inp.add_argument('--input', '-i', required=True,
                      help='Directory containing ts-*_EVN.mrc / _ODD.mrc volumes')
     inp.add_argument('--vol-suffix', default='',
-                     help='Suffix between ts-name and _EVN/_ODD '
-                          '(e.g. "_b4" for ts-xxx_b4_EVN.mrc)')
+                     help='Volume file suffix.  Leave empty (default) to '
+                          'auto-detect: tries ts-xxx_EVN_Vol.mrc first '
+                          '(single --at-bin run), then ts-xxx_EVN.mrc.  '
+                          'Use "_b4" for multi-bin runs (ts-xxx_b4_EVN.mrc).')
     inp.add_argument('--analysis', default=None,
                      help='analyse output dir (alignment_data.json) for '
                           'defocus-based stratification and --min-tilts filter')
@@ -501,8 +531,10 @@ def _add_predict_parser(subparsers):
     inp.add_argument('--input', '-i', required=True,
                      help='Directory containing ts-*_EVN.mrc / _ODD.mrc volumes')
     inp.add_argument('--vol-suffix', default='',
-                     help='Suffix between ts-name and _EVN/_ODD '
-                          '(e.g. "_b4" for ts-xxx_b4_EVN.mrc)')
+                     help='Volume file suffix.  Leave empty (default) to '
+                          'auto-detect: tries ts-xxx_EVN_Vol.mrc first '
+                          '(single --at-bin run), then ts-xxx_EVN.mrc.  '
+                          'Use "_b4" for multi-bin runs (ts-xxx_b4_EVN.mrc).')
     inp.add_argument('--model', '-m', default=None,
                      help='Path to trained model (.tar.gz). '
                           'If omitted, reads model_path from project.json '
