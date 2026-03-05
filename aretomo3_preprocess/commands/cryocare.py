@@ -12,11 +12,10 @@ input directory.  Two AreTomo3 naming conventions are supported:
                         (use --vol-suffix _b4 to select bin-4 outputs)
 
 For training, a stratified random subset of N volumes is selected to span the
-defocus range of the dataset.  Defocus is read from alignment_data.json in
---analysis (using the acq_order=1 image — lowest/zero tilt, most accurate
-CTF estimate).  Volumes with too few aligned tilts can be excluded with
---min-tilts.  The stratification divides the defocus range into N equal bins
-and draws one volume at random from each bin.
+defocus range of the dataset.  Defocus (ref_defocus_um) is read from the
+ts-select.csv passed to --select-ts.  The stratification divides the defocus
+range into N equal bins and draws one volume at random from each bin.
+Volume selection and quality filtering is done via --select-ts.
 
 The commands write JSON config files and call the cryoCARE scripts:
   cryoCARE_extract_train_data.py   (train only — step 1)
@@ -29,12 +28,11 @@ Scripts must be on PATH (load the module first) or use --cryocare-dir:
 
 Typical usage
 -------------
-  # Train on bin-4 volumes from run004, using analysis QC filter
+  # Train on run001 volumes, using ts-select.csv to limit to good TS
   aretomo3-preprocess cryocare-train \\
-      --input run004 --vol-suffix _b4 \\
-      --analysis run001_analysis \\
-      --n-vols 8 --min-tilts 20 \\
-      --gpu 0 --output cryocare_train --dry-run
+      --input run001 \\
+      --select-ts run001_analysis/ts-select.csv \\
+      --n-vols 8 --gpu 0 --output cryocare_train --dry-run
 
   # Predict on all bin-4 volumes using the trained model
   aretomo3-preprocess cryocare-predict \\
@@ -55,7 +53,7 @@ import argparse
 from aretomo3_preprocess.shared.project_json import (
     load_or_create, update_section, args_to_dict,
 )
-from aretomo3_preprocess.shared.project_state import get_latest_analysis_dir, resolve_selected_ts
+from aretomo3_preprocess.shared.project_state import resolve_selected_ts
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -108,36 +106,27 @@ def _find_evn_odd_pairs(in_dir, vol_suffix):
     return []
 
 
-def _load_analysis(analysis_dir, ts_names):
+def _load_tsselect_defocus(csv_path):
     """
-    Load per-TS defocus (acq_order=1 image) and n_tilts (aligned frames) from
-    alignment_data.json in analysis_dir.
-
-    Returns dict: ts_name → {'defocus_um': float|None, 'n_tilts': int}
+    Load {ts_name: ref_defocus_um} from a ts-select.csv file.
+    Returns empty dict if csv_path is None or the column is absent.
     """
-    result = {ts: {'defocus_um': None, 'n_tilts': 0} for ts in ts_names}
-    if analysis_dir is None:
+    import csv as _csv
+    result = {}
+    if csv_path is None:
         return result
-
-    aln_path = Path(analysis_dir) / 'alignment_data.json'
-    if not aln_path.exists():
-        print(f'Warning: {aln_path} not found — defocus/n_tilts unavailable')
+    p = Path(csv_path)
+    if not p.exists():
         return result
-
-    with open(aln_path) as fh:
-        aln = json.load(fh)
-
-    for ts in ts_names:
-        ts_data = aln.get(ts, {})
-        frames  = ts_data.get('frames', [])
-        n_tilts = len(frames)
-        defocus_um = None
-        for f in frames:
-            if f.get('acq_order') == 1:
-                defocus_um = f.get('mean_defocus_um')
-                break
-        result[ts] = {'defocus_um': defocus_um, 'n_tilts': n_tilts}
-
+    with open(p, newline='') as fh:
+        for row in _csv.DictReader(fh):
+            ts  = row.get('ts_name', '').strip()
+            val = row.get('ref_defocus_um', '').strip()
+            if ts and val:
+                try:
+                    result[ts] = float(val)
+                except ValueError:
+                    pass
     return result
 
 
@@ -186,10 +175,9 @@ def _stratified_sample(candidates, n, seed=42):
 
 _TRAIN_ARG_HELP = {
     'input':                   'directory containing EVN/ODD half-set volumes',
-    'vol_suffix':              'suffix between ts-name and _EVN/_ODD (e.g. "_b4")',
-    'analysis':                'analyse output dir for defocus/n_tilts data',
+    'vol_suffix':              'volume file suffix; empty=auto-detect',
+    'select_ts':               'ts-select.csv; filters volumes and provides defocus for stratification',
     'n_vols':                  'volumes for training, selected stratified by defocus',
-    'min_tilts':               'exclude volumes with fewer than N aligned tilts',
     'output':                  'output dir for configs, training data and model',
     'model_name':              'model file stem (saved as <model_name>.tar.gz)',
     'patch_shape':             'training patch size in voxels [X Y Z]',
@@ -210,10 +198,8 @@ _TRAIN_ARG_HELP = {
 
 _PREDICT_ARG_HELP = {
     'input':       'directory containing EVN/ODD half-set volumes',
-    'vol_suffix':  'suffix between ts-name and _EVN/_ODD (e.g. "_b4")',
+    'vol_suffix':  'volume file suffix; empty=auto-detect',
     'model':       'trained model .tar.gz (or from project.json if omitted)',
-    'analysis':    'analyse output dir for --min-tilts filtering',
-    'min_tilts':   'exclude volumes with fewer than N aligned tilts',
     'output':      'output dir for denoised volumes',
     'overwrite':   'overwrite existing predictions',
     'n_tiles':     'prediction tiling [X Y Z] (reduce if GPU runs out of memory)',
@@ -277,19 +263,15 @@ def _add_train_parser(subparsers):
                           'auto-detect: tries ts-xxx_EVN_Vol.mrc first '
                           '(single --at-bin run), then ts-xxx_EVN.mrc.  '
                           'Use "_b4" for multi-bin runs (ts-xxx_b4_EVN.mrc).')
-    inp.add_argument('--analysis', default=None,
-                     help='analyse output dir (alignment_data.json) for '
-                          'defocus-based stratification and --min-tilts filter')
 
     filt = p.add_argument_group('volume selection')
     filt.add_argument('--n-vols', type=int, default=8,
-                      help='Number of volumes for training (stratified by defocus)')
-    filt.add_argument('--min-tilts', type=int, default=None,
-                      help='Exclude volumes with fewer than N aligned tilts')
+                      help='Number of volumes for training, stratified by defocus '
+                           '(ref_defocus_um from --select-ts CSV)')
     filt.add_argument('--select-ts', default=None, metavar='CSV',
-                      help='Path to ts_selection.csv from select-ts; only '
-                           'selected TS volumes are considered for training. '
-                           'Auto-loaded from project.json if omitted.')
+                      help='Path to ts-select.csv from select-ts.  Filters '
+                           'volumes to those marked selected=1, and provides '
+                           'ref_defocus_um for defocus-stratified sampling.')
 
     out = p.add_argument_group('output')
     out.add_argument('--output', '-o', default='cryocare_train',
@@ -339,13 +321,6 @@ def _add_train_parser(subparsers):
 
 
 def _run_train(args):
-    # Auto-fill --analysis from project.json if not given
-    if args.analysis is None:
-        _auto = get_latest_analysis_dir()
-        if _auto is not None:
-            args.analysis = str(_auto)
-            print(f'Note: --analysis not given; using project.json → {args.analysis}')
-
     in_dir  = Path(args.input)
     out_dir = Path(args.output)
     sep     = '─' * 70
@@ -360,13 +335,13 @@ def _run_train(args):
     # ── Discover EVN/ODD pairs ─────────────────────────────────────────────
     pairs = _find_evn_odd_pairs(in_dir, args.vol_suffix)
     if not pairs:
-        print(f'ERROR: no ts-*{args.vol_suffix}_EVN.mrc / _ODD.mrc pairs '
-              f'found in {in_dir}/')
+        print(f'ERROR: no EVN/ODD volume pairs found in {in_dir}/')
         sys.exit(1)
     print(f'Found {len(pairs)} EVN/ODD pairs in {in_dir}/')
 
     # ── Apply TS selection filter ──────────────────────────────────────────
-    selected_ts = resolve_selected_ts(getattr(args, 'select_ts', None))
+    csv_path    = getattr(args, 'select_ts', None)
+    selected_ts = resolve_selected_ts(csv_path)
     if selected_ts is not None:
         orig_n = len(pairs)
         pairs  = [p for p in pairs if p['ts_name'] in selected_ts]
@@ -377,32 +352,21 @@ def _run_train(args):
             print('ERROR: no volumes remain after TS selection filter')
             sys.exit(1)
 
-    # ── Load analysis data ─────────────────────────────────────────────────
-    ts_names = [p['ts_name'] for p in pairs]
-    ana_data = _load_analysis(args.analysis, ts_names)
+    # ── Load defocus from ts-select.csv for stratification ─────────────────
+    defocus = _load_tsselect_defocus(csv_path)
+    if not defocus and csv_path:
+        print('Note: ref_defocus_um not found in ts-select.csv — '
+              'falling back to random sampling')
 
-    # ── Filter by --min-tilts ──────────────────────────────────────────────
-    candidates = []
-    n_excluded = 0
-    for pair in pairs:
-        ts   = pair['ts_name']
-        info = ana_data[ts]
-        if args.min_tilts is not None and info['n_tilts'] < args.min_tilts:
-            n_excluded += 1
-            continue
-        candidates.append({
-            'ts_name':    ts,
+    candidates = [
+        {
+            'ts_name':    pair['ts_name'],
             'evn':        pair['evn'],
             'odd':        pair['odd'],
-            'defocus_um': info['defocus_um'],
-            'n_tilts':    info['n_tilts'],
-        })
-
-    if n_excluded:
-        print(f'Excluded {n_excluded} volumes with < {args.min_tilts} aligned tilts')
-    if not candidates:
-        print('ERROR: no volumes remain after filtering')
-        sys.exit(1)
+            'defocus_um': defocus.get(pair['ts_name']),
+        }
+        for pair in pairs
+    ]
 
     # ── Stratified selection ───────────────────────────────────────────────
     selected_names = _stratified_sample(candidates, args.n_vols)
@@ -413,8 +377,7 @@ def _run_train(args):
     print(sep)
     for c in selected:
         def_str = f'{c["defocus_um"]:.2f} μm' if c['defocus_um'] is not None else 'unknown'
-        tlt_str = str(c['n_tilts']) if c['n_tilts'] else '?'
-        print(f'  {c["ts_name"]:12s}  defocus={def_str:12s}  n_tilts={tlt_str}')
+        print(f'  {c["ts_name"]:12s}  defocus={def_str}')
     print(sep)
 
     # ── Write config files ─────────────────────────────────────────────────
@@ -539,12 +502,6 @@ def _add_predict_parser(subparsers):
                      help='Path to trained model (.tar.gz). '
                           'If omitted, reads model_path from project.json '
                           '[cryocare_train].')
-    inp.add_argument('--analysis', default=None,
-                     help='analyse output dir for --min-tilts filtering')
-
-    filt = p.add_argument_group('volume selection')
-    filt.add_argument('--min-tilts', type=int, default=None,
-                      help='Exclude volumes with fewer than N aligned tilts')
 
     out = p.add_argument_group('output')
     out.add_argument('--output', '-o', default='cryocare_predict',
@@ -571,12 +528,6 @@ def _add_predict_parser(subparsers):
 
 
 def _run_predict(args):
-    # Auto-fill --analysis from project.json if not given
-    if args.analysis is None:
-        _auto = get_latest_analysis_dir()
-        if _auto is not None:
-            args.analysis = str(_auto)
-
     in_dir  = Path(args.input)
     out_dir = Path(args.output)
     sep     = '─' * 70
@@ -615,27 +566,7 @@ def _run_predict(args):
         sys.exit(1)
     print(f'Found {len(pairs)} EVN/ODD pairs in {in_dir}/')
 
-    # ── Load analysis data and filter ─────────────────────────────────────
-    ts_names = [p['ts_name'] for p in pairs]
-    ana_data = _load_analysis(args.analysis, ts_names)
-
-    selected = []
-    n_excluded = 0
-    for pair in pairs:
-        ts   = pair['ts_name']
-        info = ana_data[ts]
-        if args.min_tilts is not None and info['n_tilts'] < args.min_tilts:
-            n_excluded += 1
-            continue
-        selected.append(pair)
-
-    if n_excluded:
-        print(f'Excluded {n_excluded} volumes with < {args.min_tilts} aligned tilts')
-
-    if not selected:
-        print('ERROR: no volumes remain after filtering')
-        sys.exit(1)
-
+    selected = pairs
     print(f'Predicting on {len(selected)} volumes')
     print(sep)
     for p in selected[:10]:
