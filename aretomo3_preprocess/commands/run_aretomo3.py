@@ -287,13 +287,16 @@ def _find_input_files(in_prefix: str, in_suffix: str,
 
 def _setup_cmd2_staging(out_dir: Path, src_in_dir: Path,
                         in_skips: list = None,
-                        dry_run: bool = False, selected_ts: set = None) -> Path:
+                        dry_run: bool = False, selected_ts: set = None,
+                        split_sum: int = 0) -> Path:
     """
     Populate the output directory with symlinks for cmd=2 runs.
 
     Creates symlinks directly in out_dir to:
       - ts-xxx.aln      →  src_in_dir/ts-xxx.aln         (alignment files)
       - ts-xxx.mrc      →  <source>/ts-xxx.mrc            (tilt-series stacks)
+      - ts-xxx_EVN.mrc  →  <source>/ts-xxx_EVN.mrc       (even frames, split_sum=1)
+      - ts-xxx_ODD.mrc  →  <source>/ts-xxx_ODD.mrc       (odd frames, split_sum=1)
       - ts-xxx_TLT.txt  →  <source>/ts-xxx_TLT.txt       (frame ordering)
 
     The MRC/TLT source is project.json input_stacks (from a prior cmd=0 run).
@@ -357,7 +360,21 @@ def _setup_cmd2_staging(out_dir: Path, src_in_dir: Path,
             if tlt_src.exists() and not tlt_dst.exists() and not tlt_dst.is_symlink():
                 to_link_tlt.append((ts_name, tlt_src.resolve()))
 
-    if not to_link_aln and not to_link_mrc and not to_link_tlt:
+    to_link_evn = []
+    to_link_odd = []
+    if split_sum:
+        for ts_name, src in mrc_sources.items():
+            src_path = Path(src)
+            evn_src  = src_path.parent / f'{ts_name}_EVN.mrc'
+            odd_src  = src_path.parent / f'{ts_name}_ODD.mrc'
+            evn_dst  = staging_dir / f'{ts_name}_EVN.mrc'
+            odd_dst  = staging_dir / f'{ts_name}_ODD.mrc'
+            if evn_src.exists() and not evn_dst.exists() and not evn_dst.is_symlink():
+                to_link_evn.append((ts_name, evn_src.resolve()))
+            if odd_src.exists() and not odd_dst.exists() and not odd_dst.is_symlink():
+                to_link_odd.append((ts_name, odd_src.resolve()))
+
+    if not to_link_aln and not to_link_mrc and not to_link_tlt and not to_link_evn and not to_link_odd:
         print(f'  Output dir {staging_dir}/ already populated — skipping symlink creation.')
         return staging_dir
 
@@ -369,6 +386,8 @@ def _setup_cmd2_staging(out_dir: Path, src_in_dir: Path,
     parts = []
     if to_link_aln: parts.append(f'{len(to_link_aln)} .aln')
     if to_link_mrc: parts.append(f'{len(to_link_mrc)} .mrc')
+    if to_link_evn: parts.append(f'{len(to_link_evn)} _EVN.mrc')
+    if to_link_odd: parts.append(f'{len(to_link_odd)} _ODD.mrc')
     if to_link_tlt: parts.append(f'{len(to_link_tlt)} _TLT.txt')
     print(f'  Linking        : {" + ".join(parts)}')
     if to_link_aln:
@@ -379,6 +398,14 @@ def _setup_cmd2_staging(out_dir: Path, src_in_dir: Path,
         print(f'    {to_link_mrc[0][0]}.mrc  →  {to_link_mrc[0][1]}')
         if len(to_link_mrc) > 1:
             print(f'    ... ({len(to_link_mrc) - 1} more .mrc)')
+    if to_link_evn:
+        print(f'    {to_link_evn[0][0]}_EVN.mrc  →  {to_link_evn[0][1]}')
+        if len(to_link_evn) > 1:
+            print(f'    ... ({len(to_link_evn) - 1} more _EVN.mrc)')
+    if to_link_odd:
+        print(f'    {to_link_odd[0][0]}_ODD.mrc  →  {to_link_odd[0][1]}')
+        if len(to_link_odd) > 1:
+            print(f'    ... ({len(to_link_odd) - 1} more _ODD.mrc)')
     if to_link_tlt:
         print(f'    {to_link_tlt[0][0]}_TLT.txt  →  {to_link_tlt[0][1]}')
         if len(to_link_tlt) > 1:
@@ -390,6 +417,10 @@ def _setup_cmd2_staging(out_dir: Path, src_in_dir: Path,
         (staging_dir / f'{ts_name}.aln').symlink_to(src)
     for ts_name, src in to_link_mrc:
         (staging_dir / f'{ts_name}.mrc').symlink_to(src)
+    for ts_name, src in to_link_evn:
+        (staging_dir / f'{ts_name}_EVN.mrc').symlink_to(src)
+    for ts_name, src in to_link_odd:
+        (staging_dir / f'{ts_name}_ODD.mrc').symlink_to(src)
     for ts_name, src in to_link_tlt:
         (staging_dir / f'{ts_name}_TLT.txt').symlink_to(src)
 
@@ -877,6 +908,7 @@ def run(args):
             in_skips    = args.in_skips,
             dry_run     = args.dry_run,
             selected_ts = selected_ts,
+            split_sum   = args.split_sum,
         )
         stem = Path(args.in_prefix).name      # e.g. 'ts-'
         args.in_prefix = str(staging_dir / stem)
