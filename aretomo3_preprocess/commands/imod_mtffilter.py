@@ -197,6 +197,14 @@ def run(args):
         vol_files.extend(in_dir.glob(pat))
     vol_files = sorted(set(vol_files))
 
+    # The wildcard glob ts-*_Vol.mrc also matches _EVN_Vol.mrc / _ODD_Vol.mrc.
+    # Exclude half-sets unless --halves was requested.
+    if not args.halves:
+        vol_files = [
+            f for f in vol_files
+            if not (f.stem.endswith(f'_EVN{sfx}') or f.stem.endswith(f'_ODD{sfx}'))
+        ]
+
     if not vol_files:
         print(f'ERROR: no volumes found in {in_dir}/ matching '
               f'{", ".join(glob_patterns)}')
