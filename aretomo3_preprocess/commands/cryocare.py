@@ -184,6 +184,7 @@ _TRAIN_ARG_HELP = {
     'num_slices':              'sub-volume patches extracted per tomogram',
     'tilt_axis':               'tilt axis in volume (0=X 1=Y 2=Z); 1=Y for AreTomo3 FlipVol=1',
     'n_normalization_samples': 'patches used to estimate normalisation statistics',
+    'split':                   'fraction of patches for training (remainder = validation)',
     'epochs':                  'training epochs',
     'steps_per_epoch':         'gradient steps per epoch',
     'batch_size':              'training mini-batch size',
@@ -290,6 +291,9 @@ def _add_train_parser(subparsers):
                          '1 is correct for AreTomo3 with FlipVol=1')
     td.add_argument('--n-normalization-samples', type=int, default=500,
                     help='Patches used to estimate normalisation statistics')
+    td.add_argument('--split', type=float, default=0.9,
+                    help='Fraction of patches used for training; '
+                         'remainder is validation (e.g. 0.9 = 90%% train / 10%% val)')
 
     tr = p.add_argument_group('training')
     tr.add_argument('--epochs', type=int, default=100,
@@ -389,6 +393,7 @@ def _run_train(args):
         'odd':                     [str(c['odd'].resolve()) for c in selected],
         'patch_shape':             args.patch_shape,
         'num_slices':              args.num_slices,
+        'split':                   args.split,
         'tilt_axis':               args.tilt_axis,
         'n_normalization_samples': args.n_normalization_samples,
         'path':                    str(patches_dir.resolve()),
