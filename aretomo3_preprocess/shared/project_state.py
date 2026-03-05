@@ -92,6 +92,12 @@ def get_gain_check_dir() -> Optional[Path]:
     return Path(value) if value else None
 
 
+def get_defocus_data() -> Optional[dict]:
+    """Return the defocus_data.per_ts dict {ts_name: ref_defocus_um}, or None."""
+    data = _load()
+    return data.get('defocus_data', {}).get('per_ts') or None
+
+
 def resolve_selected_ts(csv_path: Optional[str] = None) -> Optional[Set[str]]:
     """
     Load the TS selection set from a ts_selection.csv file.

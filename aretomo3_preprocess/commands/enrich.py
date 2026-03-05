@@ -6,9 +6,10 @@ commands rely on for auto-fill.  It is also an escape hatch for datasets
 processed outside the standard pipeline.
 
 The normal pipeline populates these sections automatically:
-  validate-mdoc        → mdoc_data      (--mdoc-data)
-  run-aretomo3 --cmd 0 → input_stacks   (--mrc-data, --tlt-data)
-  analyse (first run)  → lamella_assignments (--lamellae)
+  validate-mdoc        → mdoc_data             (--mdoc-data)
+  run-aretomo3 --cmd 0 → input_stacks          (--mrc-data, --tlt-data)
+  run-aretomo3 --cmd 0 → defocus_data          (--defocus-data, future auto)
+  analyse (first run)  → lamella_assignments   (--lamellae)
 
 Use enrich when:
   - data was processed externally and the sections are missing, OR
@@ -28,17 +29,24 @@ Sections
   lamella_assignments  ts-name → lamella cluster mapping
                        Locks clustering so repeated analyse runs are consistent.
 
+  defocus_data         per-TS reference defocus (µm) from first-acquired tilt
+                       Required by imod-mtffilter for per-TS -defocus values.
+
 Typical usage
 -------------
   # Register everything for a manually processed dataset
   aretomo3-preprocess enrich \\
-      --mdoc-data frames/ \\
-      --mrc-data  run001/ \\
-      --tlt-data  run001/ \\
-      --lamellae  run001_analysis/lamella_positions.csv
+      --mdoc-data   frames/ \\
+      --mrc-data    run001/ \\
+      --tlt-data    run001/ \\
+      --defocus-data run001/ \\
+      --lamellae    run001_analysis/lamella_positions.csv
 
   # Re-register mdoc data after re-running validate-mdoc
   aretomo3-preprocess enrich --mdoc-data frames/ --force
+
+  # Populate defocus_data from an existing AreTomo3 output directory
+  aretomo3-preprocess enrich --defocus-data run001/
 """
 
 import csv as _csv_module
@@ -150,6 +158,71 @@ def _enrich_tlt_data(tlt_dir: Path, force: bool):
     print(f'  tlt_dir: {tlt_dir.resolve()}  ({len(tlt_files)} _TLT.txt files)')
 
 
+def _enrich_defocus_data(ctf_dir: Path, force: bool):
+    """Parse ts-xxx_CTF.txt + ts-xxx_TLT.txt files to extract per-TS reference defocus."""
+    existing = _load_project().get('defocus_data', {}).get('per_ts')
+    if existing and not force:
+        print(f'  defocus_data already registered ({len(existing)} TS).')
+        print(f'  Use --force to overwrite.')
+        return
+
+    from aretomo3_preprocess.shared.parsers import parse_ctf_file, parse_tlt_file
+
+    ctf_files = sorted(ctf_dir.glob('ts-*_CTF.txt'))
+    if not ctf_files:
+        print(f'  ERROR: no ts-*_CTF.txt files found in {ctf_dir}')
+        return
+
+    per_ts = {}
+    n_ok = n_fail = 0
+    for ctf_path in ctf_files:
+        ts_name  = ctf_path.stem[:-len('_CTF')]   # ts-xxx_CTF → ts-xxx
+        tlt_path = ctf_dir / f'{ts_name}_TLT.txt'
+        try:
+            ctf_data = parse_ctf_file(ctf_path)
+            if not ctf_data:
+                raise ValueError('no CTF rows parsed')
+
+            defocus = None
+            if tlt_path.exists():
+                tlt_data = parse_tlt_file(tlt_path)
+                # Use the first-acquired tilt (acq_order==1) as the reference frame
+                ref_sec = next(
+                    (sec for sec, t in tlt_data.items() if t['acq_order'] == 1),
+                    None,
+                )
+                if ref_sec is not None and ref_sec in ctf_data:
+                    defocus = ctf_data[ref_sec]['mean_defocus_um']
+
+            if defocus is None:
+                # Fallback: median of all fitted frames
+                vals = sorted(f['mean_defocus_um'] for f in ctf_data.values())
+                defocus = vals[len(vals) // 2]
+
+            per_ts[ts_name] = round(defocus, 4)
+            n_ok += 1
+        except Exception as exc:
+            print(f'    FAIL  {ts_name}: {exc}')
+            n_fail += 1
+
+    if not per_ts:
+        print(f'  ERROR: no defocus data extracted from {ctf_dir}')
+        return
+
+    prior = _load_project().get('defocus_data', {}).get('per_ts', {})
+    merged = {**prior, **per_ts}
+    update_section('defocus_data', {
+        'timestamp':  datetime.datetime.now().isoformat(timespec='seconds'),
+        'source_dir': str(ctf_dir.resolve()),
+        'n_ts':       len(merged),
+        'per_ts':     merged,
+    })
+    print(f'  defocus_data: {n_ok} TS parsed'
+          + (f' ({len(merged)} total in project.json)' if prior else ''))
+    if n_fail:
+        print(f'  {n_fail} TS could not be parsed')
+
+
 def _enrich_lamellae(csv_path: Path, force: bool):
     """Load lamella_positions.csv and write lamella_assignments to project.json."""
     existing = _load_project().get('lamella_assignments', {}).get('positions')
@@ -213,6 +286,15 @@ def add_parser(subparsers):
                         'Populates lamella_assignments in project.json '
                         '(ts-name → lamella cluster).  '
                         'Normally populated automatically by the first analyse run.')
+    p.add_argument('--defocus-data', default=None, metavar='DIR',
+                   help='Directory containing ts-xxx_CTF.txt and ts-xxx_TLT.txt '
+                        'files (e.g. the run-aretomo3 output dir).  '
+                        'Parses the reference defocus for each TS (from the '
+                        'first-acquired tilt, acq_order==1) and stores it in '
+                        'project.json under defocus_data.per_ts.  '
+                        'Used by imod-mtffilter for per-TS defocus lookup.  '
+                        'Will be populated automatically by run-aretomo3 --cmd 0 '
+                        'in a future release.')
     p.add_argument('--in-skips', nargs='*', metavar='PATTERN',
                    default=['_CTF', '_Vol', '_EVN', '_ODD'],
                    help='Stem substrings to exclude when scanning --mrc-data '
@@ -268,7 +350,16 @@ def run(args):
         _enrich_lamellae(csv_path, args.force)
         did_anything = True
 
+    if args.defocus_data is not None:
+        ctf_dir = Path(args.defocus_data)
+        if not ctf_dir.is_dir():
+            print(f'ERROR: --defocus-data {ctf_dir} is not a directory')
+            sys.exit(1)
+        print(f'Parsing defocus data from {ctf_dir}/')
+        _enrich_defocus_data(ctf_dir, args.force)
+        did_anything = True
+
     if not did_anything:
         print('ERROR: at least one of --mdoc-data, --mrc-data, --tlt-data, '
-              '--lamellae must be given.')
+              '--lamellae, --defocus-data must be given.')
         sys.exit(1)
