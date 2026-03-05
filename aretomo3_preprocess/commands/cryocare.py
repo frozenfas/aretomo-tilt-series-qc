@@ -182,7 +182,7 @@ _TRAIN_ARG_HELP = {
     'model_name':              'model file stem (saved as <model_name>.tar.gz)',
     'patch_shape':             'training patch size in voxels [X Y Z]',
     'num_slices':              'sub-volume patches extracted per tomogram',
-    'tilt_axis':               'tilt axis in volume (0=X 1=Y 2=Z); 1=Y for AreTomo3 FlipVol=1',
+    'tilt_axis':               'tilt axis in volume (Z/Y/X); Y for AreTomo3 FlipVol=1',
     'n_normalization_samples': 'patches used to estimate normalisation statistics',
     'split':                   'fraction of patches for training (remainder = validation)',
     'epochs':                  'training epochs',
@@ -286,9 +286,9 @@ def _add_train_parser(subparsers):
                     help='Patch shape in voxels')
     td.add_argument('--num-slices', type=int, default=1200,
                     help='Sub-volume patches per tomogram')
-    td.add_argument('--tilt-axis', type=int, default=1,
-                    help='Tilt axis in the volume (0=X 1=Y 2=Z); '
-                         '1 is correct for AreTomo3 with FlipVol=1')
+    td.add_argument('--tilt-axis', default='Y', choices=['Z', 'Y', 'X'],
+                    help='Tilt axis in the volume (Z, Y, or X); '
+                         'Y is correct for AreTomo3 with FlipVol=1')
     td.add_argument('--n-normalization-samples', type=int, default=500,
                     help='Patches used to estimate normalisation statistics')
     td.add_argument('--split', type=float, default=0.9,
