@@ -200,6 +200,7 @@ _TRAIN_ARG_HELP = {
 _PREDICT_ARG_HELP = {
     'input':       'directory containing EVN/ODD half-set volumes',
     'vol_suffix':  'volume file suffix; empty=auto-detect',
+    'select_ts':   'ts-select.csv; only selected TS are denoised',
     'model':       'trained model .tar.gz (or from project.json if omitted)',
     'output':      'output dir for denoised volumes',
     'overwrite':   'overwrite existing predictions',
@@ -503,6 +504,9 @@ def _add_predict_parser(subparsers):
                           'auto-detect: tries ts-xxx_EVN_Vol.mrc first '
                           '(single --at-bin run), then ts-xxx_EVN.mrc.  '
                           'Use "_b4" for multi-bin runs (ts-xxx_b4_EVN.mrc).')
+    inp.add_argument('--select-ts', default=None, metavar='CSV',
+                     help='Path to ts-select.csv from select-ts; only TS '
+                          'marked selected=1 are denoised.')
     inp.add_argument('--model', '-m', default=None,
                      help='Path to trained model (.tar.gz). '
                           'If omitted, reads model_path from project.json '
@@ -570,6 +574,18 @@ def _run_predict(args):
               f'found in {in_dir}/')
         sys.exit(1)
     print(f'Found {len(pairs)} EVN/ODD pairs in {in_dir}/')
+
+    # ── Apply TS selection filter ──────────────────────────────────────────
+    selected_ts = resolve_selected_ts(getattr(args, 'select_ts', None))
+    if selected_ts is not None:
+        orig_n = len(pairs)
+        pairs  = [p for p in pairs if p['ts_name'] in selected_ts]
+        n_excl = orig_n - len(pairs)
+        if n_excl:
+            print(f'TS selection: {n_excl} excluded, {len(pairs)} remaining')
+        if not pairs:
+            print('ERROR: no volumes remain after TS selection filter')
+            sys.exit(1)
 
     selected = pairs
     print(f'Predicting on {len(selected)} volumes')
