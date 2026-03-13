@@ -115,7 +115,7 @@ _FLAG_COMMENTS = {
     '-Wbp':          'reconstruction method: 1=WBP 0=SART',
     '-Sart':         'SART iterations and projections per subset (default: 20 5)',
     '-FlipVol':      'flip tomogram for conventional orientation',
-    '-TiltCor':      'apply tilt angle offset correction',
+    '-TiltCor':      'apply tilt angle offset correction [optional fixed offset in degrees]',
     '-DarkTol':      'dark frame rejection tolerance',
     '-TiltAxis':     'initial tilt axis angle [refinement_flag]',
     '-AlignZ':       'slab thickness for alignment in pixels (auto if omitted)',
@@ -234,7 +234,10 @@ def _build_cmd(args) -> list:
         cmd += ['-Sart'] + [_num(v) for v in args.sart]
     cmd += ['-FlipVol',  _num(args.flip_vol)]
 
-    cmd += ['-TiltCor', _num(args.tilt_cor)]
+    tilt_cor_vals = args.tilt_cor
+    if len(tilt_cor_vals) > 2:
+        raise ValueError('--tilt-cor accepts at most two values: ENABLE [ANGLE]')
+    cmd += ['-TiltCor'] + [_num(v) for v in tilt_cor_vals]
     cmd += ['-DarkTol', _num(args.dark_tol)]
     if args.tilt_axis is not None:
         cmd += ['-TiltAxis'] + [_num(v) for v in args.tilt_axis]
@@ -836,8 +839,11 @@ def add_parser(subparsers):
                           'Only used when --wbp 0. Omit to use AreTomo3 defaults. (-Sart)')
     ali.add_argument('--flip-vol', type=int, default=1,
                      help='Flip reconstructed volume (-FlipVol)')
-    ali.add_argument('--tilt-cor', type=int, default=1,
-                     help='Apply tilt angle offset correction (-TiltCor)')
+    ali.add_argument('--tilt-cor', nargs='+', default=['1'],
+                     metavar=('ENABLE', 'ANGLE'),
+                     help='Tilt correction: 0=off, 1=auto-correct. Optionally '
+                          'append a fixed offset in degrees, e.g. --tilt-cor 1 2.5 '
+                          '(-TiltCor)')
     ali.add_argument('--dark-tol', type=float, default=0.7,
                      help='Dark frame rejection tolerance (-DarkTol)')
     ali.add_argument('--corr-ctf', type=int, default=1,
