@@ -17,3 +17,4 @@ dependencies:
     - imagecodecs
     - scikit-image
     - scikit-learn
+    - jupyterlab
