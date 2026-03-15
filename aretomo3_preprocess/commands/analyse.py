@@ -1127,7 +1127,7 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
       fetch('./ts-select.csv?_=' + Date.now())
         .then(r => r.ok ? r.text() : Promise.reject())
         .then(text => {{ _applySelectionCSV(text); }})
-        .catch(() => {{ alert('ts-select.csv not found in this directory.\nUse the \u201cLoad CSV\u2026\u201d button to browse for the file instead.'); }});
+        .catch(() => {{ alert('ts-select.csv not found in this directory.\\nUse the Load CSV button to browse for the file instead.'); }});
     }});
 
     // ── File-picker for ts-select.csv (works on file:// protocol) ─────────
