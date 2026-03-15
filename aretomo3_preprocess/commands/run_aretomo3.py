@@ -75,6 +75,8 @@ import subprocess
 from pathlib import Path
 import argparse
 
+from tqdm import tqdm
+
 from aretomo3_preprocess.shared.project_json import (
     load_or_create, update_section, args_to_dict,
 )
@@ -298,8 +300,8 @@ def _setup_cmd2_staging(out_dir: Path, src_in_dir: Path,
     """
     Populate the output directory with symlinks for cmd=2 runs.
 
-    Creates symlinks directly in out_dir to:
-      - ts-xxx.aln      →  src_in_dir/ts-xxx.aln         (alignment files)
+    Copies .aln files and creates symlinks in out_dir for all other files:
+      - ts-xxx.aln      ←  src_in_dir/ts-xxx.aln         (copied — editable by overlap filter)
       - ts-xxx.mrc      →  <source>/ts-xxx.mrc            (tilt-series stacks)
       - ts-xxx_EVN.mrc  →  <source>/ts-xxx_EVN.mrc       (even frames, split_sum=1)
       - ts-xxx_ODD.mrc  →  <source>/ts-xxx_ODD.mrc       (odd frames, split_sum=1)
@@ -398,14 +400,18 @@ def _setup_cmd2_staging(out_dir: Path, src_in_dir: Path,
     print(f'  {prefix}.aln source    : {src_in_dir}/')
     if src_root is not None:
         print(f'  {prefix}MRC/TLT source : {source_label}')
-    parts = []
-    if to_link_aln: parts.append(f'{len(to_link_aln)} .aln')
-    if to_link_mrc: parts.append(f'{len(to_link_mrc)} .mrc')
-    if to_link_evn: parts.append(f'{len(to_link_evn)} _EVN.mrc')
-    if to_link_odd: parts.append(f'{len(to_link_odd)} _ODD.mrc')
-    if to_link_tlt: parts.append(f'{len(to_link_tlt)} _TLT.txt')
-    if to_link_ctf: parts.append(f'{len(to_link_ctf)} _CTF.txt')
-    print(f'  {prefix}Linking        : {" + ".join(parts)}')
+    copy_parts = []
+    link_parts = []
+    if to_link_aln: copy_parts.append(f'{len(to_link_aln)} .aln')
+    if to_link_mrc: link_parts.append(f'{len(to_link_mrc)} .mrc')
+    if to_link_evn: link_parts.append(f'{len(to_link_evn)} _EVN.mrc')
+    if to_link_odd: link_parts.append(f'{len(to_link_odd)} _ODD.mrc')
+    if to_link_tlt: link_parts.append(f'{len(to_link_tlt)} _TLT.txt')
+    if to_link_ctf: link_parts.append(f'{len(to_link_ctf)} _CTF.txt')
+    if copy_parts:
+        print(f'  {prefix}Copying        : {" + ".join(copy_parts)}')
+    if link_parts:
+        print(f'  {prefix}Linking        : {" + ".join(link_parts)}')
     if to_link_aln:
         print(f'    {to_link_aln[0][0]}.aln  →  {to_link_aln[0][1]}')
         if len(to_link_aln) > 1:
@@ -436,19 +442,23 @@ def _setup_cmd2_staging(out_dir: Path, src_in_dir: Path,
     if dry_run:
         return staging_dir
 
+    all_ops = (
+        [(ts, src, f'{ts}.aln',     'copy') for ts, src in to_link_aln] +
+        [(ts, src, f'{ts}.mrc',     'link') for ts, src in to_link_mrc] +
+        [(ts, src, f'{ts}_EVN.mrc', 'link') for ts, src in to_link_evn] +
+        [(ts, src, f'{ts}_ODD.mrc', 'link') for ts, src in to_link_odd] +
+        [(ts, src, f'{ts}_TLT.txt', 'link') for ts, src in to_link_tlt] +
+        [(ts, src, f'{ts}_CTF.txt', 'link') for ts, src in to_link_ctf]
+    )
+
     staging_dir.mkdir(parents=True, exist_ok=True)
-    for ts_name, src in to_link_aln:
-        (staging_dir / f'{ts_name}.aln').symlink_to(src)
-    for ts_name, src in to_link_mrc:
-        (staging_dir / f'{ts_name}.mrc').symlink_to(src)
-    for ts_name, src in to_link_evn:
-        (staging_dir / f'{ts_name}_EVN.mrc').symlink_to(src)
-    for ts_name, src in to_link_odd:
-        (staging_dir / f'{ts_name}_ODD.mrc').symlink_to(src)
-    for ts_name, src in to_link_tlt:
-        (staging_dir / f'{ts_name}_TLT.txt').symlink_to(src)
-    for ts_name, src in to_link_ctf:
-        (staging_dir / f'{ts_name}_CTF.txt').symlink_to(src)
+    with tqdm(all_ops, desc='  Staging', unit='file', ncols=72) as pbar:
+        for ts_name, src, fname, op in pbar:
+            dst = staging_dir / fname
+            if op == 'copy':
+                shutil.copy2(src, dst)
+            else:
+                dst.symlink_to(src)
 
     return staging_dir
 
@@ -609,10 +619,8 @@ def _filter_alns_for_overlap(staging_dir: Path, src_in_dir: Path,
             insert_at = last_hdr + 1
             new_lines = new_lines[:insert_at] + all_dark_lines + new_lines[insert_at:]
 
-        # ── Write to staging dir (replace symlink with real file) ─────────────
+        # ── Write to staging dir (overwrites the copied .aln) ─────────────────
         staging_aln = staging_dir / f'{ts_name}.aln'
-        if staging_aln.exists() or staging_aln.is_symlink():
-            staging_aln.unlink()
         staging_aln.write_text(''.join(new_lines))
         print(f'    Written to staging: {staging_aln.name}')
 
