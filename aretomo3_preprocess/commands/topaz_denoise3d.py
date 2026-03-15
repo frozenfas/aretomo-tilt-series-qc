@@ -26,6 +26,7 @@ import sys
 import subprocess
 import shutil
 import csv
+import time
 from pathlib import Path
 import argparse
 
@@ -140,10 +141,16 @@ def run(args):
         print('No volumes to process after selection filter.')
         sys.exit(0)
 
-    print(f'Volumes to process : {len(vol_files)}')
+    n   = len(vol_files)
+    w   = len(str(n))
+    sep = '─' * 70
+
+    print(f'Volumes to process : {n}')
     print(f'Model              : {args.model}')
-    print(f'Device             : {args.gpu}')
+    print(f'Patch size / pad   : {args.patch_size} / {args.patch_padding}')
+    print(f'Device             : GPU {args.gpu}')
     print(f'Output directory   : {out_dir}/')
+    print(f'Topaz binary       : {args.topaz_bin}')
     print()
 
     # ── Check binary ──────────────────────────────────────────────────────────
@@ -156,10 +163,11 @@ def run(args):
         out_dir.mkdir(parents=True, exist_ok=True)
 
     # ── Process ───────────────────────────────────────────────────────────────
-    prefix = '[DRY RUN] ' if args.dry_run else ''
-    n_ok = n_fail = 0
+    prefix   = '[DRY RUN] ' if args.dry_run else ''
+    n_ok     = n_fail = 0
+    t_start  = time.perf_counter()
 
-    for vol_path in vol_files:
+    for i, vol_path in enumerate(vol_files, 1):
         cmd = [
             args.topaz_bin, 'denoise3d',
             str(vol_path),
@@ -170,22 +178,34 @@ def run(args):
             '-p',  str(args.patch_padding),
         ]
 
-        print(f'{prefix}{vol_path.name}')
+        print(sep, flush=True)
+        print(f'{prefix}[{i:{w}d}/{n}]  {vol_path.name}', flush=True)
+
         if args.dry_run:
-            print(f'      {" ".join(cmd)}')
+            print(f'  cmd: {" ".join(cmd)}')
             n_ok += 1
             continue
 
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        t0     = time.perf_counter()
+        result = subprocess.run(cmd, stderr=subprocess.PIPE, text=True)
+        elapsed = time.perf_counter() - t0
+
         if result.returncode != 0:
-            print(f'  FAIL  {vol_path.name}  (exit {result.returncode})')
-            for line in (result.stderr or '').strip().splitlines()[:5]:
-                print(f'        {line}')
+            print(f'  FAILED  (exit {result.returncode}, {elapsed:.0f}s)', flush=True)
+            for line in (result.stderr or '').strip().splitlines():
+                print(f'    {line}')
             n_fail += 1
         else:
+            elapsed_total = time.perf_counter() - t_start
+            rate = i / elapsed_total
+            eta  = (n - i) / rate if rate > 0 else 0
+            print(f'  done  ({elapsed:.0f}s  |  {i}/{n} complete'
+                  f'  |  ETA {eta/60:.0f} min)', flush=True)
             n_ok += 1
 
-    print()
-    print(f'Done: {n_ok} processed, {n_fail} failed')
+    print(sep)
+    total = time.perf_counter() - t_start
+    print(f'\nDone: {n_ok} denoised, {n_fail} failed  '
+          f'(total {total/60:.1f} min)')
     if n_fail:
         sys.exit(1)
