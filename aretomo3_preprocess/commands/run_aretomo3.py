@@ -342,8 +342,6 @@ def _setup_cmd2_staging(out_dir: Path, src_in_dir: Path,
         if n_excl:
             print(f'  TS selection: {n_excl} excluded, {len(all_ts)} remaining')
 
-    staging_dir.mkdir(parents=True, exist_ok=True)
-
     # ── Build lists of links to create ────────────────────────────────────
     to_link_aln = []
     for ts_name in all_ts:
@@ -366,6 +364,14 @@ def _setup_cmd2_staging(out_dir: Path, src_in_dir: Path,
             if tlt_src.exists() and not tlt_dst.exists() and not tlt_dst.is_symlink():
                 to_link_tlt.append((ts_name, tlt_src.resolve()))
 
+    # _CTF.txt comes from the alignment run (src_in_dir), not from the cmd=0 root
+    to_link_ctf = []
+    for ts_name in all_ts:
+        ctf_src = src_in_dir / f'{ts_name}_CTF.txt'
+        ctf_dst = staging_dir / f'{ts_name}_CTF.txt'
+        if ctf_src.exists() and not ctf_dst.exists() and not ctf_dst.is_symlink():
+            to_link_ctf.append((ts_name, ctf_src.resolve()))
+
     to_link_evn = []
     to_link_odd = []
     if split_sum:
@@ -380,22 +386,26 @@ def _setup_cmd2_staging(out_dir: Path, src_in_dir: Path,
             if odd_src.exists() and not odd_dst.exists() and not odd_dst.is_symlink():
                 to_link_odd.append((ts_name, odd_src.resolve()))
 
-    if not to_link_aln and not to_link_mrc and not to_link_tlt and not to_link_evn and not to_link_odd:
+    nothing_to_do = not any([to_link_aln, to_link_mrc, to_link_tlt, to_link_ctf,
+                              to_link_evn, to_link_odd])
+    if nothing_to_do:
         print(f'  Output dir {staging_dir}/ already populated — skipping symlink creation.')
         return staging_dir
 
+    prefix = '[DRY RUN] ' if dry_run else ''
     print(sep)
-    print(f'  CMD=2 OUTPUT DIRECTORY  →  {staging_dir}/')
-    print(f'  .aln source    : {src_in_dir}/')
+    print(f'  {prefix}CMD=2 OUTPUT DIRECTORY  →  {staging_dir}/')
+    print(f'  {prefix}.aln source    : {src_in_dir}/')
     if src_root is not None:
-        print(f'  MRC/TLT source : {source_label}')
+        print(f'  {prefix}MRC/TLT source : {source_label}')
     parts = []
     if to_link_aln: parts.append(f'{len(to_link_aln)} .aln')
     if to_link_mrc: parts.append(f'{len(to_link_mrc)} .mrc')
     if to_link_evn: parts.append(f'{len(to_link_evn)} _EVN.mrc')
     if to_link_odd: parts.append(f'{len(to_link_odd)} _ODD.mrc')
     if to_link_tlt: parts.append(f'{len(to_link_tlt)} _TLT.txt')
-    print(f'  Linking        : {" + ".join(parts)}')
+    if to_link_ctf: parts.append(f'{len(to_link_ctf)} _CTF.txt')
+    print(f'  {prefix}Linking        : {" + ".join(parts)}')
     if to_link_aln:
         print(f'    {to_link_aln[0][0]}.aln  →  {to_link_aln[0][1]}')
         if len(to_link_aln) > 1:
@@ -416,9 +426,17 @@ def _setup_cmd2_staging(out_dir: Path, src_in_dir: Path,
         print(f'    {to_link_tlt[0][0]}_TLT.txt  →  {to_link_tlt[0][1]}')
         if len(to_link_tlt) > 1:
             print(f'    ... ({len(to_link_tlt) - 1} more _TLT.txt)')
+    if to_link_ctf:
+        print(f'    {to_link_ctf[0][0]}_CTF.txt  →  {to_link_ctf[0][1]}')
+        if len(to_link_ctf) > 1:
+            print(f'    ... ({len(to_link_ctf) - 1} more _CTF.txt)')
     print(sep)
     print()
 
+    if dry_run:
+        return staging_dir
+
+    staging_dir.mkdir(parents=True, exist_ok=True)
     for ts_name, src in to_link_aln:
         (staging_dir / f'{ts_name}.aln').symlink_to(src)
     for ts_name, src in to_link_mrc:
@@ -429,6 +447,8 @@ def _setup_cmd2_staging(out_dir: Path, src_in_dir: Path,
         (staging_dir / f'{ts_name}_ODD.mrc').symlink_to(src)
     for ts_name, src in to_link_tlt:
         (staging_dir / f'{ts_name}_TLT.txt').symlink_to(src)
+    for ts_name, src in to_link_ctf:
+        (staging_dir / f'{ts_name}_CTF.txt').symlink_to(src)
 
     return staging_dir
 
@@ -646,7 +666,7 @@ def _validate(args) -> tuple:
     # ── 2. Input files found ───────────────────────────────────────────────
     in_dir, pattern, mdoc_files = _find_input_files(
         args.in_prefix, args.in_suffix, args.in_skips)
-    if not in_dir.is_dir():
+    if not in_dir.is_dir() and not (args.in_suffix == 'mrc' and args.cmd == 2):
         errors.append(f'Input directory not found: {in_dir}/')
     elif not mdoc_files:
         if args.in_suffix == 'mrc' and args.cmd == 2:
