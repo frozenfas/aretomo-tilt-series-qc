@@ -368,7 +368,8 @@ def _validate_ts(data, tlt_data, mdoc_data, mrc_path=None):
 
     # 5. Mdoc TiltAngle ≈ TLT nominal_tilt
     if tlt_data and mdoc_data:
-        bad = []
+        diffs = []
+        secs  = []
         for f in data['frames']:
             tlt  = tlt_data.get(f['sec'])
             z    = f.get('z_value')
@@ -377,12 +378,22 @@ def _validate_ts(data, tlt_data, mdoc_data, mrc_path=None):
             mdoc_tilt = mdoc_data.get(z, {}).get('tilt_angle')
             if mdoc_tilt is None:
                 continue
-            if abs(mdoc_tilt - tlt['nominal_tilt']) > 0.05:
-                bad.append(f['sec'])
-        if bad:
-            warnings.append(
-                f'{len(bad)} frame(s) |mdoc TiltAngle − TLT nominal_tilt| > 0.05°: '
-                f'SEC {bad}')
+            diffs.append(mdoc_tilt - tlt['nominal_tilt'])
+            secs.append(f['sec'])
+        if diffs:
+            mean_diff = float(np.mean(diffs))
+            residuals = [abs(d - mean_diff) for d in diffs]
+            bad_secs  = [s for s, r in zip(secs, residuals) if r > 0.05]
+            if bad_secs:
+                # Inconsistent frame-to-frame offsets → real mapping problem
+                warnings.append(
+                    f'{len(bad_secs)} frame(s) |mdoc TiltAngle − TLT nominal_tilt − mean| > 0.05°: '
+                    f'SEC {bad_secs}  (mean offset {mean_diff:+.2f}°)')
+            elif abs(mean_diff) > 0.05:
+                # Constant offset across all frames → tilt correction baked into TLT
+                warnings.append(
+                    f'NOTE:mdoc TiltAngle vs TLT nominal_tilt constant offset '
+                    f'{mean_diff:+.3f}° — tilt correction was applied to _TLT.txt')
 
     return warnings
 
@@ -1776,7 +1787,10 @@ def run(args):
         _pwrite(f'  {status}  {ts_name}   {n_bad} frame(s) below {args.threshold}%  '
                 f'| {len(data["dark_frames"])} dark frame(s)')
         for w in data.get('warnings', []):
-            _pwrite(f'  WARN  {w}')
+            if w.startswith('NOTE:'):
+                _pwrite(f'  NOTE  {w[5:].lstrip()}')
+            else:
+                _pwrite(f'  WARN  {w}')
         if bad_frames:
             _pwrite(f'     {"SEC":>4}  {"Tilt (°)":>9}  {"TX (px)":>10}  '
                     f'{"TY (px)":>10}  {"Overlap":>8}')
