@@ -207,6 +207,11 @@ def _add_train_parser(subparsers):
                           '(subtomo-size must be divisible by 2^depth)')
     ddw.add_argument('--val-fraction', type=float, default=0.1,
                      help='Fraction of subtomograms held out for validation')
+    ddw.add_argument('--standardize', action='store_true', default=False,
+                     help='Standardize each full tomogram (mean=0, std=1) before '
+                          'subtomogram extraction.  Required when volumes have low '
+                          'absolute intensities (DDW warns: std < ~0.001).  '
+                          'Must also be set in ddw-refine (auto-detected from config).')
     ddw.add_argument('--num-workers', type=int, default=8,
                      help='CPU workers for data loading')
 
@@ -314,7 +319,8 @@ def _run_train(args):
             'seed':         args.seed,
         },
         'prepare_data': {
-            'val_fraction': args.val_fraction,
+            'val_fraction':          args.val_fraction,
+            'standardize_full_tomos': args.standardize,
         },
         'fit_model': {
             'unet_params_dict': {
@@ -488,6 +494,11 @@ def _run_refine(args):
         subtomo_size = train_cfg.get('shared', {}).get('subtomo_size', 96)
         print(f'Subtomogram size    : {subtomo_size} (from ddw_config.yaml)')
 
+    # standardize_full_tomos must match what was used in prepare-data
+    standardize = train_cfg.get('prepare_data', {}).get('standardize_full_tomos', False)
+    if standardize:
+        print(f'Standardize tomos   : True (from ddw_config.yaml — matches prepare-data)')
+
     # ── Resolve checkpoint ────────────────────────────────────────────────
     if args.checkpoint is not None:
         ckpt_path = Path(args.checkpoint)
@@ -550,11 +561,12 @@ def _run_refine(args):
             'gpu':          args.gpu,
         },
         'refine_tomogram': {
-            'model_checkpoint_file': str(ckpt_path.resolve()),
-            'output_dir':            str(out_dir.resolve()),
-            'batch_size':            args.batch_size,
-            'subtomo_overlap':       subtomo_size // 3,
+            'model_checkpoint_file':  str(ckpt_path.resolve()),
+            'output_dir':             str(out_dir.resolve()),
+            'batch_size':             args.batch_size,
+            'subtomo_overlap':        subtomo_size // 3,
             'recompute_normalization': True,
+            'standardize_full_tomos': standardize,
         },
     }
 
