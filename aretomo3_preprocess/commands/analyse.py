@@ -872,8 +872,15 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
       </button>
       <button class="nav-btn" id="btn-reload-sel"
               style="font-size:0.82em;background:#37474f;"
-              title="Re-fetch ts-select.csv from this directory">
+              title="Re-fetch ts-select.csv from the same directory as this HTML (requires HTTP server)">
         &#8635; Reload selection
+      </button>
+      <input type="file" id="file-sel-input" accept=".csv"
+             style="display:none">
+      <button class="nav-btn" id="btn-load-csv"
+              style="font-size:0.82em;background:#37474f;"
+              title="Load any ts-select.csv from your computer (works with file://)">
+        &#128193; Load CSV&#8230;
       </button>
     </div>
 
@@ -1109,7 +1116,21 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
       fetch('./ts-select.csv?_=' + Date.now())
         .then(r => r.ok ? r.text() : Promise.reject())
         .then(text => {{ _applySelectionCSV(text); }})
-        .catch(() => {{ alert('ts-select.csv not found in this directory.'); }});
+        .catch(() => {{ alert('ts-select.csv not found in this directory.\nUse the \u201cLoad CSV\u2026\u201d button to browse for the file instead.'); }});
+    }});
+
+    // ── File-picker for ts-select.csv (works on file:// protocol) ─────────
+    const fileInput = document.getElementById('file-sel-input');
+    document.getElementById('btn-load-csv').addEventListener('click', () => {{
+      fileInput.value = '';   // allow re-selecting same file
+      fileInput.click();
+    }});
+    fileInput.addEventListener('change', () => {{
+      const file = fileInput.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = e => {{ _applySelectionCSV(e.target.result); }};
+      reader.readAsText(file);
     }});
 
     show(0);
