@@ -1528,6 +1528,15 @@ def run(args):
     _stacks        = _proj.get('input_stacks', {}).get('stacks', {})
     _n_mdoc_cached = 0
 
+    # Build ts-name → original mdoc stem mapping from rename_ts lookup.
+    # mdoc_data is keyed by original filename stems (e.g. 'Position_1') while
+    # .aln files are named ts-xxx, so a direct lookup would always miss.
+    _rename_lookup = _proj.get('rename_ts', {}).get('lookup', {})
+    _ts_to_mdoc_stem = {
+        Path(ts_mdoc).stem: Path(orig_path).stem
+        for ts_mdoc, orig_path in _rename_lookup.items()
+    }  # e.g. {'ts-001': 'Position_1', 'ts-002': 'Position_10', ...}
+
     angpix_str = f'{args.angpix} Å/px' if args.angpix else 'from mdoc_data'
     print(f'Found {len(aln_files)} .aln files  |  threshold = {args.threshold}%  '
           f'|  pixel size = {angpix_str}  |  TLT dir = {tlt_dir}\n')
@@ -1562,7 +1571,8 @@ def run(args):
         _timing['tlt'] += time.perf_counter() - _t
 
         _t = time.perf_counter()
-        _cm         = _cached_mdoc.get(ts_name, {})
+        _mdoc_key   = _ts_to_mdoc_stem.get(ts_name, ts_name)
+        _cm         = _cached_mdoc.get(_mdoc_key, {})
         mdoc_data   = {int(k): v for k, v in _cm.get('frames', {}).items()}
         mdoc_angpix = _cm.get('angpix')
         if _cm:
