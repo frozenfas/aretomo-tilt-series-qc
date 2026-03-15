@@ -1,49 +1,57 @@
 """
 topaz-denoise3d — denoise reconstructed volumes using Topaz denoise3d.
 
-Applies a pretrained 3D denoising model to ts-xxx_Vol.mrc files using
-Topaz (https://topaz-em.readthedocs.io).  Only pretrained models are
-supported; no training is performed.
+Applies a denoising model to ts-xxx_Vol.mrc files.  Supports both Topaz
+pretrained models and custom .sav checkpoints trained with topaz-train.
 
 Pretrained models
 -----------------
-  unet-3d      — general-purpose (default)
+  unet-3d      — general-purpose (default if no custom model available)
   unet-3d-10a  — trained on 10 Å/px data
   unet-3d-20a  — trained on 20 Å/px data
 
-Example
--------
+Auto-loading a custom model
+---------------------------
+If --model is omitted and topaz-train has been run, the latest checkpoint
+is loaded automatically from project.json (topaz_train.output_dir).
+You can also point to the training output dir directly with --project-dir.
+
+Typical usage
+-------------
+  # Use pretrained model
   aretomo3-preprocess topaz-denoise3d \\
-      --input run001 \\
-      --output run001/topaz_denoise \\
-      --model unet-3d \\
-      --gpu 0 \\
-      --select-ts run001_analysis/ts-select.csv \\
-      --dry-run
+      --input run005-cmd2-sart-thr80 \\
+      --output run005-topaz/denoised \\
+      --model unet-3d --gpu 0
+
+  # Auto-load custom model from project.json
+  aretomo3-preprocess topaz-denoise3d \\
+      --input run005-cmd2-sart-thr80 \\
+      --output run005-topaz/denoised \\
+      --gpu 0
+
+  # Explicit custom model
+  aretomo3-preprocess topaz-denoise3d \\
+      --input run005-cmd2-sart-thr80 \\
+      --output run005-topaz/denoised \\
+      --model run005-topaz/model_epoch500.sav --gpu 0
 """
 
 import sys
 import subprocess
 import shutil
-import csv
 import time
 from pathlib import Path
 import argparse
+
+from aretomo3_preprocess.shared.project_json import load_or_create
+from aretomo3_preprocess.commands.topaz_train import _find_latest_model
+from aretomo3_preprocess.shared.project_state import resolve_selected_ts
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
-
-def _load_selected(csv_path: Path) -> set:
-    selected = set()
-    with open(csv_path, newline='') as fh:
-        for row in csv.DictReader(fh):
-            ts = row.get('ts_name', '').strip()
-            if ts and row.get('selected', '').strip() == '1':
-                selected.add(ts)
-    return selected
-
 
 def _ts_name_from_vol(vol_path: Path, vol_suffix: str) -> str:
     stem = vol_path.stem
@@ -57,6 +65,53 @@ def _ts_name_from_vol(vol_path: Path, vol_suffix: str) -> str:
     return stem
 
 
+PRETRAINED_MODELS = {'unet-3d', 'unet-3d-10a', 'unet-3d-20a'}
+
+
+def _resolve_model(args) -> str:
+    """
+    Resolve the model to use, in priority order:
+      1. --model  (explicit pretrained name or .sav path)
+      2. --project-dir  → latest .sav in that directory
+      3. project.json → topaz_train.output_dir → latest .sav
+      4. Fall back to 'unet-3d' pretrained
+
+    Returns the model string to pass to topaz -m.
+    """
+    # 1. Explicit --model
+    if args.model is not None:
+        return args.model
+
+    # 2. --project-dir given
+    project_dir = getattr(args, 'project_dir', None)
+    if project_dir is not None:
+        project_dir = Path(project_dir)
+        model = _find_latest_model(project_dir)
+        if model:
+            print(f'Model               : {model} (latest checkpoint in --project-dir)')
+            return str(model)
+        print(f'WARNING: no .sav checkpoints found in {project_dir}/')
+
+    # 3. Auto-load from project.json
+    if project_dir is None:
+        proj        = load_or_create()
+        output_dir  = proj.get('topaz_train', {}).get('output_dir')
+        if output_dir:
+            output_dir = Path(output_dir)
+            model = _find_latest_model(output_dir)
+            if model:
+                print(f'Model               : {model}')
+                print(f'                      (latest checkpoint from project.json topaz_train)')
+                return str(model)
+            else:
+                print(f'WARNING: topaz_train.output_dir in project.json is {output_dir}')
+                print(f'         but no .sav checkpoints found there.')
+
+    # 4. Pretrained fallback
+    print('Model               : unet-3d (pretrained fallback — no custom model found)')
+    return 'unet-3d'
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CLI
 # ─────────────────────────────────────────────────────────────────────────────
@@ -64,33 +119,46 @@ def _ts_name_from_vol(vol_path: Path, vol_suffix: str) -> str:
 def add_parser(subparsers):
     p = subparsers.add_parser(
         'topaz-denoise3d',
-        help='Denoise reconstructed volumes with Topaz pretrained models',
+        help='Denoise reconstructed volumes with Topaz denoise3d',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=__doc__,
     )
-    p.add_argument('--input', '-i', required=True,
-                   help='Directory containing ts-xxx_Vol.mrc files')
-    p.add_argument('--output', '-o', default=None,
-                   help='Output directory (default: <input>/topaz_denoise)')
-    p.add_argument('--model', '-m',
-                   choices=['unet-3d', 'unet-3d-10a', 'unet-3d-20a'],
-                   default='unet-3d',
-                   help='Pretrained denoising model (default: unet-3d)')
-    p.add_argument('--gpu', '-d', type=int, default=0,
-                   help='GPU device index (default: 0; use -1 for CPU)')
-    p.add_argument('--select-ts', default=None, metavar='CSV',
-                   help='ts-select.csv; only selected TS are denoised')
-    p.add_argument('--vol-suffix', default='_Vol',
-                   help='Volume filename suffix (default: _Vol → ts-xxx_Vol.mrc)')
-    p.add_argument('--patch-size', type=int, default=96,
-                   help='Patch size for denoising (default: 96)')
-    p.add_argument('--patch-padding', type=int, default=48,
-                   help='Patch padding to reduce edge artefacts (default: 48)')
-    p.add_argument('--topaz', dest='topaz_bin',
-                   default='/opt/miniconda3/envs/topaz/bin/topaz',
-                   help='Path to topaz executable')
-    p.add_argument('--dry-run', action='store_true',
-                   help='Print commands without executing')
+
+    inp = p.add_argument_group('input')
+    inp.add_argument('--input', '-i', required=True,
+                     help='Directory containing ts-xxx_Vol.mrc files')
+    inp.add_argument('--vol-suffix', default='_Vol',
+                     help='Volume filename suffix (default: _Vol → ts-xxx_Vol.mrc)')
+    inp.add_argument('--select-ts', default=None, metavar='CSV',
+                     help='ts-select.csv; only selected TS are denoised')
+
+    out = p.add_argument_group('output')
+    out.add_argument('--output', '-o', default=None,
+                     help='Output directory (default: <input>/topaz_denoise)')
+
+    mdl = p.add_argument_group('model')
+    mdl.add_argument('--model', '-m', default=None,
+                     metavar='MODEL_OR_PATH',
+                     help='Pretrained model name (unet-3d / unet-3d-10a / unet-3d-20a) '
+                          'or path to a custom .sav checkpoint from topaz-train. '
+                          'Default: auto-load from project.json, then unet-3d.')
+    mdl.add_argument('--project-dir', default=None, metavar='DIR',
+                     help='Topaz training output directory; scan for latest .sav '
+                          'checkpoint. If omitted, auto-loaded from project.json.')
+
+    ctl = p.add_argument_group('run control')
+    ctl.add_argument('--gpu', '-d', type=int, default=0,
+                     help='GPU device index (default: 0; use -1 for CPU)')
+    ctl.add_argument('--patch-size', type=int, default=96,
+                     help='Patch size for denoising (default: 96)')
+    ctl.add_argument('--patch-padding', type=int, default=48,
+                     help='Patch padding to reduce edge artefacts (default: 48)')
+    ctl.add_argument('--topaz', dest='topaz_bin',
+                     default='/opt/miniconda3/envs/topaz/bin/topaz',
+                     help='Path to topaz executable')
+    ctl.add_argument('--dry-run', action='store_true',
+                     help='Print commands without executing')
+
     p.set_defaults(func=run)
     return p
 
@@ -108,15 +176,11 @@ def run(args):
     out_dir = Path(args.output) if args.output else in_dir / 'topaz_denoise'
     sfx     = args.vol_suffix
 
+    # ── Resolve model ─────────────────────────────────────────────────────────
+    model = _resolve_model(args)
+
     # ── TS selection ──────────────────────────────────────────────────────────
-    selected = None
-    if args.select_ts:
-        csv_path = Path(args.select_ts)
-        if not csv_path.exists():
-            print(f'ERROR: --select-ts {csv_path} not found')
-            sys.exit(1)
-        selected = _load_selected(csv_path)
-        print(f'TS selection : {len(selected)} selected from {csv_path.name}')
+    selected_ts = resolve_selected_ts(getattr(args, 'select_ts', None))
 
     # ── Find volumes ──────────────────────────────────────────────────────────
     vol_files = sorted(in_dir.glob(f'ts-*{sfx}.mrc'))
@@ -124,18 +188,19 @@ def run(args):
     # Exclude EVN/ODD half-sets
     vol_files = [
         f for f in vol_files
-        if not (f.stem.endswith(f'_EVN{sfx}') or f.stem.endswith(f'_ODD{sfx}'))
+        if not (f.stem.endswith(f'_EVN{sfx}') or f.stem.endswith(f'_ODD{sfx}')
+                or '_EVN' in f.stem or '_ODD' in f.stem)
     ]
 
     if not vol_files:
         print(f'ERROR: no volumes found in {in_dir}/ matching ts-*{sfx}.mrc')
         sys.exit(1)
 
-    if selected is not None:
+    if selected_ts is not None:
         before    = len(vol_files)
         vol_files = [f for f in vol_files
-                     if _ts_name_from_vol(f, sfx) in selected]
-        print(f'After selection: {len(vol_files)} / {before} volumes')
+                     if _ts_name_from_vol(f, sfx) in selected_ts]
+        print(f'TS selection: {len(vol_files)} / {before} volumes retained')
 
     if not vol_files:
         print('No volumes to process after selection filter.')
@@ -145,12 +210,17 @@ def run(args):
     w   = len(str(n))
     sep = '─' * 70
 
-    print(f'Volumes to process : {n}')
-    print(f'Model              : {args.model}')
-    print(f'Patch size / pad   : {args.patch_size} / {args.patch_padding}')
-    print(f'Device             : GPU {args.gpu}')
-    print(f'Output directory   : {out_dir}/')
-    print(f'Topaz binary       : {args.topaz_bin}')
+    is_pretrained = model in PRETRAINED_MODELS
+    model_label   = model if is_pretrained else Path(model).name
+
+    print(f'Volumes to process  : {n}')
+    if is_pretrained:
+        print(f'Model               : {model} (pretrained)')
+    else:
+        print(f'Model               : {model_label}')
+    print(f'Patch size / pad    : {args.patch_size} / {args.patch_padding}')
+    print(f'Device              : GPU {args.gpu}')
+    print(f'Output directory    : {out_dir}/')
     print()
 
     # ── Check binary ──────────────────────────────────────────────────────────
@@ -172,7 +242,7 @@ def run(args):
             args.topaz_bin, 'denoise3d',
             str(vol_path),
             '-o',  str(out_dir),
-            '-m',  args.model,
+            '-m',  model,
             '-d',  str(args.gpu),
             '-s',  str(args.patch_size),
             '-p',  str(args.patch_padding),
