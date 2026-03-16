@@ -18,6 +18,21 @@ Four dimension-preserving transforms are tested:
   fliplr (-RotGain 0 -FlipGain 2)   flip around vertical axis
   rot180 (-RotGain 2 -FlipGain 0)   180° rotation
 
+MRC Y-convention (AreTomo3)
+---------------------------
+AreTomo3 reads MRC gain files with an implicit Y-flip (MRC standard: row 0 =
+bottom of image, opposite to numpy convention).  With --software aretomo3
+(default), the loaded gain is pre-flipped with flipud() before scoring.  This
+makes the transform table above a direct 1:1 mapping to AreTomo3 flags:
+
+  none   → raw × flipud(G_mrc)           → -FlipGain 0  (MRC implicit flip)
+  flipud → raw × flipud(flipud(G_mrc))   → -FlipGain 1  (cancels MRC flip)
+  fliplr → raw × fliplr(flipud(G_mrc))   → -FlipGain 2
+  rot180 → raw × rot180(flipud(G_mrc))   → -RotGain 2 -FlipGain 0
+
+Without pre-flipping (legacy behaviour, --software none) the reported flags
+would be inverted — "flipud" best would incorrectly suggest -FlipGain 1.
+
 For each selected movie the sub-frames are summed (float64) and multiplied
 by each transformed gain.  After accumulating all movies the best transform
 is the one that produces the flattest corrected image, quantified by the
@@ -64,6 +79,9 @@ from pathlib import Path
 #   FlipGain 2 → GFlip2D::Horizontal() → numpy fliplr  (around vertical axis)
 #   RotGain  1 → 90° CCW, 2 → 180°, 3 → 270° CCW
 #   Order applied: rotate → flip → invert
+#
+# Flag values here assume --software aretomo3 (gain pre-flipped with flipud
+# before scoring, see run()).  With the pre-flip the mapping is 1:1 correct.
 # ─────────────────────────────────────────────────────────────────────────────
 
 TRANSFORMS = {
@@ -674,6 +692,14 @@ def add_parser(subparsers):
              'plots and report.  By default only raw×gain is computed '
              '(AreTomo3 convention).',
     )
+    p.add_argument(
+        '--software', default='aretomo3', choices=['aretomo3', 'none'],
+        help='Target motion-correction software.  "aretomo3" (default) '
+             'pre-applies flipud() to the gain before scoring to account for '
+             'AreTomo3\'s implicit MRC Y-flip (MRC row 0 = bottom), so that '
+             'reported flags map 1:1 to -RotGain/-FlipGain.  '
+             '"none" disables the pre-flip (legacy, not recommended).',
+    )
     p.set_defaults(func=run)
     return p
 
@@ -686,6 +712,17 @@ def run(args):
 
     # ── Validate gain ─────────────────────────────────────────────────────────
     gain, nx, ny = _load_and_validate_gain(gain_path)
+
+    # AreTomo3 reads MRC gain with an implicit Y-flip (MRC row 0 = bottom).
+    # Pre-flipping here means the TRANSFORMS flag values are 1:1 correct.
+    software = getattr(args, 'software', 'aretomo3')
+    if software == 'aretomo3':
+        gain = np.flipud(gain).copy()
+        print('  MRC Y-flip:  applied (--software aretomo3)')
+        print('  Reported -RotGain/-FlipGain values are direct AreTomo3 flags.')
+    else:
+        print('  MRC Y-flip:  disabled (--software none)')
+        print('  WARNING: reported flags may not map correctly to AreTomo3.')
     print()
 
     # ── Find and select movies ────────────────────────────────────────────────
@@ -781,6 +818,8 @@ def run(args):
         'gain_file':             str(gain_path),
         'frames_dir':            str(frames_dir),
         'input_type':            'tiff_mrc_aretomo3',
+        'software':              software,
+        'mrc_y_flip_applied':    software == 'aretomo3',
         'n_movies_after_filter': len(filtered),
         'n_movies_tested':       len(selected),
         'acq_order_threshold':   args.n_acquisitions,
