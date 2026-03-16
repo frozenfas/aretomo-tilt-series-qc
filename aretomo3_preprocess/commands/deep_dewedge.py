@@ -43,6 +43,7 @@ Typical usage
       --dry-run
 """
 
+import os
 import re
 import sys
 import shutil
@@ -151,7 +152,11 @@ def _run_ddw(ddw_bin: str, subcmd: str, config_path: Path,
     print(f'  $ {" ".join(cmd)}\n')
     if dry_run:
         return
-    ret = subprocess.run(cmd)
+    # PYTHONNOUSERSITE prevents ~/.local/lib/pythonX.Y/site-packages from
+    # overriding the conda env's pytorch-lightning with a user-local install.
+    env = os.environ.copy()
+    env['PYTHONNOUSERSITE'] = '1'
+    ret = subprocess.run(cmd, env=env)
     if ret.returncode != 0:
         print(f'ERROR: ddw {subcmd} exited with code {ret.returncode}')
         sys.exit(ret.returncode)
