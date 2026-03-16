@@ -43,7 +43,6 @@ Typical usage
       --dry-run
 """
 
-import os
 import re
 import sys
 import shutil
@@ -143,28 +142,16 @@ def _write_yaml(path: Path, data: dict) -> None:
         yaml.dump(data, fh, default_flow_style=False, sort_keys=False)
 
 
-_DDW_PATCH_DIR = '/home/sconnell/local/ddw_pl2_patch'
-
-
 def _run_ddw(ddw_bin: str, subcmd: str, config_path: Path,
              extra_args=None, dry_run: bool = False) -> None:
-    """Run `ddw <subcmd> --config <config_path> [extra_args]`, streaming stdout.
-
-    Injects PYTHONPATH with a patched ddw package so that the PyTorch Lightning
-    2.x-incompatible ``resume_from_checkpoint`` kwarg in fit_model.py is shadowed
-    by the fixed copy in _DDW_PATCH_DIR.
-    """
+    """Run `ddw <subcmd> --config <config_path> [extra_args]`, streaming stdout."""
     cmd = [ddw_bin, subcmd, '--config', str(config_path)]
     if extra_args:
         cmd += extra_args
     print(f'  $ {" ".join(cmd)}\n')
     if dry_run:
         return
-    env = os.environ.copy()
-    if os.path.isdir(_DDW_PATCH_DIR):
-        existing = env.get('PYTHONPATH', '')
-        env['PYTHONPATH'] = (_DDW_PATCH_DIR + ':' + existing).rstrip(':')
-    ret = subprocess.run(cmd, env=env)
+    ret = subprocess.run(cmd)
     if ret.returncode != 0:
         print(f'ERROR: ddw {subcmd} exited with code {ret.returncode}')
         sys.exit(ret.returncode)
