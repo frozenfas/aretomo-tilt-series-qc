@@ -4,7 +4,7 @@ import argparse
 from aretomo3_preprocess.commands import (
     analyse, trim_ts, check_gain_transform, validate_mdoc,
     rename_ts, run_aretomo3, run_aretomo3_per_ts, cryocare, enrich, select_ts,
-    imod_mtffilter, topaz_denoise3d, topaz_train, deep_dewedge,
+    imod_mtffilter, topaz_denoise3d, topaz_train, deep_dewedge, aln_edit,
 )
 
 
@@ -24,6 +24,7 @@ def main():
     run_aretomo3_per_ts.add_parser(sub)
     analyse.add_parser(sub)
     select_ts.add_parser(sub)
+    aln_edit.add_parser(sub)
     trim_ts.add_parser(sub)
     cryocare.add_parser(sub)
     imod_mtffilter.add_parser(sub)
