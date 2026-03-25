@@ -29,9 +29,13 @@ from aretomo3_preprocess.shared.project_json import load as load_project
 # Ratings loader
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _load_ratings(analysis_dir: Path) -> dict:
-    """Load ts_ratings.csv from analysis_dir; return {ts_name: int} or {}."""
-    path = analysis_dir / 'ts_ratings.csv'
+def _load_ratings(analysis_dir: Path, ratings_file=None) -> dict:
+    """Load a ratings CSV; return {ts_name: int} or {}.
+
+    If ratings_file is given, use that path.  Otherwise fall back to
+    ts_ratings.csv in analysis_dir.
+    """
+    path = Path(ratings_file) if ratings_file else analysis_dir / 'ts_ratings.csv'
     if not path.exists():
         return {}
     ratings = {}
@@ -180,6 +184,8 @@ def add_parser(subparsers):
                    help='analyse output directory containing alignment_data.json.')
     p.add_argument('--output', '-o', default=None,
                    help='Output CSV file path (default: <analysis_dir>/ts-select.csv)')
+    p.add_argument('--ratings', default=None, metavar='CSV',
+                   help='Path to ts_ratings.csv (default: ts_ratings.csv in --analysis dir)')
     p.add_argument('--dry-run', action='store_true',
                    help='Print what would be selected/excluded without writing CSV')
 
@@ -237,12 +243,12 @@ def run(args):
     print(f'Loaded {len(ts_names)} tilt series from {analysis_dir}/alignment_data.json')
 
     # ── Load ratings ─────────────────────────────────────────────────────────
-    ratings = _load_ratings(analysis_dir)
+    ratings_path = Path(args.ratings) if args.ratings else analysis_dir / 'ts_ratings.csv'
+    ratings = _load_ratings(analysis_dir, args.ratings)
     if ratings:
-        print(f'Loaded ratings for {len(ratings)} tilt series from '
-              f'{analysis_dir}/ts_ratings.csv')
+        print(f'Loaded ratings for {len(ratings)} tilt series from {ratings_path}')
     elif args.select_by_rating is not None:
-        print(f'WARNING: --select-by-rating given but {analysis_dir}/ts_ratings.csv '
+        print(f'WARNING: --select-by-rating given but {ratings_path} '
               f'not found — all TS will be excluded as unrated.')
 
     # ── Overlap threshold consistency check ──────────────────────────────────
@@ -339,6 +345,7 @@ def run(args):
         print('Exclusion reasons:')
         for reason, count in sorted(reason_counts.items()):
             print(f'  {reason}: {count}')
+
 
 
 def _fmt(v):
