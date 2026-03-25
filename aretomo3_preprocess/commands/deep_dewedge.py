@@ -23,8 +23,9 @@ EVN/ODD pair detection
 
 Missing wedge angle
 -------------------
-  Auto-detected from _TLT.txt if not given:  mw_angle = 90 - max(|tilt|)
-  For a ±60° tilt series: mw_angle = 30.  For ±70°: mw_angle = 20.
+  Auto-detected from .aln files if not given:  mw_angle = 2 * min(max_pos_tilt, max_neg_tilt)
+  For a ±60° tilt series: mw_angle = 120.  For ±70°: mw_angle = 140.
+  Asymmetric tilts use the smaller side (conservative: covers the side with larger missing wedge).
 
 Typical usage
 -------------
@@ -79,15 +80,26 @@ def _detect_mw_angle(in_dir: Path):
     This gives the true angular range of the reconstruction, not the nominal
     acquisition range.
 
-    MW angle = 90 - max(|tilt|), rounded to nearest integer.
-    Samples the first 10 .aln files to estimate the range.
+    DDW convention (from missing_wedge.py):
+        alpha = mw_angle / 2
+        mask boundary from Z-axis = 90 - mw_angle/2
+
+    For the mask boundary to equal the actual missing wedge edge (90 - theta_max):
+        mw_angle = 2 * theta_max
+
+    For asymmetric tilt ranges, the conservative choice is:
+        mw_angle = 2 * min(|max_neg_tilt|, |max_pos_tilt|)
+    This covers the side with the larger missing wedge fully.
+
+    Samples up to 10 .aln files to estimate the typical range.
     Returns None if no .aln files found.
     """
     aln_files = sorted(in_dir.glob('ts-*.aln'))[:10]
     if not aln_files:
         return None
 
-    max_tilt = 0.0
+    max_pos  = 0.0
+    max_neg  = 0.0
     n_read   = 0
     for aln_file in aln_files:
         try:
@@ -99,7 +111,9 @@ def _detect_mw_angle(in_dir: Path):
                     parts = stripped.split()
                     if len(parts) == 10:
                         try:
-                            max_tilt = max(max_tilt, abs(float(parts[9])))
+                            tilt    = float(parts[9])
+                            max_pos = max(max_pos,  tilt)
+                            max_neg = max(max_neg, -tilt)
                         except ValueError:
                             pass
             n_read += 1
@@ -108,7 +122,8 @@ def _detect_mw_angle(in_dir: Path):
 
     if n_read == 0:
         return None
-    return max(0, int(round(90.0 - max_tilt)))
+    effective_max_tilt = min(max_pos, max_neg)
+    return max(0, int(round(2.0 * effective_max_tilt)))
 
 
 def _find_best_checkpoint(logdir: Path):
@@ -195,7 +210,7 @@ def _add_train_parser(subparsers):
     ddw.add_argument('--mw-angle', type=int, default=None, metavar='DEG',
                      help='Missing wedge width in degrees. '
                           'Auto-detected from .aln files if omitted '
-                          '(= 90 - max aligned tilt, excluding dark frames).')
+                          '(= 2 * min(max_pos_tilt, max_neg_tilt)).')
     ddw.add_argument('--subtomo-size', type=int, default=96,
                      help='Cubic subtomogram size in voxels. '
                           'Must be divisible by 2^unet-depth (default 8).')
@@ -297,7 +312,7 @@ def _run_train(args):
             print(f'Missing wedge angle : {mw_angle}° (auto-detected from .aln)')
         else:
             print('ERROR: could not auto-detect missing wedge angle.')
-            print('       Pass --mw-angle explicitly (= 90 - max_tilt_angle).')
+            print('       Pass --mw-angle explicitly (= 2 * max_tilt_angle).')
             sys.exit(1)
     else:
         print(f'Missing wedge angle : {mw_angle}° (explicit --mw-angle)')
