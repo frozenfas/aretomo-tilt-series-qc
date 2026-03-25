@@ -37,11 +37,14 @@ Typical usage
 
 import sys
 import shutil
+import struct
 import datetime
 import subprocess
 import time
 from pathlib import Path
 import argparse
+
+import numpy as np
 
 from aretomo3_preprocess.shared.project_json import (
     load_or_create, update_section, args_to_dict,
@@ -52,6 +55,62 @@ from aretomo3_preprocess.commands.cryocare import (
     _load_tsselect_defocus,
     _stratified_sample,
 )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MRC I/O helpers (no mrcfile dependency)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _read_mrc(path: Path) -> np.ndarray:
+    """Read a float32 MRC volume as a (Z, Y, X) numpy array."""
+    with open(path, 'rb') as f:
+        hdr = f.read(1024)
+        nx, ny, nz = struct.unpack_from('<3i', hdr, 0)
+        mode = struct.unpack_from('<i', hdr, 12)[0]
+        nsymbt = struct.unpack_from('<i', hdr, 92)[0]  # extra header bytes
+        dtype_map = {0: np.int8, 1: np.int16, 2: np.float32, 6: np.uint16}
+        dtype = dtype_map.get(mode, np.float32)
+        f.seek(1024 + nsymbt)
+        data = np.frombuffer(f.read(), dtype=dtype).reshape(nz, ny, nx)
+    return data.astype(np.float32)
+
+
+def _write_mrc_float32(path: Path, data: np.ndarray):
+    """Write a float32 3D (Z, Y, X) array as an MRC2014 file."""
+    assert data.ndim == 3
+    data = data.astype(np.float32)
+    nz, ny, nx = data.shape
+    hdr = bytearray(1024)
+    struct.pack_into('<3i', hdr,  0, nx, ny, nz)          # NX NY NZ
+    struct.pack_into('<i',  hdr, 12, 2)                    # MODE 2 = float32
+    struct.pack_into('<3i', hdr, 28, nx, ny, nz)           # MX MY MZ
+    struct.pack_into('<3f', hdr, 40, float(nx), float(ny), float(nz))  # CELLA
+    struct.pack_into('<3f', hdr, 52, 90.0, 90.0, 90.0)    # CELLB angles
+    struct.pack_into('<3i', hdr, 64, 1, 2, 3)              # MAPC MAPR MAPS
+    struct.pack_into('<3f', hdr, 76, float(data.min()),
+                     float(data.max()), float(data.mean()))  # DMIN DMAX DMEAN
+    struct.pack_into('<i',  hdr, 88, 1)                    # ISPG = 1
+    hdr[208:212] = b'MAP '
+    hdr[212:216] = bytes([0x44, 0x44, 0x00, 0x00])        # MACHST little-endian
+    struct.pack_into('<f',  hdr, 216, float(np.std(data))) # RMS
+    with open(path, 'wb') as f:
+        f.write(bytes(hdr))
+        f.write(data.tobytes())
+
+
+def _bin3d(arr: np.ndarray, factor: int) -> np.ndarray:
+    """
+    Block-average a 3D (Z, Y, X) float32 array by integer factor.
+    Trailing voxels that don't fit a complete block are dropped.
+    """
+    nz, ny, nx = arr.shape
+    nz2 = nz // factor
+    ny2 = ny // factor
+    nx2 = nx // factor
+    return (arr[:nz2 * factor, :ny2 * factor, :nx2 * factor]
+            .reshape(nz2, factor, ny2, factor, nx2, factor)
+            .mean(axis=(1, 3, 5))
+            .astype(np.float32))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -117,6 +176,45 @@ def _stage_training_dirs(out_dir: Path, pairs: list,
     return evn_dir, odd_dir
 
 
+def _stage_binned_dirs(out_dir: Path, pairs: list,
+                       bin_factor: int, dry_run: bool = False) -> tuple:
+    """
+    Create binned MRC copies in <out_dir>/training_data/evn_b{N}/ and .../odd_b{N}/.
+
+    Files are written as float32 MRC.  Already-existing files are skipped
+    (safe to re-run).  Returns (evn_dir, odd_dir).
+    """
+    tag = f'b{bin_factor}'
+    td = out_dir / 'training_data'
+    evn_dir = td / f'evn_{tag}'
+    odd_dir = td / f'odd_{tag}'
+
+    prefix = '[DRY RUN] ' if dry_run else ''
+    print(f'{prefix}Staging bin-{bin_factor} training dirs:')
+    print(f'  {evn_dir}/')
+    print(f'  {odd_dir}/')
+
+    if dry_run:
+        return evn_dir, odd_dir
+
+    evn_dir.mkdir(parents=True, exist_ok=True)
+    odd_dir.mkdir(parents=True, exist_ok=True)
+
+    for i, pair in enumerate(pairs):
+        name = f'{pair["ts_name"]}.mrc'
+        for src_path, dst_dir in [(pair['evn'], evn_dir), (pair['odd'], odd_dir)]:
+            dst = dst_dir / name
+            if dst.exists():
+                continue
+            print(f'  Binning {src_path.name} → {dst.name} ... ', end='', flush=True)
+            vol = _read_mrc(src_path.resolve())
+            binned = _bin3d(vol, bin_factor)
+            _write_mrc_float32(dst, binned)
+            print(f'{vol.shape} → {binned.shape}')
+
+    return evn_dir, odd_dir
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CLI
 # ─────────────────────────────────────────────────────────────────────────────
@@ -147,6 +245,10 @@ def add_parser(subparsers):
                      help='Output directory (model checkpoints saved here)')
 
     tr = p.add_argument_group('training parameters')
+    tr.add_argument('--model', '-m', default=None, metavar='PATH|NAME',
+                    help='Starting model: path to a .sav checkpoint, or a '
+                         'built-in name (unet-3d, unet-3d-10a, unet-3d-20a). '
+                         'Default: topaz uses unet-3d.')
     tr.add_argument('--num-epochs', type=int, default=500,
                     help='Training epochs')
     tr.add_argument('--batch-size', type=int, default=10,
@@ -163,12 +265,23 @@ def add_parser(subparsers):
                     help='Validation patches sampled per volume')
     tr.add_argument('--save-interval', type=int, default=10,
                     help='Save a checkpoint every N epochs')
+    tr.add_argument('--patch-size', type=int, default=None, metavar='N',
+                    help='Denoise volumes in patches of this size (voxels). '
+                         'Default: topaz decides (usually full volume if it fits in memory).')
+    tr.add_argument('--patch-padding', type=int, default=None, metavar='N',
+                    help='Padding around each patch to reduce edge artefacts.')
+    tr.add_argument('--bin', type=int, default=1, metavar='N',
+                    help='Bin volumes by N before training (2 = half resolution). '
+                         'Binned MRCs are written to training_data/evn_bN/ and '
+                         'cached for re-runs.  Reduces RAM from loaded volumes '
+                         'by N^3; allows higher --n-train.')
 
     ctl = p.add_argument_group('run control')
     ctl.add_argument('--gpu', type=int, default=-2,
                      help='GPU device: >=0 single GPU, -2 all GPUs, -1 CPU')
-    ctl.add_argument('--num-workers', type=int, default=1,
-                     help='DataLoader workers')
+    ctl.add_argument('--num-workers', type=int, default=0,
+                     help='DataLoader workers (default 0 — avoids forking '
+                          'the pre-loaded dataset into each worker process)')
     ctl.add_argument('--topaz', dest='topaz_bin',
                      default='/opt/miniconda3/envs/topaz/bin/topaz',
                      help='Path to topaz executable')
@@ -245,8 +358,13 @@ def run(args):
         out_dir.mkdir(parents=True, exist_ok=True)
 
     # ── Stage training directories ────────────────────────────────────────
-    evn_dir, odd_dir = _stage_training_dirs(out_dir, train_pairs,
-                                            dry_run=args.dry_run)
+    bin_factor = getattr(args, 'bin', 1)
+    if bin_factor > 1:
+        evn_dir, odd_dir = _stage_binned_dirs(out_dir, train_pairs,
+                                              bin_factor, dry_run=args.dry_run)
+    else:
+        evn_dir, odd_dir = _stage_training_dirs(out_dir, train_pairs,
+                                                dry_run=args.dry_run)
 
     # ── Build command ─────────────────────────────────────────────────────
     model_prefix = str(out_dir / 'model')
@@ -265,6 +383,12 @@ def run(args):
         '--num-workers',   str(args.num_workers),
         '-d',              str(args.gpu),
     ]
+    if args.model:
+        cmd += ['-m', args.model]
+    if args.patch_size is not None:
+        cmd += ['-s', str(args.patch_size)]
+    if args.patch_padding is not None:
+        cmd += ['-p', str(args.patch_padding)]
 
     gpu_label = {-2: 'all GPUs', -1: 'CPU'}.get(args.gpu, f'GPU {args.gpu}')
     print(f'\n{prefix}Topaz command:')
@@ -301,6 +425,7 @@ def run(args):
             'args':       args_to_dict(args),
             'timestamp':  datetime.datetime.now().isoformat(timespec='seconds'),
             'n_vols':     len(train_pairs),
+            'bin_factor': bin_factor,
             'selected':   [p['ts_name'] for p in train_pairs],
             'output_dir': str(out_dir.resolve()),
             'model_prefix': model_prefix,

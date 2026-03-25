@@ -102,8 +102,8 @@ def resolve_selected_ts(csv_path: Optional[str] = None) -> Optional[Set[str]]:
     """
     Load the TS selection set from a ts_selection.csv file.
 
-    Returns the set of selected TS names (selected==1), or None if no
-    csv_path is given or the file cannot be read.
+    Returns the set of selected TS names (selected==1), or None if
+    csv_path is None or the file cannot be read.
     """
     if csv_path is None:
         return None
