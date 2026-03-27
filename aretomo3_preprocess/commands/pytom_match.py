@@ -463,9 +463,15 @@ def run(args):
             failed.append(prefix)
             continue
 
-        tlt_file, df_file, exp_file = _write_aux_files(
-            out_dir, prefix, tlt_out, defocus_out, exposure_out
-        )
+        if args.dry_run:
+            od = out_dir / prefix
+            tlt_file = od / f'{prefix}.tlt'
+            exp_file = od / f'{prefix}_exposure.txt'
+            df_file  = od / f'{prefix}_defocus.txt' if defocus_out is not None else None
+        else:
+            tlt_file, df_file, exp_file = _write_aux_files(
+                out_dir, prefix, tlt_out, defocus_out, exposure_out
+            )
 
         bmask = None
         if args.bmask_dir:
