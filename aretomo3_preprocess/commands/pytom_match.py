@@ -390,7 +390,8 @@ def run(args):
     else:
         vol_glob = 'ts-*_Vol.mrc'
 
-    vols = sorted(in_dir.glob(vol_glob))
+    vols = [v for v in sorted(in_dir.glob(vol_glob))
+            if '_EVN' not in v.name and '_ODD' not in v.name]
     if not vols and not args.vol_suffix:
         # Fallback: ts-*.mrc (older AreTomo3 output)
         vols = [v for v in sorted(in_dir.glob('ts-*.mrc'))
@@ -479,7 +480,15 @@ def run(args):
             out_subdir, args, bmask=bmask,
         )
 
-        print(f'  $ {" ".join(str(c) for c in cmd)}')
+        # Print command with one flag+value pair per line for readability
+        it = iter(cmd)
+        lines = ['  $ ' + next(it)]
+        for tok in it:
+            if tok.startswith('-'):
+                lines.append('      ' + tok)
+            else:
+                lines[-1] += '  ' + tok
+        print(' \\\n'.join(lines))
 
         if args.dry_run:
             print('  [dry-run: skipping execution]')
