@@ -37,11 +37,12 @@ Typical usage
       --select-ts run001_analysis/ts-select.csv \\
       --output pytom_match
 
-After template matching, extract candidates with:
-  pytom_extract_candidates.py \\
-      --tomogram-star pytom_match/pytom_match.star \\
-      --number-of-particles 2000 \\
-      --radius 150
+Optional: run candidate extraction immediately after each tomogram is matched
+so results can be inspected in 3dmod while the remaining TS are still running:
+
+  aretomo3-preprocess pytom-match \\
+      --input run001 ... \\
+      --extract --n-particles 2000 --tophat-filter --relion5-compat --imod
 """
 
 import re
@@ -51,6 +52,9 @@ import subprocess
 from pathlib import Path
 import argparse
 
+from aretomo3_preprocess.commands.pytom_extract import (
+    _find_pytom_extract, _star_to_mod,
+)
 from aretomo3_preprocess.shared.parsers import (
     parse_aln_file, parse_ctf_file, parse_tlt_file,
 )
@@ -345,6 +349,30 @@ def add_parser(subparsers):
     ctf.add_argument('--voltage', type=float, default=300,
                      help='Voltage (kV)')
 
+    ext = p.add_argument_group('extraction (runs immediately after each TS is matched)')
+    ext.add_argument('--extract', action='store_true',
+                     help='Run pytom_extract_candidates.py after each tomogram is matched '
+                          'so picks are available while remaining TS are still running')
+    ext.add_argument('--n-particles', type=int, default=None,
+                     help='Max candidates to extract per tomogram (required with --extract)')
+    ext.add_argument('--tophat-filter', action='store_true',
+                     help='Apply tophat background flattening before extraction '
+                          '(recommended)')
+    ext.add_argument('--tophat-bins', type=int, default=None,
+                     help='Number of bins for tophat filter')
+    ext.add_argument('--cut-off', type=float, default=None,
+                     help='Override automated LCCmax cut-off')
+    ext.add_argument('--n-false-positives', type=int, default=None,
+                     help='False positives for cut-off estimation (default 1)')
+    ext.add_argument('--relion5-compat', action='store_true',
+                     help='Write RELION5-compatible STAR files (required for --imod)')
+    ext.add_argument('--imod', action='store_true',
+                     help='Convert extracted STAR files to IMOD .mod point models '
+                          'for 3dmod visualisation (requires --relion5-compat). '
+                          'Adapted from rln2mod (https://github.com/Phaips/rln2mod).')
+    ext.add_argument('--imod-dir', default=None,
+                     help='Directory for .mod files (default: <output>/mod/)')
+
     ctl = p.add_argument_group('run control')
     ctl.add_argument('--output', '-o', default='pytom_match',
                      help='Output directory (per-TS subdirectories are created inside)')
@@ -505,8 +533,51 @@ def run(args):
         if ret.returncode != 0:
             print(f'  ERROR: pytom exited with code {ret.returncode}')
             failed.append(prefix)
-        else:
-            ok.append(prefix)
+            continue
+
+        ok.append(prefix)
+
+        # ── Extraction (immediate, per-TS) ─────────────────────────────────
+        if args.extract:
+            if args.n_particles is None:
+                print('  WARNING: --extract set but --n-particles not given — skipping extraction')
+            else:
+                if args.imod and not args.relion5_compat:
+                    args.relion5_compat = True
+
+                job_jsons = sorted(out_subdir.glob('*_job.json'))
+                if not job_jsons:
+                    print(f'  WARNING: no *_job.json found in {out_subdir} — skipping extraction')
+                else:
+                    job_json = job_jsons[0]
+                    extract_bin = _find_pytom_extract(args.pytom_dir)
+                    if not extract_bin:
+                        print(f'  WARNING: pytom_extract_candidates.py not found — skipping extraction')
+                    else:
+                        ecmd = [extract_bin, '-j', str(job_json),
+                                '-n', str(args.n_particles)]
+                        if args.particle_diameter:
+                            ecmd += ['--particle-diameter', str(args.particle_diameter)]
+                        if args.tophat_filter:
+                            ecmd += ['--tophat-filter']
+                        if args.tophat_bins is not None:
+                            ecmd += ['--tophat-bins', str(args.tophat_bins)]
+                        if args.cut_off is not None:
+                            ecmd += ['--cut-off', str(args.cut_off)]
+                        if args.n_false_positives is not None:
+                            ecmd += ['--number-of-false-positives', str(args.n_false_positives)]
+                        if args.relion5_compat:
+                            ecmd += ['--relion5-compat']
+
+                        print(f'\n  Extracting candidates...')
+                        eret = subprocess.run(ecmd)
+                        if eret.returncode != 0:
+                            print(f'  WARNING: extraction exited with code {eret.returncode}')
+                        elif args.imod:
+                            mod_dir = (Path(args.imod_dir).resolve()
+                                       if args.imod_dir else out_dir / 'mod')
+                            for star in sorted(out_subdir.glob('*_particles.star')):
+                                _star_to_mod(star, job_json, mod_dir)
 
     # ── Summary ────────────────────────────────────────────────────────────
     print(f'\n{sep}')
