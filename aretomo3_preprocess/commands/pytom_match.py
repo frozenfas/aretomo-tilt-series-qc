@@ -45,16 +45,16 @@ so results can be inspected in 3dmod while the remaining TS are still running:
       --extract --n-particles 2000 --tophat-filter --relion5-compat --imod
 """
 
+import json
 import re
+import shutil
+import struct
 import sys
 import datetime
 import subprocess
 from pathlib import Path
 import argparse
 
-from aretomo3_preprocess.commands.pytom_extract import (
-    _find_pytom_extract, _star_to_mod,
-)
 from aretomo3_preprocess.shared.parsers import (
     parse_aln_file, parse_ctf_file, parse_tlt_file,
 )
@@ -73,7 +73,6 @@ _PYTOM_BIN = '/opt/miniconda3/envs/pytom_tm/bin/pytom_match_template.py'
 
 def _find_pytom(pytom_dir=None):
     """Return path to pytom_match_template.py, or None if not found."""
-    import shutil
     candidates = []
     if pytom_dir:
         candidates.append(str(Path(pytom_dir) / 'pytom_match_template.py'))
@@ -82,6 +81,110 @@ def _find_pytom(pytom_dir=None):
         if Path(c).exists():
             return c
     return shutil.which('pytom_match_template.py')
+
+
+_PYTOM_EXTRACT_BIN = '/opt/miniconda3/envs/pytom_tm/bin/pytom_extract_candidates.py'
+
+
+def _find_pytom_extract(pytom_dir=None):
+    """Return path to pytom_extract_candidates.py, or None if not found."""
+    candidates = []
+    if pytom_dir:
+        candidates.append(str(Path(pytom_dir) / 'pytom_extract_candidates.py'))
+    candidates.append(_PYTOM_EXTRACT_BIN)
+    for c in candidates:
+        if Path(c).exists():
+            return c
+    return shutil.which('pytom_extract_candidates.py')
+
+
+def _mrc_dims(mrc_path):
+    """Read (nx, ny, nz) from an MRC header without mrcfile dependency."""
+    with open(mrc_path, 'rb') as f:
+        hdr = f.read(12)
+    return struct.unpack_from('<3i', hdr, 0)
+
+
+def _find_job_jsons(input_dir, selected_ts=None):
+    """Return sorted list of (ts_name, job_json_path) tuples."""
+    jobs = []
+    for ts_dir in sorted(Path(input_dir).iterdir()):
+        if not ts_dir.is_dir():
+            continue
+        ts_name = ts_dir.name
+        if selected_ts is not None and ts_name not in selected_ts:
+            continue
+        matches = sorted(ts_dir.glob('*_job.json'))
+        if matches:
+            jobs.append((ts_name, matches[0]))
+    return jobs
+
+
+def _star_to_mod(star_path, job_json_path, mod_dir):
+    """
+    Convert a RELION5 particles STAR file to an IMOD .mod point model.
+
+    Adapted from rln2mod by Phaips (https://github.com/Phaips/rln2mod).
+    """
+    try:
+        import starfile
+        import warnings
+        warnings.filterwarnings('ignore', category=FutureWarning)
+    except ImportError:
+        print('  WARNING: starfile not installed — skipping IMOD conversion')
+        print('           conda run -n pytom_tm pip install starfile')
+        return False
+
+    with open(job_json_path) as fh:
+        job = json.load(fh)
+    tomo_path = job.get('tomogram') or job.get('tomogram_path') or job.get('volume_path')
+    if not tomo_path or not Path(tomo_path).exists():
+        print(f'  WARNING: cannot find tomogram path in {job_json_path.name} — skipping IMOD conversion')
+        return False
+
+    nx, ny, nz = _mrc_dims(tomo_path)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', FutureWarning)
+        data = starfile.read(str(star_path))
+    df = data[next(iter(data))] if isinstance(data, dict) else data
+
+    required = {'rlnCenteredCoordinateXAngst', 'rlnCenteredCoordinateYAngst',
+                 'rlnCenteredCoordinateZAngst', 'rlnTomoTiltSeriesPixelSize'}
+    missing = required - set(df.columns)
+    if missing:
+        print(f'  WARNING: STAR file missing columns {missing} — '
+              f're-run extraction with --relion5-compat')
+        return False
+
+    px = df['rlnTomoTiltSeriesPixelSize']
+    xs = df['rlnCenteredCoordinateXAngst'] / px + nx / 2
+    ys = df['rlnCenteredCoordinateYAngst'] / px + ny / 2
+    zs = df['rlnCenteredCoordinateZAngst'] / px + nz / 2
+
+    mod_dir.mkdir(parents=True, exist_ok=True)
+    stem = star_path.stem
+    txt  = mod_dir / f'{stem}.txt'
+    mod  = mod_dir / f'{stem}.mod'
+
+    with open(txt, 'w') as fh:
+        for x, y, z in zip(xs, ys, zs):
+            fh.write(f'{x:.6f} {y:.6f} {z:.6f}\n')
+
+    point2model = shutil.which('point2model')
+    if not point2model:
+        print('  WARNING: point2model not found on PATH — load IMOD first')
+        txt.unlink(missing_ok=True)
+        return False
+
+    ret = subprocess.run([point2model, str(txt), str(mod)], capture_output=True)
+    if ret.returncode != 0:
+        print(f'  WARNING: point2model failed: {ret.stderr.decode().strip()}')
+        return False
+
+    txt.unlink(missing_ok=True)
+    print(f'  → {mod}  ({len(df)} particles)')
+    return True
 
 
 def _find_tomogram(aretomo_dir, prefix, vol_suffix):
@@ -273,8 +376,8 @@ def add_parser(subparsers):
     )
 
     inp = p.add_argument_group('input')
-    inp.add_argument('--input', '-i', required=True,
-                     help='AreTomo3 output directory')
+    inp.add_argument('--input', '-i', default=None,
+                     help='AreTomo3 output directory (not required with --extract-only)')
     inp.add_argument('--vol-suffix', default='',
                      help='Volume file suffix, e.g. "_b4" for ts-xxx_b4_Vol.mrc; '
                           'leave empty to auto-detect (tries _Vol.mrc first)')
@@ -349,6 +452,16 @@ def add_parser(subparsers):
     ctf.add_argument('--voltage', type=float, default=300,
                      help='Voltage (kV)')
 
+    qc = p.add_argument_group('QC report')
+    qc.add_argument('--analyse', action='store_true',
+                    help='Generate an HTML report with central-slab tomogram and '
+                         'score map side by side for each matched tomogram')
+    qc.add_argument('--analyse-thickness', type=float, default=300.0, metavar='ANGST',
+                    help='Slab thickness in Å for QC projections (default: 300 Å)')
+    qc.add_argument('--analyse-output', default=None, metavar='HTML',
+                    help='Path for QC report HTML '
+                         '(default: <output>/pytom_match_qc.html)')
+
     ext = p.add_argument_group('extraction (runs immediately after each TS is matched)')
     ext.add_argument('--extract', action='store_true',
                      help='Run pytom_extract_candidates.py after each tomogram is matched '
@@ -376,8 +489,11 @@ def add_parser(subparsers):
     ctl = p.add_argument_group('run control')
     ctl.add_argument('--output', '-o', default='pytom_match',
                      help='Output directory (per-TS subdirectories are created inside)')
+    ctl.add_argument('--extract-only', action='store_true',
+                     help='Skip template matching; run extraction on existing job JSONs '
+                          'in --output.  --input is not required in this mode.')
     ctl.add_argument('--pytom-dir', default=None,
-                     help='Directory containing pytom_match_template.py '
+                     help='Directory containing pytom binaries '
                           '(default: /opt/miniconda3/envs/pytom_tm/bin/)')
     ctl.add_argument('--dry-run', action='store_true',
                      help='Write aux files and print commands without running pytom')
@@ -390,11 +506,53 @@ def add_parser(subparsers):
 # Main run
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _build_extract_cmd(extract_bin, job_json, args):
+    """Build pytom_extract_candidates.py command."""
+    cmd = [extract_bin, '-j', str(job_json), '-n', str(args.n_particles)]
+    if args.particle_diameter:
+        cmd += ['--particle-diameter', str(args.particle_diameter)]
+    if args.tophat_filter:
+        cmd += ['--tophat-filter']
+    if args.tophat_bins is not None:
+        cmd += ['--tophat-bins', str(args.tophat_bins)]
+    if args.cut_off is not None:
+        cmd += ['--cut-off', str(args.cut_off)]
+    if args.n_false_positives is not None:
+        cmd += ['--number-of-false-positives', str(args.n_false_positives)]
+    if args.relion5_compat:
+        cmd += ['--relion5-compat']
+    if getattr(args, 'log', None):
+        cmd += ['--log', args.log]
+    return cmd
+
+
+def _print_cmd(cmd):
+    it = iter(cmd)
+    lines = ['  $ ' + next(it)]
+    for tok in it:
+        if tok.startswith('-'):
+            lines.append('      ' + tok)
+        else:
+            lines[-1] += '  ' + tok
+    print(' \\\n'.join(lines))
+
+
 def run(args):
-    in_dir  = Path(args.input).resolve()
     out_dir = Path(args.output).resolve()
     sep     = '─' * 70
 
+    extract_only = getattr(args, 'extract_only', False)
+
+    if extract_only:
+        _run_extract_only(args, out_dir, sep)
+        return
+
+    # ── Matching mode ─────────────────────────────────────────────────────
+    if args.input is None:
+        print('ERROR: --input is required unless --extract-only is set')
+        sys.exit(1)
+
+    in_dir = Path(args.input).resolve()
     if not in_dir.is_dir():
         print(f'ERROR: --input {in_dir} not found')
         sys.exit(1)
@@ -421,7 +579,6 @@ def run(args):
     vols = [v for v in sorted(in_dir.glob(vol_glob))
             if '_EVN' not in v.name and '_ODD' not in v.name]
     if not vols and not args.vol_suffix:
-        # Fallback: ts-*.mrc (older AreTomo3 output)
         vols = [v for v in sorted(in_dir.glob('ts-*.mrc'))
                 if not any(tag in v.name for tag in ('_EVN', '_ODD', '_CTF'))]
 
@@ -470,6 +627,20 @@ def run(args):
         print(f'  ... ({len(prefixes) - 10} more)')
     print(sep)
 
+    # ── QC setup ──────────────────────────────────────────────────────────
+    do_qc    = getattr(args, 'analyse', False)
+    qc_thick = getattr(args, 'analyse_thickness', 300.0)
+    qc_entries = []
+
+    if do_qc:
+        try:
+            from aretomo3_preprocess.shared.volume_qc import (
+                central_slab_projection, projection_to_b64png, make_comparison_html,
+            )
+        except ImportError as e:
+            print(f'WARNING: --analyse requires mrcfile and matplotlib ({e}); skipping report')
+            do_qc = False
+
     # ── Process each tomogram ──────────────────────────────────────────────
     ok, failed = [], []
 
@@ -514,15 +685,7 @@ def run(args):
             out_subdir, args, bmask=bmask,
         )
 
-        # Print command with one flag+value pair per line for readability
-        it = iter(cmd)
-        lines = ['  $ ' + next(it)]
-        for tok in it:
-            if tok.startswith('-'):
-                lines.append('      ' + tok)
-            else:
-                lines[-1] += '  ' + tok
-        print(' \\\n'.join(lines))
+        _print_cmd(cmd)
 
         if args.dry_run:
             print('  [dry-run: skipping execution]')
@@ -537,39 +700,47 @@ def run(args):
 
         ok.append(prefix)
 
-        # ── Extraction (immediate, per-TS) ─────────────────────────────────
+        # ── QC (score map) ────────────────────────────────────────────────
+        if do_qc:
+            before_b64 = after_b64 = None
+            proj = central_slab_projection(tomo, qc_thick)
+            if proj:
+                before_b64 = projection_to_b64png(proj['img'])
+            score_files = sorted(out_subdir.glob('*_scores.mrc'))
+            if score_files:
+                sproj = central_slab_projection(score_files[0], qc_thick)
+                if sproj:
+                    after_b64 = projection_to_b64png(sproj['img'], pct=(50, 99.9))
+            qc_entries.append({
+                'ts_name':     prefix,
+                'before_b64':  before_b64,
+                'after_b64':   after_b64,
+                'before_path': str(tomo),
+                'after_path':  str(score_files[0]) if score_files else '',
+                'metadata': {
+                    'template': Path(args.template).name,
+                    'voxel':    f'{args.voxel_size} Å',
+                },
+            })
+
+        # ── Inline extraction ─────────────────────────────────────────────
         if args.extract:
             if args.n_particles is None:
-                print('  WARNING: --extract set but --n-particles not given — skipping extraction')
+                print('  WARNING: --extract set but --n-particles not given — skipping')
             else:
                 if args.imod and not args.relion5_compat:
                     args.relion5_compat = True
-
                 job_jsons = sorted(out_subdir.glob('*_job.json'))
                 if not job_jsons:
-                    print(f'  WARNING: no *_job.json found in {out_subdir} — skipping extraction')
+                    print(f'  WARNING: no *_job.json in {out_subdir} — skipping extraction')
                 else:
-                    job_json = job_jsons[0]
                     extract_bin = _find_pytom_extract(args.pytom_dir)
                     if not extract_bin:
-                        print(f'  WARNING: pytom_extract_candidates.py not found — skipping extraction')
+                        print('  WARNING: pytom_extract_candidates.py not found')
                     else:
-                        ecmd = [extract_bin, '-j', str(job_json),
-                                '-n', str(args.n_particles)]
-                        if args.particle_diameter:
-                            ecmd += ['--particle-diameter', str(args.particle_diameter)]
-                        if args.tophat_filter:
-                            ecmd += ['--tophat-filter']
-                        if args.tophat_bins is not None:
-                            ecmd += ['--tophat-bins', str(args.tophat_bins)]
-                        if args.cut_off is not None:
-                            ecmd += ['--cut-off', str(args.cut_off)]
-                        if args.n_false_positives is not None:
-                            ecmd += ['--number-of-false-positives', str(args.n_false_positives)]
-                        if args.relion5_compat:
-                            ecmd += ['--relion5-compat']
-
-                        print(f'\n  Extracting candidates...')
+                        job_json = job_jsons[0]
+                        ecmd = _build_extract_cmd(extract_bin, job_json, args)
+                        print('\n  Extracting candidates...')
                         eret = subprocess.run(ecmd)
                         if eret.returncode != 0:
                             print(f'  WARNING: extraction exited with code {eret.returncode}')
@@ -585,11 +756,203 @@ def run(args):
     if failed:
         print(f'Failed: {", ".join(failed)}')
 
+    # ── QC report ─────────────────────────────────────────────────────────
+    if do_qc and qc_entries:
+        html_path = (Path(args.analyse_output) if args.analyse_output
+                     else out_dir / 'pytom_match_qc.html')
+        make_comparison_html(
+            entries      = qc_entries,
+            out_path     = html_path,
+            title        = 'pytom-match QC',
+            command      = ' '.join(sys.argv),
+            before_label = 'Tomogram',
+            after_label  = 'Score map',
+            slab_angst   = qc_thick,
+        )
+
     if args.dry_run:
         return
 
     update_section(
         section='pytom_match',
+        values={
+            'command':     ' '.join(sys.argv),
+            'args':        args_to_dict(args),
+            'timestamp':   datetime.datetime.now().isoformat(timespec='seconds'),
+            'n_processed': len(ok),
+            'failed':      failed,
+            'output_dir':  str(out_dir),
+        },
+        backup_dir=out_dir,
+    )
+
+
+def _run_extract_only(args, out_dir, sep):
+    """Run extraction on existing job JSONs in out_dir."""
+    if not out_dir.is_dir():
+        print(f'ERROR: --output {out_dir} not found (run template matching first)')
+        sys.exit(1)
+
+    if args.n_particles is None:
+        print('ERROR: --n-particles is required with --extract-only')
+        sys.exit(1)
+
+    if args.imod and not args.relion5_compat:
+        print('WARNING: --imod requires --relion5-compat; adding automatically.')
+        args.relion5_compat = True
+
+    extract_bin = _find_pytom_extract(args.pytom_dir)
+    if not extract_bin:
+        msg = (f'pytom_extract_candidates.py not found.\n'
+               f'  Expected at {_PYTOM_EXTRACT_BIN}\n'
+               f'  Or specify: --pytom-dir /path/to/pytom_tm/bin')
+        if args.dry_run:
+            print(f'WARNING: {msg} (dry-run: continuing)')
+            extract_bin = 'pytom_extract_candidates.py'
+        else:
+            print(f'ERROR: {msg}')
+            sys.exit(1)
+
+    mod_dir = Path(args.imod_dir).resolve() if args.imod_dir else out_dir / 'mod'
+
+    # Find job JSONs
+    selected_ts = resolve_selected_ts(getattr(args, 'select_ts', None))
+    jobs = _find_job_jsons(out_dir, selected_ts)
+
+    if getattr(args, 'include', None):
+        inc = args.include[0].split(',') if len(args.include) == 1 else args.include
+        jobs = [(n, j) for n, j in jobs
+                if any(re.match(f'^{pat.replace("*", ".*")}$', n) for pat in inc)]
+    if getattr(args, 'exclude', None):
+        exc = args.exclude[0].split(',') if len(args.exclude) == 1 else args.exclude
+        jobs = [(n, j) for n, j in jobs
+                if not any(re.match(f'^{pat.replace("*", ".*")}$', n) for pat in exc)]
+
+    if not jobs:
+        print(f'ERROR: no *_job.json files found in {out_dir}/')
+        sys.exit(1)
+
+    print(f'Tomograms to extract: {len(jobs)}')
+    print(sep)
+    for ts_name, _ in jobs[:10]:
+        print(f'  {ts_name}')
+    if len(jobs) > 10:
+        print(f'  ... ({len(jobs) - 10} more)')
+    print(sep)
+
+    # ── QC setup ──────────────────────────────────────────────────────────
+    do_qc    = getattr(args, 'analyse', False)
+    qc_thick = getattr(args, 'analyse_thickness', 300.0)
+    qc_entries = []
+
+    if do_qc:
+        try:
+            import warnings as _warnings
+            import starfile as _starfile
+            from aretomo3_preprocess.shared.volume_qc import (
+                slab_with_picks_b64, central_slab_projection,
+                projection_to_b64png, make_picks_html,
+            )
+        except ImportError as e:
+            print(f'WARNING: --analyse requires starfile and matplotlib ({e}); skipping')
+            do_qc = False
+
+    ok, failed = [], []
+
+    for i, (ts_name, job_json) in enumerate(jobs):
+        print(f'\n[{i+1}/{len(jobs)}] {ts_name}')
+
+        cmd = _build_extract_cmd(extract_bin, job_json, args)
+        _print_cmd(cmd)
+
+        if args.dry_run:
+            print('  [dry-run: skipping execution]')
+            ok.append(ts_name)
+            continue
+
+        ret = subprocess.run(cmd)
+        if ret.returncode != 0:
+            print(f'  ERROR: extraction exited with code {ret.returncode}')
+            failed.append(ts_name)
+            continue
+
+        ok.append(ts_name)
+
+        if args.imod:
+            star_files = sorted(job_json.parent.glob('*_particles.star'))
+            for star in star_files:
+                _star_to_mod(star, job_json, mod_dir)
+
+        # ── QC (picks overlay) ────────────────────────────────────────────
+        if do_qc:
+            with open(job_json) as fh:
+                job = json.load(fh)
+            tomo_path = job.get('tomogram') or job.get('tomogram_path') or job.get('volume_path')
+            star_files  = sorted(job_json.parent.glob('*_particles.star'))
+            score_files = sorted(job_json.parent.glob('*_scores.mrc'))
+            entry = {
+                'ts_name':   ts_name,
+                'img_b64':   None,
+                'score_b64': None,
+                'n_total':   0,
+                'n_shown':   0,
+                'tomo_path': tomo_path or '',
+                'metadata':  {},
+            }
+            if star_files and tomo_path and Path(tomo_path).exists():
+                try:
+                    with _warnings.catch_warnings():
+                        _warnings.simplefilter('ignore')
+                        data = _starfile.read(str(star_files[0]))
+                    df = data[next(iter(data))] if isinstance(data, dict) else data
+                    result = slab_with_picks_b64(
+                        tomo_path, df,
+                        slab_angst=qc_thick,
+                        particle_diameter=args.particle_diameter,
+                    )
+                    score_b64 = None
+                    if score_files:
+                        sproj = central_slab_projection(score_files[0], qc_thick)
+                        if sproj:
+                            score_b64 = projection_to_b64png(sproj['img'], pct=(50, 99.9))
+                    if result:
+                        entry.update({
+                            'img_b64':   result['img_b64'],
+                            'score_b64': score_b64,
+                            'n_total':   result['n_total'],
+                            'n_shown':   result['n_shown'],
+                            'metadata': {
+                                'slab':   f'{result["slab_a"]:.0f} Å  ({result["vox"]:.2f} Å/px)',
+                                'picked': f'{result["n_shown"]} / {result["n_total"]} in slab',
+                            },
+                        })
+                except Exception as exc:
+                    print(f'  WARNING: QC render failed: {exc}')
+            qc_entries.append(entry)
+
+    print(f'\n{sep}')
+    print(f'Done.  {len(ok)} succeeded, {len(failed)} failed.')
+    if failed:
+        print(f'Failed: {", ".join(failed)}')
+    if args.imod and not args.dry_run and ok:
+        print(f'IMOD models: {mod_dir}/')
+
+    if do_qc and qc_entries:
+        html_path = (Path(args.analyse_output) if args.analyse_output
+                     else out_dir / 'pytom_extract_qc.html')
+        make_picks_html(
+            entries    = qc_entries,
+            out_path   = html_path,
+            title      = 'pytom-extract QC',
+            command    = ' '.join(sys.argv),
+            slab_angst = qc_thick,
+        )
+
+    if args.dry_run:
+        return
+
+    update_section(
+        section='pytom_extract',
         values={
             'command':     ' '.join(sys.argv),
             'args':        args_to_dict(args),
