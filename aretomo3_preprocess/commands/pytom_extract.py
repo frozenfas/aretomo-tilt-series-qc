@@ -29,6 +29,7 @@ Typical usage
 """
 
 import json
+import re
 import shutil
 import struct
 import sys
@@ -102,7 +103,7 @@ def _star_to_mod(star_path, job_json_path, mod_dir):
     # Get tomogram dimensions from the job JSON
     with open(job_json_path) as fh:
         job = json.load(fh)
-    tomo_path = job.get('tomogram_path') or job.get('volume_path')
+    tomo_path = job.get('tomogram') or job.get('tomogram_path') or job.get('volume_path')
     if not tomo_path or not Path(tomo_path).exists():
         print(f'  WARNING: cannot find tomogram path in {job_json_path.name} — skipping IMOD conversion')
         return False
@@ -170,6 +171,11 @@ def add_parser(subparsers):
                      help='pytom-match output directory (contains per-TS subdirectories)')
     inp.add_argument('--select-ts', default=None, metavar='CSV',
                      help='ts-select.csv; only process selected TS')
+    inp.add_argument('--include', nargs='+',
+                     help='Process only these TS names (wildcards supported; '
+                          'comma-separated or space-separated)')
+    inp.add_argument('--exclude', nargs='+',
+                     help='Exclude these TS names (wildcards supported)')
 
     ext = p.add_argument_group('extraction (pytom_extract_candidates.py)')
     ext.add_argument('--n-particles', '-n', type=int, required=True,
@@ -201,6 +207,16 @@ def add_parser(subparsers):
                            'Adapted from rln2mod (https://github.com/Phaips/rln2mod).')
     imod.add_argument('--imod-dir', default=None,
                       help='Directory for .mod files (default: <input>/mod/)')
+
+    qc = p.add_argument_group('QC report')
+    qc.add_argument('--analyse', action='store_true',
+                    help='Generate an HTML report showing particle picks overlaid '
+                         'on the central slab of each tomogram')
+    qc.add_argument('--analyse-thickness', type=float, default=300.0, metavar='ANGST',
+                    help='Slab thickness in Å for QC report (default: 300 Å)')
+    qc.add_argument('--analyse-output', default=None, metavar='HTML',
+                    help='Path for QC report HTML '
+                         '(default: <input>/pytom_extract_qc.html)')
 
     ctl = p.add_argument_group('run control')
     ctl.add_argument('--pytom-dir', default=None,
@@ -248,6 +264,16 @@ def run(args):
     selected_ts = resolve_selected_ts(getattr(args, 'select_ts', None))
     jobs = _find_job_jsons(in_dir, selected_ts)
 
+    # include / exclude filtering
+    if getattr(args, 'include', None):
+        inc = args.include[0].split(',') if len(args.include) == 1 else args.include
+        jobs = [(n, j) for n, j in jobs
+                if any(re.match(f'^{pat.replace("*", ".*")}$', n) for pat in inc)]
+    if getattr(args, 'exclude', None):
+        exc = args.exclude[0].split(',') if len(args.exclude) == 1 else args.exclude
+        jobs = [(n, j) for n, j in jobs
+                if not any(re.match(f'^{pat.replace("*", ".*")}$', n) for pat in exc)]
+
     if not jobs:
         print(f'ERROR: no *_job.json files found in {in_dir}/')
         sys.exit(1)
@@ -259,6 +285,22 @@ def run(args):
     if len(jobs) > 10:
         print(f'  ... ({len(jobs) - 10} more)')
     print(sep)
+
+    # ── QC setup ──────────────────────────────────────────────────────────────
+    do_qc    = getattr(args, 'analyse', False)
+    qc_thick = getattr(args, 'analyse_thickness', 300.0)
+    qc_entries = []
+
+    if do_qc:
+        try:
+            import warnings
+            import starfile as _starfile
+            from aretomo3_preprocess.shared.volume_qc import (
+                slab_with_picks_b64, make_picks_html,
+            )
+        except ImportError as e:
+            print(f'WARNING: --analyse requires starfile and matplotlib ({e}); skipping report')
+            do_qc = False
 
     ok, failed = [], []
 
@@ -318,6 +360,59 @@ def run(args):
                 for star in star_files:
                     _star_to_mod(star, job_json, mod_dir)
 
+        # QC: render central slab with picks
+        if do_qc:
+            with open(job_json) as fh:
+                job = json.load(fh)
+            tomo_path = job.get('tomogram') or job.get('tomogram_path') or job.get('volume_path')
+            star_files = sorted(job_json.parent.glob('*_particles.star'))
+            entry = {
+                'ts_name':   ts_name,
+                'img_b64':   None,
+                'n_total':   0,
+                'n_shown':   0,
+                'tomo_path': tomo_path or '',
+                'metadata':  {},
+            }
+            score_files = sorted(job_json.parent.glob('*_scores.mrc'))
+            score_path  = score_files[0] if score_files else None
+
+            if star_files and tomo_path and Path(tomo_path).exists():
+                try:
+                    from aretomo3_preprocess.shared.volume_qc import (
+                        central_slab_projection, projection_to_b64png,
+                    )
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore')
+                        data = _starfile.read(str(star_files[0]))
+                    df = data[next(iter(data))] if isinstance(data, dict) else data
+                    result = slab_with_picks_b64(
+                        tomo_path, df,
+                        slab_angst=qc_thick,
+                        particle_diameter=args.particle_diameter,
+                    )
+                    # Score map
+                    score_b64 = None
+                    if score_path and score_path.exists():
+                        proj = central_slab_projection(score_path, qc_thick)
+                        if proj:
+                            score_b64 = projection_to_b64png(proj['img'], pct=(50, 99.9))
+
+                    if result:
+                        entry.update({
+                            'img_b64':   result['img_b64'],
+                            'score_b64': score_b64,
+                            'n_total':   result['n_total'],
+                            'n_shown':   result['n_shown'],
+                            'metadata': {
+                                'slab':   f'{result["slab_a"]:.0f} Å  ({result["vox"]:.2f} Å/px)',
+                                'picked': f'{result["n_shown"]} / {result["n_total"]} in slab',
+                            },
+                        })
+                except Exception as exc:
+                    print(f'  WARNING: QC render failed: {exc}')
+            qc_entries.append(entry)
+
     # Summary
     print(f'\n{sep}')
     print(f'Done.  {len(ok)} succeeded, {len(failed)} failed.')
@@ -325,6 +420,18 @@ def run(args):
         print(f'Failed: {", ".join(failed)}')
     if args.imod and not args.dry_run and ok:
         print(f'IMOD models: {mod_dir}/')
+
+    # QC report
+    if do_qc and qc_entries:
+        html_path = (Path(args.analyse_output) if args.analyse_output
+                     else in_dir / 'pytom_extract_qc.html')
+        make_picks_html(
+            entries    = qc_entries,
+            out_path   = html_path,
+            title      = 'pytom-extract QC',
+            command    = ' '.join(sys.argv),
+            slab_angst = qc_thick,
+        )
 
     if args.dry_run:
         return

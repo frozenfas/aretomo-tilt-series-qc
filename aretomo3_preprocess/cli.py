@@ -5,7 +5,7 @@ from aretomo3_preprocess.commands import (
     analyse, trim_ts, check_gain_transform, validate_mdoc,
     rename_ts, run_aretomo3, run_aretomo3_per_ts, cryocare, enrich, select_ts,
     imod_mtffilter, topaz_denoise3d, topaz_train, deep_dewedge, deep_dewedge_mw,
-    aln_edit, pytom_match, pytom_extract,
+    aln_edit, pytom_match, pytom_extract, membrain_seg, slabify, simple_box_mask,
 )
 
 
@@ -35,6 +35,9 @@ def main():
     deep_dewedge_mw.add_parser(sub)
     pytom_match.add_parser(sub)
     pytom_extract.add_parser(sub)
+    membrain_seg.add_parser(sub)
+    slabify.add_parser(sub)
+    simple_box_mask.add_parser(sub)
 
     args = ap.parse_args()
     args.func(args)

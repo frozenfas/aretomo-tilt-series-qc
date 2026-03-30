@@ -30,6 +30,7 @@ from pathlib import Path
 import argparse
 
 from aretomo3_preprocess.shared.project_state import get_defocus_data
+from aretomo3_preprocess.shared.output_guard import check_output_dir
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -138,10 +139,22 @@ def add_parser(subparsers):
                      help='Also process EVN/ODD half-set volumes '
                           '(ts-xxx_EVN_Vol.mrc and ts-xxx_ODD_Vol.mrc)')
 
+    qc = p.add_argument_group('QC report')
+    qc.add_argument('--analyse', action='store_true',
+                    help='Generate an HTML QC report with side-by-side before/after '
+                         'central-slab projections for each processed volume')
+    qc.add_argument('--analyse-thickness', type=float, default=300.0, metavar='ANGST',
+                    help='Slab thickness in Å for QC projections (default: 300 Å)')
+    qc.add_argument('--analyse-output', default=None, metavar='HTML',
+                    help='Path for QC report HTML '
+                         '(default: <output>/mtffilter_qc.html)')
+
     ctl = p.add_argument_group('run control')
     ctl.add_argument('--mtffilter', dest='mtffilter_bin', default='mtffilter',
                      help='Path to or name of the mtffilter executable '
                           '(default: mtffilter)')
+    ctl.add_argument('--clean', action='store_true',
+                     help='Remove existing output directory before running')
     ctl.add_argument('--dry-run', action='store_true',
                      help='Print commands without executing')
 
@@ -160,10 +173,16 @@ def run(args):
         sys.exit(1)
 
     out_dir = Path(args.output) if args.output else in_dir / 'mtffilter_vol'
+    out_dir = check_output_dir(out_dir, clean=args.clean, dry_run=args.dry_run)
 
     # ── Defocus and TS selection ──────────────────────────────────────────────
     defocus_map  = {}    # {ts_name: float µm}
     selected_set = None  # None = process all
+
+    summary = []   # collected for bottom-of-output printing in dry-run mode
+    if args.dry_run and Path(out_dir).exists():
+        summary.append(f'NOTE: output directory already exists: {out_dir}')
+        summary.append(f'      (would prompt or require --clean in a real run)')
 
     if args.select_ts:
         csv_path = Path(args.select_ts)
@@ -171,25 +190,21 @@ def run(args):
             print(f'ERROR: --select-ts {csv_path} not found')
             sys.exit(1)
         defocus_map, selected_set = _load_tsselect(csv_path)
-        print(f'TS selection    : {len(selected_set)} selected from {csv_path.name}')
-        n_def = len(defocus_map)
-        print(f'Defocus values  : {n_def} from ts-select.csv')
+        summary.append(f'TS selection    : {len(selected_set)} selected from {csv_path.name}')
+        summary.append(f'Defocus values  : {len(defocus_map)} from ts-select.csv')
 
     # project.json defocus_data as fallback
     proj_defocus = get_defocus_data() or {}
     if proj_defocus and not defocus_map:
-        print(f'Defocus values  : {len(proj_defocus)} from project.json '
-              f'(defocus_data)')
+        summary.append(f'Defocus values  : {len(proj_defocus)} from project.json (defocus_data)')
 
     # ── Find volume files ─────────────────────────────────────────────────────
     sfx = args.vol_suffix
     glob_patterns = [f'ts-*{sfx}.mrc']
     if args.halves:
         if sfx == '_Vol':
-            # Single-bin: EVN/ODD appear before Vol in the name
             glob_patterns += ['ts-*_EVN_Vol.mrc', 'ts-*_ODD_Vol.mrc']
         else:
-            # Multi-bin: EVN/ODD appear after the bin suffix
             glob_patterns += [f'ts-*{sfx}_EVN.mrc', f'ts-*{sfx}_ODD.mrc']
 
     vol_files = []
@@ -197,8 +212,6 @@ def run(args):
         vol_files.extend(in_dir.glob(pat))
     vol_files = sorted(set(vol_files))
 
-    # The wildcard glob ts-*_Vol.mrc also matches _EVN_Vol.mrc / _ODD_Vol.mrc.
-    # Exclude half-sets unless --halves was requested.
     if not args.halves:
         vol_files = [
             f for f in vol_files
@@ -215,32 +228,34 @@ def run(args):
         before    = len(vol_files)
         vol_files = [f for f in vol_files
                      if _ts_name_from_vol(f, sfx) in selected_set]
-        print(f'After selection : {len(vol_files)} / {before} volumes')
+        summary.append(f'After selection : {len(vol_files)} / {before} volumes')
 
     if not vol_files:
         print('No volumes to process after selection filter.')
         sys.exit(0)
 
-    print(f'Volumes to process: {len(vol_files)}')
-    print(f'Output directory  : {out_dir}/')
+    summary.append(f'Volumes to process: {len(vol_files)}')
+    summary.append(f'Output directory  : {out_dir}/')
 
     # ── Resolve pixel size ────────────────────────────────────────────────────
-    # Read the header of the first volume only — all volumes from the same run
-    # have the same binning and therefore the same pixel size.
     header_apix = _read_one_voxel_size(vol_files[0])
     if header_apix is not None:
         if args.apix is not None and abs(args.apix - header_apix) > 0.01:
             print(f'WARNING: --apix {args.apix} Å differs from MRC header '
                   f'{header_apix} Å ({vol_files[0].name}); using MRC header value.')
         apix = header_apix
-        print(f'Pixel size        : {apix} Å  (from MRC header {vol_files[0].name})')
+        summary.append(f'Pixel size        : {apix:.4f} Å  (from MRC header {vol_files[0].name})')
     elif args.apix is not None:
         apix = args.apix
-        print(f'Pixel size        : {apix} Å  (from --apix)')
+        summary.append(f'Pixel size        : {apix} Å  (from --apix)')
     else:
         print('ERROR: cannot determine pixel size — install mrcfile or supply --apix')
         sys.exit(1)
-    print()
+
+    if not args.dry_run:
+        for line in summary:
+            print(line)
+        print()
 
     # ── Check binary ──────────────────────────────────────────────────────────
     if not args.dry_run:
@@ -251,6 +266,20 @@ def run(args):
                   '--mtffilter /path/to/mtffilter')
             sys.exit(1)
         out_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── QC setup ──────────────────────────────────────────────────────────────
+    do_qc    = getattr(args, 'analyse', False)
+    qc_thick = getattr(args, 'analyse_thickness', 300.0)
+    qc_entries = []
+
+    if do_qc:
+        try:
+            from aretomo3_preprocess.shared.volume_qc import (
+                central_slab_projection, projection_to_b64png, make_comparison_html,
+            )
+        except ImportError:
+            print('WARNING: --analyse requires mrcfile and matplotlib; skipping report')
+            do_qc = False
 
     # ── Process each volume ───────────────────────────────────────────────────
     prefix = '[DRY RUN] ' if args.dry_run else ''
@@ -288,6 +317,13 @@ def run(args):
             n_ok += 1
             continue
 
+        # Capture before projection
+        before_b64 = None
+        if do_qc:
+            proj = central_slab_projection(vol_path, qc_thick)
+            if proj:
+                before_b64 = projection_to_b64png(proj['img'])
+
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             print(f'  FAIL  {vol_path.name}  (exit {result.returncode})')
@@ -295,10 +331,52 @@ def run(args):
             for line in stderr_lines[:5]:
                 print(f'        {line}')
             n_fail += 1
+            after_b64 = None
         else:
             n_ok += 1
+            after_b64 = None
+            if do_qc and out_path.exists():
+                proj = central_slab_projection(out_path, qc_thick)
+                if proj:
+                    after_b64 = projection_to_b64png(proj['img'])
+
+        if do_qc:
+            qc_entries.append({
+                'ts_name':    ts_name,
+                'before_b64': before_b64,
+                'after_b64':  after_b64,
+                'before_path': str(vol_path),
+                'after_path':  str(out_path),
+                'metadata': {
+                    'defocus': f'{defocus:.3f} µm',
+                    'pixel':   f'{apix:.4f} Å',
+                    'deconv':  str(args.deconv),
+                    'snr':     str(args.snr),
+                },
+            })
 
     print()
     print(f'Done: {n_ok} processed, {n_skip} skipped, {n_fail} failed')
+
+    if args.dry_run and summary:
+        print()
+        print('── Summary ─────────────────────────────────────────────────────────')
+        for line in summary:
+            print(line)
+
+    # ── QC report ─────────────────────────────────────────────────────────────
+    if do_qc and qc_entries:
+        html_path = (Path(args.analyse_output) if args.analyse_output
+                     else out_dir / 'mtffilter_qc.html')
+        make_comparison_html(
+            entries      = qc_entries,
+            out_path     = html_path,
+            title        = 'imod-mtffilter QC',
+            command      = ' '.join(sys.argv),
+            before_label = 'Before (raw)',
+            after_label  = 'After (mtffilter)',
+            slab_angst   = qc_thick,
+        )
+
     if n_fail:
         sys.exit(1)

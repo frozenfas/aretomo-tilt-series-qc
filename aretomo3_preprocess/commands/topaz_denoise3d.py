@@ -47,6 +47,7 @@ import argparse
 from aretomo3_preprocess.shared.project_json import load_or_create
 from aretomo3_preprocess.commands.topaz_train import _find_latest_model
 from aretomo3_preprocess.shared.project_state import resolve_selected_ts
+from aretomo3_preprocess.shared.output_guard import check_output_dir
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -146,6 +147,16 @@ def add_parser(subparsers):
                      help='Topaz training output directory; scan for latest .sav '
                           'checkpoint. If omitted, auto-loaded from project.json.')
 
+    qc = p.add_argument_group('QC report')
+    qc.add_argument('--analyse', action='store_true',
+                    help='Generate an HTML QC report with side-by-side before/after '
+                         'central-slab projections for each denoised volume')
+    qc.add_argument('--analyse-thickness', type=float, default=300.0, metavar='ANGST',
+                    help='Slab thickness in Å for QC projections (default: 300 Å)')
+    qc.add_argument('--analyse-output', default=None, metavar='HTML',
+                    help='Path for QC report HTML '
+                         '(default: <output>/topaz_denoise_qc.html)')
+
     ctl = p.add_argument_group('run control')
     ctl.add_argument('--gpu', '-d', type=int, default=0,
                      help='GPU device index (default: 0; use -1 for CPU)')
@@ -156,6 +167,8 @@ def add_parser(subparsers):
     ctl.add_argument('--topaz', dest='topaz_bin',
                      default='/opt/miniconda3/envs/topaz/bin/topaz',
                      help='Path to topaz executable')
+    ctl.add_argument('--clean', action='store_true',
+                     help='Remove existing output directory before running')
     ctl.add_argument('--dry-run', action='store_true',
                      help='Print commands without executing')
 
@@ -174,7 +187,13 @@ def run(args):
         sys.exit(1)
 
     out_dir = Path(args.output) if args.output else in_dir / 'topaz_denoise'
+    out_dir = check_output_dir(out_dir, clean=args.clean, dry_run=args.dry_run)
     sfx     = args.vol_suffix
+
+    summary = []
+    if args.dry_run and Path(out_dir).exists():
+        summary.append(f'NOTE: output directory already exists: {out_dir}')
+        summary.append(f'      (would prompt or require --clean in a real run)')
 
     # ── Resolve model ─────────────────────────────────────────────────────────
     model = _resolve_model(args)
@@ -200,7 +219,7 @@ def run(args):
         before    = len(vol_files)
         vol_files = [f for f in vol_files
                      if _ts_name_from_vol(f, sfx) in selected_ts]
-        print(f'TS selection: {len(vol_files)} / {before} volumes retained')
+        summary.append(f'TS selection        : {len(vol_files)} / {before} volumes retained')
 
     if not vol_files:
         print('No volumes to process after selection filter.')
@@ -213,15 +232,16 @@ def run(args):
     is_pretrained = model in PRETRAINED_MODELS
     model_label   = model if is_pretrained else Path(model).name
 
-    print(f'Volumes to process  : {n}')
-    if is_pretrained:
-        print(f'Model               : {model} (pretrained)')
-    else:
-        print(f'Model               : {model_label}')
-    print(f'Patch size / pad    : {args.patch_size} / {args.patch_padding}')
-    print(f'Device              : GPU {args.gpu}')
-    print(f'Output directory    : {out_dir}/')
-    print()
+    summary.append(f'Volumes to process  : {n}')
+    summary.append(f'Model               : {model_label}' + (' (pretrained)' if is_pretrained else ''))
+    summary.append(f'Patch size / pad    : {args.patch_size} / {args.patch_padding}')
+    summary.append(f'Device              : GPU {args.gpu}')
+    summary.append(f'Output directory    : {out_dir}/')
+
+    if not args.dry_run:
+        for line in summary:
+            print(line)
+        print()
 
     # ── Check binary ──────────────────────────────────────────────────────────
     if not args.dry_run:
@@ -232,12 +252,29 @@ def run(args):
             sys.exit(1)
         out_dir.mkdir(parents=True, exist_ok=True)
 
+    # ── QC setup ──────────────────────────────────────────────────────────────
+    do_qc    = getattr(args, 'analyse', False)
+    qc_thick = getattr(args, 'analyse_thickness', 300.0)
+    qc_entries = []
+
+    if do_qc:
+        try:
+            from aretomo3_preprocess.shared.volume_qc import (
+                central_slab_projection, projection_to_b64png, make_comparison_html,
+            )
+        except ImportError:
+            print('WARNING: --analyse requires mrcfile and matplotlib; skipping report')
+            do_qc = False
+
     # ── Process ───────────────────────────────────────────────────────────────
     prefix   = '[DRY RUN] ' if args.dry_run else ''
     n_ok     = n_fail = 0
     t_start  = time.perf_counter()
 
     for i, vol_path in enumerate(vol_files, 1):
+        ts_name  = _ts_name_from_vol(vol_path, sfx)
+        out_path = out_dir / vol_path.name
+
         cmd = [
             args.topaz_bin, 'denoise3d',
             str(vol_path),
@@ -256,6 +293,13 @@ def run(args):
             n_ok += 1
             continue
 
+        # Capture before projection
+        before_b64 = None
+        if do_qc:
+            proj = central_slab_projection(vol_path, qc_thick)
+            if proj:
+                before_b64 = projection_to_b64png(proj['img'])
+
         t0     = time.perf_counter()
         result = subprocess.run(cmd, stderr=subprocess.PIPE, text=True)
         elapsed = time.perf_counter() - t0
@@ -265,6 +309,7 @@ def run(args):
             for line in (result.stderr or '').strip().splitlines():
                 print(f'    {line}')
             n_fail += 1
+            after_b64 = None
         else:
             elapsed_total = time.perf_counter() - t_start
             rate = i / elapsed_total
@@ -272,10 +317,50 @@ def run(args):
             print(f'  done  ({elapsed:.0f}s  |  {i}/{n} complete'
                   f'  |  ETA {eta/60:.0f} min)', flush=True)
             n_ok += 1
+            after_b64 = None
+            if do_qc and out_path.exists():
+                proj = central_slab_projection(out_path, qc_thick)
+                if proj:
+                    after_b64 = projection_to_b64png(proj['img'])
+
+        if do_qc:
+            qc_entries.append({
+                'ts_name':     ts_name,
+                'before_b64':  before_b64,
+                'after_b64':   after_b64,
+                'before_path': str(vol_path),
+                'after_path':  str(out_path),
+                'metadata': {
+                    'model':         model_label,
+                    'patch size':    str(args.patch_size),
+                    'patch padding': str(args.patch_padding),
+                },
+            })
 
     print(sep)
     total = time.perf_counter() - t_start
     print(f'\nDone: {n_ok} denoised, {n_fail} failed  '
           f'(total {total/60:.1f} min)')
+
+    if args.dry_run and summary:
+        print()
+        print('── Summary ─────────────────────────────────────────────────────────')
+        for line in summary:
+            print(line)
+
+    # ── QC report ─────────────────────────────────────────────────────────────
+    if do_qc and qc_entries:
+        html_path = (Path(args.analyse_output) if args.analyse_output
+                     else out_dir / 'topaz_denoise_qc.html')
+        make_comparison_html(
+            entries      = qc_entries,
+            out_path     = html_path,
+            title        = 'topaz-denoise3d QC',
+            command      = ' '.join(sys.argv),
+            before_label = 'Before (raw)',
+            after_label  = 'After (denoised)',
+            slab_angst   = qc_thick,
+        )
+
     if n_fail:
         sys.exit(1)
