@@ -388,7 +388,10 @@ def add_parser(subparsers):
     inp.add_argument('--exclude', nargs='+',
                      help='Exclude these TS prefixes (wildcards supported)')
     inp.add_argument('--bmask-dir', default=None,
-                     help='Directory of per-TS boundary mask MRCs (<prefix>.mrc)')
+                     help='Directory of per-TS boundary mask MRCs')
+    inp.add_argument('--bmask-suffix', default='',
+                     help='Filename suffix for mask MRCs, e.g. "_mask" for '
+                          'ts-001_mask.mrc (default: "" → ts-001.mrc)')
     inp.add_argument('--dose', type=float, default=None,
                      help='Per-frame dose (e⁻/Å²); if omitted, reads from _TLT.txt')
 
@@ -674,9 +677,12 @@ def run(args):
 
         bmask = None
         if args.bmask_dir:
-            candidate = Path(args.bmask_dir) / f'{prefix}.mrc'
+            suffix = getattr(args, 'bmask_suffix', '')
+            candidate = Path(args.bmask_dir) / f'{prefix}{suffix}.mrc'
             if candidate.exists():
                 bmask = candidate
+            else:
+                print(f'  WARNING: boundary mask not found: {candidate}')
 
         out_subdir = out_dir / prefix
 
