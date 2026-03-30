@@ -687,6 +687,18 @@ def run(args):
 
         _print_cmd(cmd)
 
+        # ── Inline extraction command (printed even in dry-run) ───────────
+        if args.extract and args.n_particles is not None:
+            if args.imod and not args.relion5_compat:
+                args.relion5_compat = True
+            extract_bin = _find_pytom_extract(args.pytom_dir)
+            if not extract_bin:
+                extract_bin = 'pytom_extract_candidates.py'
+            job_json_dry = out_subdir / f'{prefix}_job.json'
+            ecmd_dry = _build_extract_cmd(extract_bin, job_json_dry, args)
+            print('\n  Extraction command:')
+            _print_cmd(ecmd_dry)
+
         if args.dry_run:
             print('  [dry-run: skipping execution]')
             ok.append(prefix)
@@ -728,8 +740,6 @@ def run(args):
             if args.n_particles is None:
                 print('  WARNING: --extract set but --n-particles not given — skipping')
             else:
-                if args.imod and not args.relion5_compat:
-                    args.relion5_compat = True
                 job_jsons = sorted(out_subdir.glob('*_job.json'))
                 if not job_jsons:
                     print(f'  WARNING: no *_job.json in {out_subdir} — skipping extraction')
