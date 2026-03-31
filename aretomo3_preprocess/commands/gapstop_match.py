@@ -68,7 +68,8 @@ from aretomo3_preprocess.shared.volume_qc import (
     make_comparison_html,
 )
 
-_GAPSTOP_BIN = '/opt/miniconda3/envs/gapstop/bin/gapstop'
+_GAPSTOP_BIN    = '/opt/miniconda3/envs/gapstop/bin/gapstop'
+_GAPSTOP_PYTHON = '/opt/miniconda3/envs/gapstop/bin/python'
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -85,6 +86,18 @@ def _find_gapstop(gapstop_dir=None):
         if Path(c).exists():
             return c
     return shutil.which('gapstop')
+
+
+def _find_gapstop_python(gapstop_dir=None):
+    """Return path to gapstop env python, or None if not found."""
+    candidates = []
+    if gapstop_dir:
+        candidates.append(str(Path(gapstop_dir) / 'python'))
+    candidates.append(_GAPSTOP_PYTHON)
+    for c in candidates:
+        if Path(c).exists():
+            return c
+    return shutil.which('python3')
 
 
 def _mrc_dims(mrc_path):
@@ -307,6 +320,128 @@ def _find_score_map(ts_out):
     return candidates[0] if candidates else None
 
 
+def _find_em_maps(ts_out):
+    """Return (scores_em, angles_em) paths, or (None, None) if not found."""
+    scores = sorted(ts_out.glob('scores_*.em'))
+    angles = sorted(ts_out.glob('angles_*.em'))
+    return (scores[0] if scores else None,
+            angles[0] if angles else None)
+
+
+def _angles_list_name(angincr, angiter, phi_angincr, phi_angiter):
+    """Return the filename gapstop auto-generates for the angles list."""
+    return f'angles_{angincr}_{angiter}_{phi_angincr}_{phi_angiter}.txt'
+
+
+def _find_angles_list(angincr, angiter, phi_angincr, phi_angiter, search_dirs):
+    """Search directories for the gapstop-generated angles list text file."""
+    name = _angles_list_name(angincr, angiter, phi_angincr, phi_angiter)
+    for d in search_dirs:
+        p = Path(d) / name
+        if p.exists():
+            return p
+    return None
+
+
+def _read_params_star(param_path):
+    """Read tomo_num and angular params from a per-TS params STAR file."""
+    try:
+        import starfile
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            data = starfile.read(str(param_path), always_dict=True)
+        df = next(iter(data.values()))
+        row = df.iloc[0]
+        return {
+            'tomo_num':    int(row['tomo_num']),
+            'angincr':     float(row['angincr']),
+            'angiter':     float(row['angiter']),
+            'phi_angincr': float(row['phi_angincr']),
+            'phi_angiter': float(row['phi_angiter']),
+            'symmetry':    str(row['symmetry']),
+            'anglist_order': str(row.get('anglist_order', 'zxz')),
+            'rootdir':     str(row.get('rootdir', '.')),
+        }
+    except Exception as exc:
+        return None
+
+
+def _build_extract_script(scores_em, angles_em, angles_list, tomo_id,
+                           diam_px, threshold, n_particles, out_star, symmetry,
+                           anglist_order):
+    """Return a Python script string that runs cryoCAT extraction."""
+    n_part_arg = f'n_particles={n_particles},' if n_particles is not None else ''
+    return (
+        'from cryocat import tmana, cryomap; '
+        f'scores = cryomap.read("{scores_em}"); '
+        f'angles = cryomap.read("{angles_em}"); '
+        f'tmana.scores_extract_particles('
+        f'scores_map=scores, angles_map=angles, '
+        f'angles_list="{angles_list}", '
+        f'tomo_id={tomo_id}, '
+        f'particle_diameter={diam_px}, '
+        f'scores_threshold={threshold}, '
+        f'{n_part_arg}'
+        f'output_path="{out_star}", '
+        f'output_type="relion", '
+        f'angles_order="{anglist_order}", '
+        f'symmetry="{symmetry}", '
+        f'angles_numbering=0)'
+    )
+
+
+def _run_extraction(ts_out, tomo_id, angpix, angles_list, python_bin, args,
+                    dry_run=False):
+    """Run cryoCAT extraction on a completed gapstop output directory."""
+    scores_em, angles_em = _find_em_maps(ts_out)
+    if scores_em is None or angles_em is None:
+        print('  WARNING: scores_*.em or angles_*.em not found — skipping extraction')
+        return False
+    if angles_list is None:
+        print('  WARNING: angles list file not found — skipping extraction')
+        return False
+
+    diam_px = int(round(args.particle_diameter / angpix)) if args.particle_diameter else 20
+    n_particles = getattr(args, 'n_particles', None)
+    threshold   = args.scores_threshold
+    symmetry    = getattr(args, 'symmetry', 'c1').lower()
+    anglist_order = getattr(args, 'anglist_order', 'zxz')
+    out_star = ts_out / f'{ts_out.name}_particles.star'
+
+    script = _build_extract_script(
+        scores_em, angles_em, angles_list, tomo_id,
+        diam_px, threshold, n_particles, out_star,
+        symmetry, anglist_order,
+    )
+    cmd = [python_bin, '-c', script]
+
+    # Print in readable form
+    print(f'  Extraction:')
+    print(f'    scores:    {scores_em.name}')
+    print(f'    angles:    {angles_em.name}')
+    print(f'    threshold: {threshold}')
+    print(f'    diam:      {diam_px} px  ({args.particle_diameter} Å / {angpix:.4g} Å/px)'
+          if args.particle_diameter else f'    diam:      {diam_px} px')
+    print(f'    → {out_star}')
+
+    if dry_run:
+        print('  [dry-run: skipping extraction]')
+        return True
+
+    ret = subprocess.run(cmd)
+    if ret.returncode != 0:
+        print(f'  ERROR: extraction failed (exit {ret.returncode})')
+        return False
+
+    if out_star.exists():
+        import subprocess as _sp
+        n = int(_sp.run(['wc', '-l', str(out_star)],
+                        capture_output=True, text=True).stdout.split()[0])
+        print(f'  → {out_star}  (~{max(0,n-10)} particles)')
+    return True
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Parser
 # ─────────────────────────────────────────────────────────────────────────────
@@ -320,8 +455,9 @@ def add_parser(subparsers):
     )
 
     inp = p.add_argument_group('input')
-    inp.add_argument('--input', '-i', required=True,
-                     help='AreTomo3 output directory containing ts-*_Vol.mrc files')
+    inp.add_argument('--input', '-i', default=None,
+                     help='AreTomo3 output directory containing ts-*_Vol.mrc files '
+                          '(not required with --extract-only)')
     inp.add_argument('--vol-suffix', default=None,
                      help='Extra suffix before _Vol.mrc (e.g. "_SART" for ts-001_SART_Vol.mrc)')
     inp.add_argument('--select-ts', default=None, metavar='CSV',
@@ -414,9 +550,24 @@ def add_parser(subparsers):
                     help='Path for QC report HTML '
                          '(default: <output>/gapstop_match_qc.html)')
 
+    ext = p.add_argument_group('extraction (runs immediately after each TS is matched)')
+    ext.add_argument('--extract', action='store_true',
+                     help='Run cryoCAT extraction after each tomogram is matched')
+    ext.add_argument('--scores-threshold', type=float, default=0.08,
+                     help='Score threshold for particle extraction')
+    ext.add_argument('--n-particles', type=int, default=None,
+                     help='Maximum number of particles to extract per tomogram '
+                          '(default: no limit)')
+    ext.add_argument('--particle-diameter', type=float, default=None, metavar='ANGST',
+                     help='Particle diameter in Å — used to set minimum peak spacing '
+                          'during extraction (e.g. 280 for 80S ribosome)')
+
     ctl = p.add_argument_group('run control')
     ctl.add_argument('--output', '-o', default='gapstop_match',
                      help='Output directory (per-TS subdirectories are created inside)')
+    ctl.add_argument('--extract-only', action='store_true',
+                     help='Skip template matching; run extraction on existing score maps '
+                          'in --output.  --input is not required in this mode.')
     ctl.add_argument('--gapstop-dir', default=None,
                      help='Directory containing the gapstop binary '
                           '(default: /opt/miniconda3/envs/gapstop/bin/)')
@@ -430,13 +581,110 @@ def add_parser(subparsers):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Extract-only mode
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _run_extract_only(args, out_dir, sep):
+    python_bin = _find_gapstop_python(args.gapstop_dir)
+    if not python_bin:
+        print(f'ERROR: gapstop Python not found at {_GAPSTOP_PYTHON}')
+        sys.exit(1)
+
+    # Find per-TS subdirectories that have a params STAR and score maps
+    ts_dirs = sorted(d for d in out_dir.iterdir() if d.is_dir())
+    if not ts_dirs:
+        print(f'ERROR: no per-TS subdirectories found in {out_dir}')
+        sys.exit(1)
+
+    # select-ts filter
+    selected_ts = resolve_selected_ts(getattr(args, 'select_ts', None))
+
+    jobs = []
+    for ts_dir in ts_dirs:
+        ts_name = ts_dir.name
+        if selected_ts is not None and ts_name not in selected_ts:
+            continue
+        param_file = ts_dir / f'{ts_name}_params.star'
+        if not param_file.exists():
+            continue
+        scores_em, angles_em = _find_em_maps(ts_dir)
+        if scores_em is None:
+            continue
+        jobs.append((ts_name, ts_dir, param_file))
+
+    if not jobs:
+        print(f'ERROR: no completed gapstop runs found in {out_dir}')
+        sys.exit(1)
+
+    print(f'Tomograms to extract: {len(jobs)}')
+    print(sep)
+    for ts_name, _, _ in jobs[:10]:
+        print(f'  {ts_name}')
+    if len(jobs) > 10:
+        print(f'  ... ({len(jobs) - 10} more)')
+    print(sep)
+
+    ok, failed = [], []
+
+    for ts_name, ts_dir, param_file in jobs:
+        print(f'\n{ts_name}')
+
+        params = _read_params_star(param_file)
+        if params is None:
+            print(f'  ERROR: could not read {param_file.name}')
+            failed.append(ts_name)
+            continue
+
+        tomo_id = params['tomo_num']
+
+        # Pixel size from tomogram MRC (path stored in params STAR as tomo_name)
+        try:
+            import starfile, warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                data = starfile.read(str(param_file), always_dict=True)
+            tomo_path = Path(next(iter(data.values())).iloc[0]['tomo_name'])
+            angpix = _mrc_angpix(tomo_path) or 1.0
+        except Exception:
+            angpix = 1.0
+
+        # Find angles list — check rootdir from params, then cwd, then out_dir
+        angles_list = _find_angles_list(
+            params['angincr'], params['angiter'],
+            params['phi_angincr'], params['phi_angiter'],
+            search_dirs=[params['rootdir'], Path('.'), out_dir],
+        )
+
+        ok_ts = _run_extraction(
+            ts_dir, tomo_id, angpix, angles_list, python_bin, args,
+            dry_run=args.dry_run,
+        )
+        (ok if ok_ts else failed).append(ts_name)
+
+    print(f'\n{sep}')
+    print(f'Done.  {len(ok)} succeeded, {len(failed)} failed.')
+    if failed:
+        print(f'Failed: {", ".join(failed)}')
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main run
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run(args):
-    in_dir  = Path(args.input).resolve()
     out_dir = Path(args.output).resolve()
     sep     = '─' * 70
+
+    extract_only = getattr(args, 'extract_only', False)
+    if extract_only:
+        _run_extract_only(args, out_dir, sep)
+        return
+
+    if args.input is None:
+        print('ERROR: --input is required unless --extract-only is set')
+        sys.exit(1)
+
+    in_dir = Path(args.input).resolve()
 
     if not in_dir.is_dir():
         print(f'ERROR: --input {in_dir} not found')
@@ -450,7 +698,7 @@ def run(args):
 
     out_dir = check_output_dir(out_dir, clean=args.clean, dry_run=args.dry_run)
 
-    # Locate gapstop binary
+    # Locate gapstop binary and python
     gapstop_bin = _find_gapstop(args.gapstop_dir)
     if not gapstop_bin:
         msg = (f'gapstop not found.\n'
@@ -462,6 +710,15 @@ def run(args):
         else:
             print(f'ERROR: {msg}')
             sys.exit(1)
+
+    do_extract = getattr(args, 'extract', False)
+    python_bin = None
+    if do_extract:
+        python_bin = _find_gapstop_python(args.gapstop_dir)
+        if not python_bin:
+            print(f'WARNING: gapstop Python not found at {_GAPSTOP_PYTHON} '
+                  f'— --extract will be skipped')
+            do_extract = False
 
     # Find volumes
     pairs = _find_volumes(in_dir, args.vol_suffix)
@@ -579,6 +836,13 @@ def run(args):
 
         if args.dry_run:
             print('  [dry-run: skipping execution]')
+            if do_extract:
+                angles_list = _find_angles_list(
+                    args.angincr, args.angiter, args.phi_angincr, args.phi_angiter,
+                    search_dirs=[Path('.'), out_dir, ts_out],
+                )
+                _run_extraction(ts_out, tomo_id, angpix, angles_list,
+                                python_bin, args, dry_run=True)
             ok.append(prefix)
             continue
 
@@ -594,6 +858,15 @@ def run(args):
         for mrc in sorted(ts_out.glob('*.mrc')):
             if any(mrc.name.startswith(p) for p in ('scores_', 'angles_', 'noise_')):
                 print(f'  → {mrc}')
+
+        # Extraction
+        if do_extract:
+            angles_list = _find_angles_list(
+                args.angincr, args.angiter, args.phi_angincr, args.phi_angiter,
+                search_dirs=[Path('.'), out_dir, ts_out],
+            )
+            _run_extraction(ts_out, tomo_id, angpix, angles_list,
+                            python_bin, args, dry_run=False)
 
         # QC
         if do_qc:
