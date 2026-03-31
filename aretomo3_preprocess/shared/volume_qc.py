@@ -551,6 +551,362 @@ def make_picks_html(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Interactive picks QC (dev)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def slab_picks_data(
+    mrc_path,
+    df,
+    slab_angst: float = 300.0,
+    particle_diameter: float = None,
+    max_px: int = 900,
+) -> Optional[dict]:
+    """
+    Return raw data for the interactive Canvas-based picks overlay.
+
+    The background slab is rendered as a grayscale PNG (capped at max_px).
+    Particle coordinates are returned in PNG pixel space (already scaled).
+
+    Returns dict or None on failure.
+    """
+    try:
+        import numpy as np
+        import mrcfile
+    except ImportError:
+        return None
+
+    try:
+        with mrcfile.mmap(str(mrc_path), mode='r', permissive=True) as mrc:
+            vox = float(mrc.voxel_size.x) or 1.0
+            nz, ny, nx = mrc.data.shape
+            hp   = max(1, int(round((slab_angst / 2.0) / vox)))
+            zc   = nz // 2
+            zs   = max(0,  zc - hp)
+            ze   = min(nz, zc + hp)
+            slab = np.asarray(mrc.data[zs:ze], dtype=np.float32)
+    except Exception:
+        return None
+
+    img = slab.mean(axis=0)   # (ny, nx)
+
+    # Scale factor so the longest side ≤ max_px
+    scale = min(1.0, max_px / max(nx, ny)) if max(nx, ny) > max_px else 1.0
+    img_nx = max(1, round(nx * scale))
+    img_ny = max(1, round(ny * scale))
+    # Scale slab Z bounds to PNG space (Z not rescaled, keep as-is)
+    slab_scale_z = scale   # same scale applies
+
+    # Render background as grayscale PNG via PIL at scaled size
+    try:
+        from PIL import Image as _PIL
+        p1, p99 = float(np.percentile(img, 1)), float(np.percentile(img, 99))
+        span = (p99 - p1) or 1.0
+        arr = np.clip((img - p1) / span * 255, 0, 255).astype(np.uint8)
+        pil = _PIL.fromarray(arr, mode='L').resize((img_nx, img_ny), _PIL.LANCZOS)
+        buf = io.BytesIO()
+        pil.save(buf, format='PNG')
+        buf.seek(0)
+        bg_b64 = base64.b64encode(buf.read()).decode()
+    except Exception:
+        bg_b64 = None
+
+    # Parse coordinates (RELION5 or RELION4)
+    r5_cols = {'rlnCenteredCoordinateXAngst', 'rlnCenteredCoordinateYAngst',
+               'rlnCenteredCoordinateZAngst', 'rlnTomoTiltSeriesPixelSize'}
+    r4_cols = {'rlnCoordinateX', 'rlnCoordinateY', 'rlnCoordinateZ'}
+
+    if r5_cols.issubset(df.columns):
+        px_size = float(df['rlnTomoTiltSeriesPixelSize'].iloc[0])
+        x_mrc = (df['rlnCenteredCoordinateXAngst'] / px_size + nx / 2).values
+        y_mrc = (df['rlnCenteredCoordinateYAngst'] / px_size + ny / 2).values
+        z_mrc = (df['rlnCenteredCoordinateZAngst'] / px_size + nz / 2).values
+    elif r4_cols.issubset(df.columns):
+        x_mrc = df['rlnCoordinateX'].values.astype(float)
+        y_mrc = df['rlnCoordinateY'].values.astype(float)
+        z_mrc = df['rlnCoordinateZ'].values.astype(float)
+    else:
+        return None
+
+    # Scale coordinates to PNG pixel space
+    x_png = x_mrc * scale
+    y_png = y_mrc * scale
+    z_png = z_mrc  # Z not rescaled (used only for slab bounds comparison)
+
+    score_col = next((c for c in _SCORE_COLS if c in df.columns), None)
+    scores    = df[score_col].values.astype(float) if score_col else np.ones(len(df))
+
+    radius_px = (particle_diameter / 2.0) / (vox / scale) if particle_diameter else None
+
+    import json as _json
+    particles_json = _json.dumps([
+        {'x': round(float(x), 2), 'y': round(float(y), 2),
+         'z': round(float(z), 2), 's': round(float(s), 5)}
+        for x, y, z, s in zip(x_png, y_png, z_png, scores)
+    ])
+
+    return {
+        'img_b64':    bg_b64,
+        'particles':  particles_json,
+        'slab_zs':    float(zs),
+        'slab_ze':    float(ze),
+        'radius_px':  float(radius_px) if radius_px else None,
+        'img_nx':     img_nx,
+        'img_ny':     img_ny,
+        'score_col':  score_col or 'score',
+        'score_min':  float(scores.min()),
+        'score_max':  float(scores.max()),
+        'n_total':    len(scores),
+        'has_scores': score_col is not None,
+    }
+
+
+_PLASMA_STOPS = [
+    (0.00, (13,  8,  135)),
+    (0.25, (126, 3,  168)),
+    (0.50, (204, 71, 120)),
+    (0.75, (248, 148, 65)),
+    (1.00, (240, 249, 33)),
+]
+
+_PLASMA_JS = (
+    'function plasmaColor(t){'
+    'var s=[' +
+    ','.join(f'[{p},[{r},{g},{b}]]' for p, (r, g, b) in _PLASMA_STOPS) +
+    '];'
+    'for(var i=0;i<s.length-1;i++){'
+    'if(t>=s[i][0]&&t<=s[i+1][0]){'
+    'var lt=(t-s[i][0])/(s[i+1][0]-s[i][0]);'
+    'var c0=s[i][1],c1=s[i+1][1];'
+    'return "rgba("+Math.round(c0[0]+lt*(c1[0]-c0[0]))+","'
+    '+Math.round(c0[1]+lt*(c1[1]-c0[1]))+","'
+    '+Math.round(c0[2]+lt*(c1[2]-c0[2]))+",0.85)";'
+    '}}'
+    'return "rgba(240,249,33,0.85)";}'
+)
+
+
+def make_picks_html_dev(
+    entries: list,
+    out_path,
+    title: str,
+    command: str,
+    slab_angst: float = 300.0,
+) -> None:
+    """
+    Interactive HTML QC report with a per-TS score slider.
+
+    Each entry needs 'picks_data' key (from slab_picks_data) in addition
+    to the standard make_picks_html keys.  Entries without picks_data fall
+    back to the static img_b64 panel.
+
+    A "Download thresholds CSV" button writes ts_name,threshold for every
+    tomogram at its current slider position.
+    """
+    import json as _json
+
+    out_path = Path(out_path)
+
+    cards = []
+    for idx, e in enumerate(entries):
+        ts   = e['ts_name']
+        tid  = f'ts{idx}'
+        pd   = e.get('picks_data')
+        meta = e.get('metadata', {})
+
+        meta_html = ''
+        if meta:
+            rows = ''.join(
+                f'<tr><td class="mk">{k}</td><td class="mv">{v}</td></tr>'
+                for k, v in meta.items()
+            )
+            meta_html = f'<table class="meta">{rows}</table>'
+
+        if pd and pd.get('img_b64'):
+            s_min   = pd['score_min']
+            s_max   = pd['score_max']
+            s_init  = round(s_min + (s_max - s_min) * 0.3, 5)
+            s_step  = round((s_max - s_min) / 1000, 6) or 0.0001
+            img_nx  = pd['img_nx']
+            img_ny  = pd['img_ny']
+            r_px    = pd['radius_px'] if pd['radius_px'] else 'null'
+            zs      = pd['slab_zs']
+            ze      = pd['slab_ze']
+            sc_col  = pd['score_col']
+            n_total = pd['n_total']
+            has_sc  = str(pd['has_scores']).lower()
+            p_json  = pd['particles']   # already JSON string
+
+            canvas_block = f"""
+<div class="canvas-wrap" style="position:relative;display:inline-block;line-height:0">
+  <img id="bg_{tid}" src="data:image/png;base64,{pd['img_b64']}"
+       style="display:block;max-width:100%">
+  <canvas id="cv_{tid}" width="{img_nx}" height="{img_ny}"
+          style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none">
+  </canvas>
+</div>
+<div class="ctrl">
+  <label>{sc_col} threshold:
+    <input type="range" class="ts-slider" data-ts="{ts}"
+           id="sl_{tid}" min="{s_min:.6f}" max="{s_max:.6f}"
+           step="{s_step}" value="{s_init}"
+           oninput="drawPicks('{tid}',parseFloat(this.value))">
+    <span id="tv_{tid}">{s_init:.4f}</span>
+  </label>
+  <span id="cnt_{tid}" class="cnt">? / {n_total}</span>
+</div>
+<script>
+(function(){{
+  var D={{particles:{p_json},zs:{zs},ze:{ze},r:{r_px},
+          smin:{s_min},smax:{s_max},hasSc:{has_sc}}};
+  window._pd=window._pd||{{}};window._pd['{tid}']=D;
+  drawPicks('{tid}',{s_init});
+}})();
+</script>"""
+        else:
+            # Fallback: static image
+            b64 = e.get('img_b64', '')
+            canvas_block = (
+                f'<img src="data:image/png;base64,{b64}" style="max-width:100%">'
+                if b64 else '<div class="img-placeholder">unavailable</div>'
+            )
+
+        score_panel = ''
+        if e.get('score_b64'):
+            score_panel = (
+                f'<div class="panel">'
+                f'<div class="panel-label">Score map</div>'
+                f'<img src="data:image/png;base64,{e["score_b64"]}" style="max-width:100%">'
+                f'</div>'
+            )
+
+        cards.append(f"""
+<div class="card">
+  <div class="card-header">{ts}
+    <span class="n-particles">{e.get('n_total','?')} particles</span>
+  </div>
+  <div class="panels">
+    <div class="panel">
+      <div class="panel-label">Tomogram — picks (score coloured)</div>
+      {canvas_block}
+    </div>
+    {score_panel}
+  </div>
+  {meta_html}
+</div>""")
+
+    ts_names_js = _json.dumps([e['ts_name'] for e in entries])
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8">
+<title>{title} (interactive)</title>
+<style>
+* {{ box-sizing: border-box; margin: 0; padding: 0; }}
+body {{ background:#0a0a1a; color:#e0e0e0; font-family:monospace; font-size:13px; padding:16px; }}
+h1 {{ color:#7eb8f7; margin-bottom:4px; }}
+.cmd {{ background:#111; color:#aaa; padding:8px; border-radius:4px;
+        font-size:11px; margin-bottom:12px; word-break:break-all; }}
+.top-bar {{ margin-bottom:14px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }}
+.btn {{ background:#1e3a5f; color:#7eb8f7; border:1px solid #2a5080; padding:6px 14px;
+        border-radius:4px; cursor:pointer; font-size:12px; font-family:monospace; }}
+.btn:hover {{ background:#2a5080; }}
+.grid {{ display:grid; grid-template-columns:repeat(auto-fill,minmax(700px,1fr)); gap:16px; }}
+.card {{ background:#16213e; border:1px solid #2a2a4a; border-radius:8px; padding:14px; }}
+.card-header {{ font-size:14px; font-weight:bold; color:#7eb8f7; margin-bottom:10px; }}
+.n-particles {{ color:#aaa; font-size:11px; margin-left:10px; }}
+.panels {{ display:flex; flex-wrap:wrap; gap:10px; }}
+.panel {{ flex:1; min-width:280px; }}
+.panel-label {{ font-size:11px; color:#888; margin-bottom:4px; }}
+.img-placeholder {{ background:#111; height:200px; display:flex;
+                    align-items:center; justify-content:center; color:#444; }}
+.canvas-wrap {{ width:100%; }}
+.ctrl {{ margin-top:8px; display:flex; flex-wrap:wrap; align-items:center; gap:12px; }}
+.ctrl label {{ display:flex; align-items:center; gap:8px; flex:1; }}
+.ctrl input[type=range] {{ flex:1; accent-color:#f89441; }}
+.cnt {{ color:#f89441; font-size:11px; white-space:nowrap; }}
+table.meta {{ margin-top:8px; border-collapse:collapse; width:100%; }}
+table.meta td {{ padding:2px 6px; font-size:11px; }}
+td.mk {{ color:#888; }}
+td.mv {{ color:#ccc; }}
+</style>
+</head>
+<body>
+<h1>{title} <small style="font-size:12px;color:#666">(interactive dev)</small></h1>
+<div class="cmd">{command}</div>
+<div class="top-bar">
+  <span style="color:#888;font-size:11px">Slab: {slab_angst:.0f} Å</span>
+  <button class="btn" onclick="downloadCSV()">Download thresholds CSV</button>
+  <button class="btn" onclick="resetAll()">Reset all thresholds</button>
+</div>
+<div class="grid">
+{''.join(cards)}
+</div>
+<script>
+{_PLASMA_JS}
+
+function drawPicks(tid, thresh) {{
+  var D = window._pd && window._pd[tid];
+  if (!D) return;
+  var cv = document.getElementById('cv_'+tid);
+  if (!cv) return;
+  var ctx = cv.getContext('2d');
+  ctx.clearRect(0,0,cv.width,cv.height);
+  var cnt=0, ps=D.particles;
+  var smin=D.smin, smax=D.smax, rng=smax-smin||1e-9;
+  for (var i=0;i<ps.length;i++) {{
+    var p=ps[i];
+    if (p.z<D.zs || p.z>D.ze) continue;
+    if (p.s<thresh) continue;
+    var col = D.hasSc ? plasmaColor((p.s-smin)/rng) : 'rgba(255,221,0,0.8)';
+    ctx.beginPath();
+    if (D.r) {{
+      ctx.arc(p.x,p.y,D.r,0,2*Math.PI);
+      ctx.strokeStyle=col; ctx.lineWidth=0.9; ctx.globalAlpha=0.85;
+      ctx.stroke();
+    }} else {{
+      ctx.moveTo(p.x-4,p.y); ctx.lineTo(p.x+4,p.y);
+      ctx.moveTo(p.x,p.y-4); ctx.lineTo(p.x,p.y+4);
+      ctx.strokeStyle=col; ctx.lineWidth=0.9; ctx.globalAlpha=0.85;
+      ctx.stroke();
+    }}
+    cnt++;
+  }}
+  var tv=document.getElementById('tv_'+tid);
+  if(tv) tv.textContent=thresh.toFixed(5);
+  var ce=document.getElementById('cnt_'+tid);
+  if(ce) ce.textContent=cnt+' / '+ps.length;
+}}
+
+function downloadCSV() {{
+  var names = {ts_names_js};
+  var lines = ['ts_name,threshold'];
+  document.querySelectorAll('.ts-slider').forEach(function(sl) {{
+    lines.push(sl.dataset.ts + ',' + parseFloat(sl.value).toFixed(5));
+  }});
+  var blob = new Blob([lines.join('\\n')], {{type:'text/csv'}});
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'thresholds.csv';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+}}
+
+function resetAll() {{
+  document.querySelectorAll('.ts-slider').forEach(function(sl) {{
+    var min=parseFloat(sl.min), max=parseFloat(sl.max);
+    sl.value = min + (max-min)*0.3;
+    var tid = sl.id.replace('sl_','');
+    drawPicks(tid, parseFloat(sl.value));
+  }});
+}}
+</script>
+</body></html>"""
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(html)
+    print(f'Picks QC report (interactive): {out_path}')
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Orthoslice panels with mask overlay
 # ─────────────────────────────────────────────────────────────────────────────
 

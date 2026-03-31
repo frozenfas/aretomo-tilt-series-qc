@@ -889,8 +889,9 @@ def _run_extract_only(args, out_dir, sep):
             import warnings as _warnings
             import starfile as _starfile
             from aretomo3_preprocess.shared.volume_qc import (
-                slab_with_picks_b64, central_slab_projection,
-                projection_to_b64png, make_picks_html,
+                slab_with_picks_b64, slab_picks_data,
+                central_slab_projection, projection_to_b64png,
+                make_picks_html, make_picks_html_dev,
             )
         except ImportError as e:
             print(f'WARNING: --analyse requires starfile and matplotlib ({e}); skipping')
@@ -957,11 +958,17 @@ def _run_extract_only(args, out_dir, sep):
                             score_b64 = projection_to_b64png(sproj['img'], pct=(50, 99.9),
                                                                cmap='inferno', colorbar=True)
                     if result:
+                        pd = slab_picks_data(
+                            tomo_path, df,
+                            slab_angst=qc_thick,
+                            particle_diameter=args.particle_diameter,
+                        )
                         entry.update({
-                            'img_b64':   result['img_b64'],
-                            'score_b64': score_b64,
-                            'n_total':   result['n_total'],
-                            'n_shown':   result['n_shown'],
+                            'img_b64':    result['img_b64'],
+                            'score_b64':  score_b64,
+                            'n_total':    result['n_total'],
+                            'n_shown':    result['n_shown'],
+                            'picks_data': pd,
                             'metadata': {
                                 'slab':   f'{result["slab_a"]:.0f} Å  ({result["vox"]:.2f} Å/px)',
                                 'picked': f'{result["n_shown"]} / {result["n_total"]} in slab',
@@ -984,6 +991,14 @@ def _run_extract_only(args, out_dir, sep):
         make_picks_html(
             entries    = qc_entries,
             out_path   = html_path,
+            title      = 'pytom-extract QC',
+            command    = ' '.join(sys.argv),
+            slab_angst = qc_thick,
+        )
+        dev_path = html_path.with_stem(html_path.stem + '_dev')
+        make_picks_html_dev(
+            entries    = qc_entries,
+            out_path   = dev_path,
             title      = 'pytom-extract QC',
             command    = ' '.join(sys.argv),
             slab_angst = qc_thick,

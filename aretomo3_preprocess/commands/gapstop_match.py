@@ -65,7 +65,8 @@ from aretomo3_preprocess.shared.project_state import resolve_selected_ts
 from aretomo3_preprocess.shared.output_guard import check_output_dir
 from aretomo3_preprocess.shared.volume_qc import (
     central_slab_projection, projection_to_b64png,
-    slab_with_picks_b64, make_picks_html,
+    slab_with_picks_b64, slab_picks_data,
+    make_picks_html, make_picks_html_dev,
     make_comparison_html,
 )
 
@@ -589,6 +590,7 @@ def _picks_qc_entry(prefix, tomo_path, star_path, angpix, score_map, args):
     img_b64 = score_b64 = None
 
     # Tomogram slab with picks overlay
+    picks_data = None
     try:
         import warnings
         import starfile
@@ -605,6 +607,9 @@ def _picks_qc_entry(prefix, tomo_path, star_path, angpix, score_map, args):
             n_shown  = result['n_shown']
         else:
             n_total = n_shown = 0
+        picks_data = slab_picks_data(tomo_path, df,
+                                     slab_angst=qc_thick,
+                                     particle_diameter=diam)
     except Exception:
         n_total = n_shown = 0
 
@@ -620,6 +625,7 @@ def _picks_qc_entry(prefix, tomo_path, star_path, angpix, score_map, args):
         'ts_name':   prefix,
         'img_b64':   img_b64,
         'score_b64': score_b64,
+        'picks_data': picks_data,
         'n_total':   n_total,
         'n_shown':   n_shown,
         'tomo_path': str(tomo_path),
@@ -738,7 +744,13 @@ def _run_extract_only(args, out_dir, sep):  # noqa: C901
             command   = ' '.join(sys.argv),
             slab_angst = getattr(args, 'analyse_thickness', 300.0),
         )
-        print(f'QC report: {html_path}')
+        make_picks_html_dev(
+            entries   = qc_entries,
+            out_path  = html_path.with_stem(html_path.stem + '_dev'),
+            title     = 'gapstop-match extraction QC',
+            command   = ' '.join(sys.argv),
+            slab_angst = getattr(args, 'analyse_thickness', 300.0),
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -993,6 +1005,13 @@ def run(args):
             make_picks_html(
                 entries   = qc_entries,
                 out_path  = html_path,
+                title     = 'gapstop-match QC',
+                command   = ' '.join(sys.argv),
+                slab_angst = qc_thick,
+            )
+            make_picks_html_dev(
+                entries   = qc_entries,
+                out_path  = html_path.with_stem(html_path.stem + '_dev'),
                 title     = 'gapstop-match QC',
                 command   = ' '.join(sys.argv),
                 slab_angst = qc_thick,
