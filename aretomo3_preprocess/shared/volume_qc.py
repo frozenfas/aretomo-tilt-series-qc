@@ -238,6 +238,9 @@ def slab_with_mask_b64(
 # Picks overlay
 # ─────────────────────────────────────────────────────────────────────────────
 
+_SCORE_COLS = ('rlnLCCmax', 'rlnMaxValueProbDistribution', 'score')
+
+
 def slab_with_picks_b64(
     mrc_path,
     df,
@@ -249,11 +252,16 @@ def slab_with_picks_b64(
     Render the central Z slab of a tomogram with particle positions overlaid
     as circles, encoded as a base64 PNG.
 
+    Circles are coloured by score when a score column is present in df
+    (rlnLCCmax for pytom-match; rlnMaxValueProbDistribution for gapstop).
+    Falls back to flat yellow if no score column is found.
+
     Parameters
     ----------
     mrc_path          : path-like
-    df                : pandas DataFrame with RELION5 STAR columns
-                        (rlnCenteredCoordinate{X,Y,Z}Angst, rlnTomoTiltSeriesPixelSize)
+    df                : pandas DataFrame — RELION5 (rlnCenteredCoordinate*Angst),
+                        RELION3/4 (rlnCoordinateX/Y/Z pixels), or any df with
+                        those columns plus an optional score column.
     slab_angst        : total slab thickness in Å (default 300 Å)
     particle_diameter : particle diameter in Å — sets circle radius.
                         If None, draws small cross markers instead.
@@ -313,34 +321,69 @@ def slab_with_picks_b64(
     n_total  = len(df)
     n_shown  = int(in_slab.sum())
 
-    # ── Plot ─────────────────────────────────────────────────────────────────
-    p_lo, p_hi = np.percentile(img, pct)
-    span = float(p_hi - p_lo) or 1.0
+    # Detect score column for colour-mapping
+    score_col = next((c for c in _SCORE_COLS if c in df.columns), None)
+    scores_shown = df[score_col][in_slab].values if score_col is not None else None
 
+    # ── Plot ─────────────────────────────────────────────────────────────────
+    from matplotlib import cm as _cm
+    from matplotlib.colors import Normalize as _Normalize
+    from matplotlib.colorbar import ColorbarBase as _ColorbarBase
+
+    p_lo, p_hi = np.percentile(img, pct)
+
+    has_scores  = scores_shown is not None and n_shown > 0
+    has_circles = particle_diameter is not None
+
+    # Leave right margin for colorbar when scores are present
+    cb_frac = 0.07 if has_scores else 0.0
     dpi  = 100
-    figw = max(4.0, nx / dpi)
+    figw = max(4.0, nx / dpi) + (0.4 if has_scores else 0.0)
     figh = max(3.0, ny / dpi)
     fig  = Figure(figsize=(figw, figh), dpi=dpi)
-    ax   = fig.add_axes([0, 0, 1, 1])
+
+    img_right = 1.0 - cb_frac - (0.01 if has_scores else 0.0)
+    ax = fig.add_axes([0, 0, img_right, 1.0])
     ax.imshow(img, cmap='gray', vmin=p_lo, vmax=p_hi,
               origin='upper', aspect='equal', interpolation='bilinear')
 
     if n_shown > 0:
-        if particle_diameter is not None:
+        if has_scores:
+            s_lo, s_hi = float(scores_shown.min()), float(scores_shown.max())
+            if s_lo == s_hi:
+                s_hi = s_lo + 1e-6
+            cmap_picks = _cm.get_cmap('plasma')
+            norm_picks = _Normalize(vmin=s_lo, vmax=s_hi)
+            colors = [cmap_picks(norm_picks(s)) for s in scores_shown]
+        else:
+            colors = ['#ffdd00'] * n_shown
+
+        if has_circles:
             radius_px = (particle_diameter / 2.0) / px_size
-            for x, y in zip(x_shown, y_shown):
+            for x, y, c in zip(x_shown, y_shown, colors):
                 ax.add_patch(Circle(
                     (x, y), radius=radius_px,
-                    fill=False, edgecolor='#ffdd00',
-                    linewidth=0.8, alpha=0.75,
+                    fill=False, edgecolor=c,
+                    linewidth=0.8, alpha=0.8,
                 ))
         else:
-            ax.plot(x_shown, y_shown, '+',
-                    color='#ffdd00', markersize=6, markeredgewidth=0.8, alpha=0.75)
+            for x, y, c in zip(x_shown, y_shown, colors):
+                ax.plot(x, y, '+', color=c, markersize=6,
+                        markeredgewidth=0.8, alpha=0.8)
 
     ax.set_xlim(0, nx)
     ax.set_ylim(ny, 0)
     ax.axis('off')
+
+    # Colorbar
+    if has_scores:
+        cax = fig.add_axes([img_right + 0.01, 0.1, 0.025, 0.8])
+        cb  = _ColorbarBase(cax, cmap=_cm.get_cmap('plasma'),
+                            norm=_Normalize(vmin=float(scores_shown.min()),
+                                            vmax=float(scores_shown.max())),
+                            orientation='vertical')
+        cb.set_label(score_col, fontsize=6)
+        cax.tick_params(labelsize=5)
 
     buf = io.BytesIO()
     fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0, dpi=dpi)
