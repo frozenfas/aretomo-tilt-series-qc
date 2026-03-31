@@ -120,11 +120,13 @@ def _find_job_jsons(input_dir, selected_ts=None):
     return jobs
 
 
-def _star_to_mod(star_path, job_json_path, mod_dir):
+def _star_to_mod(star_path, job_json_path, mod_dir, sphere_diameter=None):
     """
     Convert a RELION5 particles STAR file to an IMOD .mod point model.
 
     Adapted from rln2mod by Phaips (https://github.com/Phaips/rln2mod).
+    Uses -scat (scattered points) and -sizes (sphere radii from 4th column)
+    so particles appear as spheres in 3dmod.
     """
     try:
         import starfile
@@ -161,6 +163,7 @@ def _star_to_mod(star_path, job_json_path, mod_dir):
     xs = df['rlnCenteredCoordinateXAngst'] / px + nx / 2
     ys = df['rlnCenteredCoordinateYAngst'] / px + ny / 2
     zs = df['rlnCenteredCoordinateZAngst'] / px + nz / 2
+    radius_px = (sphere_diameter / 2.0) / float(px.iloc[0]) if sphere_diameter else None
 
     mod_dir.mkdir(parents=True, exist_ok=True)
     stem = star_path.stem
@@ -169,7 +172,10 @@ def _star_to_mod(star_path, job_json_path, mod_dir):
 
     with open(txt, 'w') as fh:
         for x, y, z in zip(xs, ys, zs):
-            fh.write(f'{x:.6f} {y:.6f} {z:.6f}\n')
+            if radius_px is not None:
+                fh.write(f'{x:.6f} {y:.6f} {z:.6f} {radius_px:.2f}\n')
+            else:
+                fh.write(f'{x:.6f} {y:.6f} {z:.6f}\n')
 
     point2model = shutil.which('point2model')
     if not point2model:
@@ -177,12 +183,16 @@ def _star_to_mod(star_path, job_json_path, mod_dir):
         txt.unlink(missing_ok=True)
         return False
 
-    ret = subprocess.run([point2model, str(txt), str(mod)], capture_output=True)
+    cmd = [point2model, '-scat']
+    if radius_px is not None:
+        cmd += ['-sizes']
+    cmd += [str(txt), str(mod)]
+    ret = subprocess.run(cmd, capture_output=True)
+    txt.unlink(missing_ok=True)
     if ret.returncode != 0:
         print(f'  WARNING: point2model failed: {ret.stderr.decode().strip()}')
         return False
 
-    txt.unlink(missing_ok=True)
     print(f'  → {mod}  ({len(df)} particles)')
     return True
 
@@ -488,6 +498,9 @@ def add_parser(subparsers):
                           'Adapted from rln2mod (https://github.com/Phaips/rln2mod).')
     ext.add_argument('--imod-dir', default=None,
                      help='Directory for .mod files (default: <output>/mod/)')
+    ext.add_argument('--imod-sphere-diameter', type=float, default=None, metavar='ANGST',
+                     help='Sphere display diameter in Å for .mod files; if omitted, '
+                          'uses --particle-diameter; set to 0 to use points instead')
 
     ctl = p.add_argument_group('run control')
     ctl.add_argument('--output', '-o', default='pytom_match',
@@ -508,6 +521,14 @@ def add_parser(subparsers):
 # ─────────────────────────────────────────────────────────────────────────────
 # Main run
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _sphere_diameter(args):
+    """Resolve sphere display diameter: --imod-sphere-diameter > --particle-diameter > None."""
+    d = getattr(args, 'imod_sphere_diameter', None)
+    if d is not None:
+        return d if d > 0 else None   # 0 = use points
+    return getattr(args, 'particle_diameter', None)
+
 
 def _build_extract_cmd(extract_bin, job_json, args):
     """Build pytom_extract_candidates.py command."""
@@ -728,7 +749,8 @@ def run(args):
             if score_files:
                 sproj = central_slab_projection(score_files[0], qc_thick)
                 if sproj:
-                    after_b64 = projection_to_b64png(sproj['img'], pct=(50, 99.9))
+                    after_b64 = projection_to_b64png(sproj['img'], pct=(50, 99.9),
+                                                       cmap='inferno', colorbar=True)
             qc_entries.append({
                 'ts_name':     prefix,
                 'before_b64':  before_b64,
@@ -764,7 +786,8 @@ def run(args):
                             mod_dir = (Path(args.imod_dir).resolve()
                                        if args.imod_dir else out_dir / 'mod')
                             for star in sorted(out_subdir.glob('*_particles.star')):
-                                _star_to_mod(star, job_json, mod_dir)
+                                sphere_d = _sphere_diameter(args)
+                _star_to_mod(star, job_json, mod_dir, sphere_diameter=sphere_d)
 
     # ── Summary ────────────────────────────────────────────────────────────
     print(f'\n{sep}')
@@ -897,7 +920,8 @@ def _run_extract_only(args, out_dir, sep):
         if args.imod:
             star_files = sorted(job_json.parent.glob('*_particles.star'))
             for star in star_files:
-                _star_to_mod(star, job_json, mod_dir)
+                sphere_d = _sphere_diameter(args)
+                _star_to_mod(star, job_json, mod_dir, sphere_diameter=sphere_d)
 
         # ── QC (picks overlay) ────────────────────────────────────────────
         if do_qc:
@@ -930,7 +954,8 @@ def _run_extract_only(args, out_dir, sep):
                     if score_files:
                         sproj = central_slab_projection(score_files[0], qc_thick)
                         if sproj:
-                            score_b64 = projection_to_b64png(sproj['img'], pct=(50, 99.9))
+                            score_b64 = projection_to_b64png(sproj['img'], pct=(50, 99.9),
+                                                               cmap='inferno', colorbar=True)
                     if result:
                         entry.update({
                             'img_b64':   result['img_b64'],

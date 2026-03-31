@@ -61,15 +61,23 @@ def central_slab_projection(mrc_path, slab_angst: float = 300.0) -> Optional[dic
 # PNG encoding
 # ─────────────────────────────────────────────────────────────────────────────
 
-def projection_to_b64png(img, pct: tuple = (1, 99), max_px: int = 800) -> str:
+def projection_to_b64png(
+    img,
+    pct: tuple = (1, 99),
+    max_px: int = 800,
+    cmap: str = 'gray',
+    colorbar: bool = False,
+) -> str:
     """
     Encode a 2-D float array as a base64 PNG suitable for embedding in HTML.
 
     Parameters
     ----------
-    img    : 2-D numpy array
-    pct    : (lo, hi) percentiles for contrast normalisation
-    max_px : downsample so the longest axis is at most this many pixels
+    img      : 2-D numpy array
+    pct      : (lo, hi) percentiles for contrast normalisation
+    max_px   : downsample so the longest axis is at most this many pixels
+    cmap     : matplotlib colormap name (default 'gray')
+    colorbar : if True, add a colorbar on the right side of the image
     """
     import numpy as np
     from matplotlib.figure import Figure
@@ -91,18 +99,34 @@ def projection_to_b64png(img, pct: tuple = (1, 99), max_px: int = 800) -> str:
         ).astype(np.float32) / 255.0
         h, w = img_n.shape
 
-    dpi   = 100
-    figw  = max(3.0, w / dpi)
-    figh  = max(2.0, h / dpi)
-    fig   = Figure(figsize=(figw, figh), dpi=dpi)
-    ax    = fig.add_axes([0, 0, 1, 1])
-    ax.imshow(img_n, cmap='gray', aspect='equal', interpolation='bilinear',
-              vmin=0, vmax=1)
+    dpi  = 100
+    figw = max(3.0, w / dpi + (0.6 if colorbar else 0))
+    figh = max(2.0, h / dpi)
+    fig  = Figure(figsize=(figw, figh), dpi=dpi)
+
+    if colorbar:
+        # Leave room for colorbar on the right
+        img_frac = (w / dpi) / figw
+        ax  = fig.add_axes([0, 0, img_frac - 0.02, 1])
+        cax = fig.add_axes([img_frac + 0.01, 0.05, 0.06, 0.9])
+        im  = ax.imshow(img_n, cmap=cmap, aspect='equal', interpolation='bilinear',
+                        vmin=0, vmax=1)
+        cb  = fig.colorbar(im, cax=cax)
+        cb.set_ticks([0, 0.5, 1])
+        cb.set_ticklabels([f'{p_lo:.3g}', f'{(p_lo+p_hi)/2:.3g}', f'{p_hi:.3g}'])
+        cb.ax.tick_params(labelsize=7, colors='white')
+        cb.outline.set_edgecolor('white')
+        fig.patch.set_facecolor('#111111')
+    else:
+        ax = fig.add_axes([0, 0, 1, 1])
+        ax.imshow(img_n, cmap=cmap, aspect='equal', interpolation='bilinear',
+                  vmin=0, vmax=1)
+
     ax.axis('off')
 
     buf = io.BytesIO()
     fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0,
-                dpi=dpi)
+                dpi=dpi, facecolor=fig.get_facecolor())
     buf.seek(0)
     return base64.b64encode(buf.read()).decode()
 
