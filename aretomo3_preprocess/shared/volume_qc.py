@@ -287,15 +287,24 @@ def slab_with_picks_b64(
     img = slab.mean(axis=0)   # (ny, nx)
 
     # ── Particle coordinates ─────────────────────────────────────────────────
-    required = {'rlnCenteredCoordinateXAngst', 'rlnCenteredCoordinateYAngst',
-                'rlnCenteredCoordinateZAngst', 'rlnTomoTiltSeriesPixelSize'}
-    if not required.issubset(df.columns):
-        return None
+    # Support both RELION5 (centered Angst) and RELION3/4 (pixel coords)
+    r5_cols = {'rlnCenteredCoordinateXAngst', 'rlnCenteredCoordinateYAngst',
+               'rlnCenteredCoordinateZAngst', 'rlnTomoTiltSeriesPixelSize'}
+    r4_cols = {'rlnCoordinateX', 'rlnCoordinateY', 'rlnCoordinateZ'}
 
-    px_size  = float(df['rlnTomoTiltSeriesPixelSize'].iloc[0])
-    x_px = df['rlnCenteredCoordinateXAngst'] / px_size + nx / 2
-    y_px = df['rlnCenteredCoordinateYAngst'] / px_size + ny / 2
-    z_px = df['rlnCenteredCoordinateZAngst'] / px_size + nz / 2
+    if r5_cols.issubset(df.columns):
+        px_size = float(df['rlnTomoTiltSeriesPixelSize'].iloc[0])
+        x_px = df['rlnCenteredCoordinateXAngst'] / px_size + nx / 2
+        y_px = df['rlnCenteredCoordinateYAngst'] / px_size + ny / 2
+        z_px = df['rlnCenteredCoordinateZAngst'] / px_size + nz / 2
+    elif r4_cols.issubset(df.columns):
+        # Coordinates are already in pixels (0-indexed)
+        px_size = vox   # use MRC header pixel size for circle radius
+        x_px = df['rlnCoordinateX']
+        y_px = df['rlnCoordinateY']
+        z_px = df['rlnCoordinateZ']
+    else:
+        return None
 
     # Keep only particles within the slab Z range
     in_slab  = (z_px >= zs) & (z_px <= ze)

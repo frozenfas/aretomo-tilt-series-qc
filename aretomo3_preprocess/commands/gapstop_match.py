@@ -65,6 +65,7 @@ from aretomo3_preprocess.shared.project_state import resolve_selected_ts
 from aretomo3_preprocess.shared.output_guard import check_output_dir
 from aretomo3_preprocess.shared.volume_qc import (
     central_slab_projection, projection_to_b64png,
+    slab_with_picks_b64, make_picks_html,
     make_comparison_html,
 )
 
@@ -580,11 +581,61 @@ def add_parser(subparsers):
     return p
 
 
+def _picks_qc_entry(prefix, tomo_path, star_path, angpix, score_map, args):
+    """Build a QC entry dict with tomogram+picks overlay and score map."""
+    qc_thick = getattr(args, 'analyse_thickness', 300.0)
+    diam     = getattr(args, 'particle_diameter', None)
+
+    img_b64 = score_b64 = None
+
+    # Tomogram slab with picks overlay
+    try:
+        import warnings
+        import starfile
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            data = starfile.read(str(star_path), always_dict=True)
+        df = next(iter(data.values()))
+        result = slab_with_picks_b64(tomo_path, df,
+                                     slab_angst=qc_thick,
+                                     particle_diameter=diam)
+        if result:
+            img_b64  = result['img_b64']
+            n_total  = result['n_total']
+            n_shown  = result['n_shown']
+        else:
+            n_total = n_shown = 0
+    except Exception:
+        n_total = n_shown = 0
+
+    # Score map
+    if score_map and score_map.exists():
+        proj = central_slab_projection(score_map, qc_thick)
+        if proj:
+            score_b64 = projection_to_b64png(
+                proj['img'], pct=(50, 99.9), cmap='inferno', colorbar=True,
+            )
+
+    return {
+        'ts_name':   prefix,
+        'img_b64':   img_b64,
+        'score_b64': score_b64,
+        'n_total':   n_total,
+        'n_shown':   n_shown,
+        'tomo_path': str(tomo_path),
+        'metadata': {
+            'pixel size':  f'{angpix:.4g} Å',
+            'threshold':   str(args.scores_threshold),
+            'particles':   f'{n_shown} in slab / {n_total} total',
+        },
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Extract-only mode
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _run_extract_only(args, out_dir, sep):
+def _run_extract_only(args, out_dir, sep):  # noqa: C901
     python_bin = _find_gapstop_python(args.gapstop_dir)
     if not python_bin:
         print(f'ERROR: gapstop Python not found at {_GAPSTOP_PYTHON}')
@@ -624,6 +675,8 @@ def _run_extract_only(args, out_dir, sep):
         print(f'  ... ({len(jobs) - 10} more)')
     print(sep)
 
+    do_qc      = getattr(args, 'analyse', False)
+    qc_entries = []
     ok, failed = [], []
 
     for ts_name, ts_dir, param_file in jobs:
@@ -635,7 +688,8 @@ def _run_extract_only(args, out_dir, sep):
             failed.append(ts_name)
             continue
 
-        tomo_id = params['tomo_num']
+        tomo_id   = params['tomo_num']
+        tomo_path = Path('.')
 
         # Pixel size from tomogram MRC (path stored in params STAR as tomo_name)
         try:
@@ -661,10 +715,30 @@ def _run_extract_only(args, out_dir, sep):
         )
         (ok if ok_ts else failed).append(ts_name)
 
+        if ok_ts and do_qc and not args.dry_run:
+            star_path = ts_dir / f'{ts_name}_particles.star'
+            score_map = _find_score_map(ts_dir)
+            if star_path.exists():
+                qc_entries.append(_picks_qc_entry(
+                    ts_name, tomo_path, star_path, angpix, score_map, args,
+                ))
+
     print(f'\n{sep}')
     print(f'Done.  {len(ok)} succeeded, {len(failed)} failed.')
     if failed:
         print(f'Failed: {", ".join(failed)}')
+
+    if do_qc and qc_entries:
+        html_path = (Path(args.analyse_output) if args.analyse_output
+                     else out_dir / 'gapstop_extract_qc.html')
+        make_picks_html(
+            entries   = qc_entries,
+            out_path  = html_path,
+            title     = 'gapstop-match extraction QC',
+            command   = ' '.join(sys.argv),
+            slab_angst = getattr(args, 'analyse_thickness', 300.0),
+        )
+        print(f'QC report: {html_path}')
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -870,31 +944,40 @@ def run(args):
 
         # QC
         if do_qc:
-            before_b64 = after_b64 = None
-            proj = central_slab_projection(tomo, qc_thick)
-            if proj:
-                before_b64 = projection_to_b64png(proj['img'])
             score_map = _find_score_map(ts_out)
-            if score_map:
-                proj_s = central_slab_projection(score_map, qc_thick)
-                if proj_s:
-                    after_b64 = projection_to_b64png(
-                        proj_s['img'], pct=(50, 99.9), cmap='inferno', colorbar=True,
-                    )
-            qc_entries.append({
-                'ts_name':    prefix,
-                'before_b64': before_b64,
-                'after_b64':  after_b64,
-                'before_path': str(tomo),
-                'after_path':  str(score_map) if score_map else '',
-                'metadata': {
-                    'pixel size':   f'{angpix:.4g} Å',
-                    'volume':       f'{nx}×{ny}×{nz}',
-                    'tilts':        str(len(tilt_angles)),
-                    'n tiles':      str(args.n_tiles),
-                    'lp / hp rad':  f'{args.lp_rad} / {args.hp_rad}',
-                },
-            })
+            star_path = ts_out / f'{prefix}_particles.star'
+
+            if do_extract and star_path.exists():
+                # Show tomogram with picks overlay + score map
+                qc_entries.append(_picks_qc_entry(
+                    prefix, tomo, star_path, angpix, score_map, args,
+                ))
+            else:
+                # Matching only — show tomogram slab vs score map
+                before_b64 = after_b64 = None
+                proj = central_slab_projection(tomo, qc_thick)
+                if proj:
+                    before_b64 = projection_to_b64png(proj['img'])
+                if score_map:
+                    proj_s = central_slab_projection(score_map, qc_thick)
+                    if proj_s:
+                        after_b64 = projection_to_b64png(
+                            proj_s['img'], pct=(50, 99.9), cmap='inferno', colorbar=True,
+                        )
+                qc_entries.append({
+                    'ts_name':    prefix,
+                    'before_b64': before_b64,
+                    'after_b64':  after_b64,
+                    'before_path': str(tomo),
+                    'after_path':  str(score_map) if score_map else '',
+                    'metadata': {
+                        'pixel size':  f'{angpix:.4g} Å',
+                        'volume':      f'{nx}×{ny}×{nz}',
+                        'tilts':       str(len(tilt_angles)),
+                        'n tiles':     str(args.n_tiles),
+                        'lp / hp rad': f'{args.lp_rad} / {args.hp_rad}',
+                    },
+                })
 
     # Summary
     print(f'\n{sep}')
@@ -906,15 +989,24 @@ def run(args):
     if do_qc and qc_entries:
         html_path = (Path(args.analyse_output) if args.analyse_output
                      else out_dir / 'gapstop_match_qc.html')
-        make_comparison_html(
-            entries      = qc_entries,
-            out_path     = html_path,
-            title        = 'gapstop-match QC',
-            command      = ' '.join(sys.argv),
-            before_label = 'Tomogram',
-            after_label  = 'Score map',
-            slab_angst   = qc_thick,
-        )
+        if do_extract:
+            make_picks_html(
+                entries   = qc_entries,
+                out_path  = html_path,
+                title     = 'gapstop-match QC',
+                command   = ' '.join(sys.argv),
+                slab_angst = qc_thick,
+            )
+        else:
+            make_comparison_html(
+                entries      = qc_entries,
+                out_path     = html_path,
+                title        = 'gapstop-match QC',
+                command      = ' '.join(sys.argv),
+                before_label = 'Tomogram',
+                after_label  = 'Score map',
+                slab_angst   = qc_thick,
+            )
         print(f'QC report: {html_path}')
 
     if args.dry_run:
