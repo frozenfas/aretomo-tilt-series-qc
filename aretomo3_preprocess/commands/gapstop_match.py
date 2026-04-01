@@ -330,11 +330,14 @@ def _find_score_map(ts_out):
 
 
 def _find_em_maps(ts_out):
-    """Return (scores_em, angles_em) paths, or (None, None) if not found."""
-    scores = sorted(ts_out.glob('scores_*.em'))
-    angles = sorted(ts_out.glob('angles_*.em'))
-    return (scores[0] if scores else None,
-            angles[0] if angles else None)
+    """Return (scores_map, angles_map) paths, or (None, None) if not found.
+    gapstop writes .mrc (newer) or .em (older) depending on version."""
+    for ext in ('mrc', 'em'):
+        scores = sorted(ts_out.glob(f'scores_*.{ext}'))
+        angles = sorted(ts_out.glob(f'angles_*.{ext}'))
+        if scores and angles:
+            return scores[0], angles[0]
+    return None, None
 
 
 def _angles_list_name(angincr, angiter, phi_angincr, phi_angiter):
