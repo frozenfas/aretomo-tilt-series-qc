@@ -268,18 +268,18 @@ def _write_gapstop_params(param_path, tomo_path, tomo_num, wedge_path,
         'tomo_name':      [str(tomo_path)],
         'tomo_num':       [tomo_num],
         'vol_ext':        ['.mrc'],
-        'tomo_mask_name': [str(bmask) if bmask else ''],
+        'tomo_mask_name': [str(bmask) if bmask else None],
         'wedgelist_name': [str(wedge_path)],
         'tmpl_name':      [str(Path(args.template).resolve())],
         'mask_name':      [str(Path(args.mask).resolve())],
         'symmetry':       [args.symmetry],
-        'anglist_name':   [''],
+        'anglist_name':   [None],
         'anglist_order':  [args.anglist_order],
         'angincr':        [args.angincr],
         'angiter':        [args.angiter],
         'phi_angincr':    [args.phi_angincr],
         'phi_angiter':    [args.phi_angiter],
-        'tilelist_name':  [''],
+        'tilelist_name':  [None],
         'smap_name':      ['scores'],
         'omap_name':      ['angles'],
         'tmap_name':      ['noise'],
@@ -299,6 +299,8 @@ def _write_gapstop_params(param_path, tomo_path, tomo_num, wedge_path,
     }
 
     import pandas as pd
+    # Drop optional keys whose value is None — gapstop treats missing columns as absent
+    params = {k: v for k, v in params.items() if v != [None]}
     df = pd.DataFrame(params)
     starfile.write(df, str(param_path))
     return param_path
