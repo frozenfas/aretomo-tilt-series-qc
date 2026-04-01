@@ -509,13 +509,18 @@ def add_parser(subparsers):
 
     flt = p.add_argument_group('filter parameters')
     flt.add_argument('--lp-rad', type=float, default=None,
-                     help='Low-pass filter radius (Nyquist fraction, e.g. 0.35)')
+                     help='Low-pass filter radius in frequency pixels '
+                          '(NOT Nyquist fraction). r = ceil(box/2), so for a '
+                          '48-px box r=24; lp_rad=16 → 0.67 Nyquist (~39 A). '
+                          'Typical value: 16')
     flt.add_argument('--lp-sigma', type=float, default=3.0,
-                     help='Low-pass filter sigma (Nyquist fraction)')
+                     help='Low-pass filter sigma (frequency pixels)')
     flt.add_argument('--hp-rad', type=float, default=None,
-                     help='High-pass filter radius (Nyquist fraction, e.g. 0.02)')
+                     help='High-pass filter radius in frequency pixels. '
+                          'hp_rad=1 gives a very gentle DC-only high-pass. '
+                          'Typical value: 1')
     flt.add_argument('--hp-sigma', type=float, default=2.0,
-                     help='High-pass filter sigma (Nyquist fraction)')
+                     help='High-pass filter sigma (frequency pixels)')
 
     ctf = p.add_argument_group('CTF / imaging')
     ctf.add_argument('--voltage', type=float, default=300.0,
