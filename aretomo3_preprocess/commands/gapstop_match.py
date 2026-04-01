@@ -47,6 +47,7 @@ Typical usage
 """
 
 import re
+import os
 import sys
 import struct
 import shutil
@@ -529,8 +530,14 @@ def add_parser(subparsers):
     opt = p.add_argument_group('gapstop options')
     opt.add_argument('--binning', type=int, default=1,
                      help='Internal binning during template matching')
-    opt.add_argument('--n-tiles', type=int, default=1,
-                     help='Number of GPU tiles (-n flag to gapstop; set to 4 for 4 GPUs)')
+    opt.add_argument('--gpu', type=int, nargs='+', default=None,
+                     metavar='ID',
+                     help='GPU device IDs to use (sets CUDA_VISIBLE_DEVICES). '
+                          'E.g. --gpu 0 1 uses GPUs 0 and 1. '
+                          'Also sets --n-tiles to the number of GPUs if not specified.')
+    opt.add_argument('--n-tiles', type=int, default=None,
+                     help='Number of GPU tiles (-n flag to gapstop). '
+                          'Defaults to the number of --gpu IDs, or 1 if --gpu not set.')
     opt.add_argument('--scoring-fcn', default='flcf',
                      help='Scoring function (default: flcf)')
     opt.add_argument('--apply-laplacian', type=lambda x: x.lower() != 'false',
@@ -803,6 +810,13 @@ def run(args):
             print(f'ERROR: {msg}')
             sys.exit(1)
 
+    # Resolve n_tiles and CUDA_VISIBLE_DEVICES
+    n_tiles = args.n_tiles if args.n_tiles is not None else (len(args.gpu) if args.gpu else 1)
+    cuda_env = os.environ.copy()
+    if args.gpu:
+        cuda_env['CUDA_VISIBLE_DEVICES'] = ','.join(str(g) for g in args.gpu)
+        print(f'  GPUs: {args.gpu}  (CUDA_VISIBLE_DEVICES={cuda_env["CUDA_VISIBLE_DEVICES"]})')
+
     do_extract = getattr(args, 'extract', False)
     python_bin = None
     if do_extract:
@@ -920,8 +934,8 @@ def run(args):
 
         # Build command
         cmd = [gapstop_bin, 'run_tm']
-        if args.n_tiles > 1:
-            cmd += ['-n', str(args.n_tiles)]
+        if n_tiles > 1:
+            cmd += ['-n', str(n_tiles)]
         cmd += [str(param_path)]
 
         _print_cmd(cmd)
@@ -938,7 +952,7 @@ def run(args):
             ok.append(prefix)
             continue
 
-        ret = subprocess.run(cmd)
+        ret = subprocess.run(cmd, env=cuda_env)
         if ret.returncode != 0:
             print(f'  ERROR: gapstop exited with code {ret.returncode}')
             failed.append(prefix)
@@ -992,7 +1006,7 @@ def run(args):
                         'pixel size':  f'{angpix:.4g} Å',
                         'volume':      f'{nx}×{ny}×{nz}',
                         'tilts':       str(len(tilt_angles)),
-                        'n tiles':     str(args.n_tiles),
+                        'n tiles':     str(n_tiles),
                         'lp / hp rad': f'{args.lp_rad} / {args.hp_rad}',
                     },
                 })
