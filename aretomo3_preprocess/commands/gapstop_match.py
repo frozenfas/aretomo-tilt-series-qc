@@ -483,21 +483,21 @@ def add_parser(subparsers):
     inp.add_argument('--dose', type=float, default=None,
                      help='Per-tilt dose (e⁻/Å²); if omitted, reads from _TLT.txt')
 
-    tmpl = p.add_argument_group('template matching (required)')
-    tmpl.add_argument('--template', '-t', required=True,
+    tmpl = p.add_argument_group('template matching (required unless --extract-only)')
+    tmpl.add_argument('--template', '-t', default=None,
                       help='Template MRC file')
-    tmpl.add_argument('--mask', '-m', required=True,
+    tmpl.add_argument('--mask', '-m', default=None,
                       help='Mask MRC file')
 
     ang = p.add_argument_group('angular search')
-    ang.add_argument('--angincr', type=float, required=True,
+    ang.add_argument('--angincr', type=float, default=None,
                      help='Angular increment (degrees) for the primary search axis')
-    ang.add_argument('--angiter', type=float, required=True,
+    ang.add_argument('--angiter', type=float, default=None,
                      help='Angular iterations for the primary axis '
                           '(search range ≈ angincr × angiter)')
-    ang.add_argument('--phi-angincr', type=float, required=True,
+    ang.add_argument('--phi-angincr', type=float, default=None,
                      help='Angular increment (degrees) for the phi (azimuth) axis')
-    ang.add_argument('--phi-angiter', type=float, required=True,
+    ang.add_argument('--phi-angiter', type=float, default=None,
                      help='Angular iterations for the phi axis')
     ang.add_argument('--anglist-order', default='zxz',
                      help='Euler angle convention for angular search (default: zxz)')
@@ -505,11 +505,11 @@ def add_parser(subparsers):
                      help='Particle symmetry (e.g. C1, C2, C6)')
 
     flt = p.add_argument_group('filter parameters')
-    flt.add_argument('--lp-rad', type=float, required=True,
+    flt.add_argument('--lp-rad', type=float, default=None,
                      help='Low-pass filter radius (Nyquist fraction, e.g. 0.35)')
     flt.add_argument('--lp-sigma', type=float, default=3.0,
                      help='Low-pass filter sigma (Nyquist fraction)')
-    flt.add_argument('--hp-rad', type=float, required=True,
+    flt.add_argument('--hp-rad', type=float, default=None,
                      help='High-pass filter radius (Nyquist fraction, e.g. 0.02)')
     flt.add_argument('--hp-sigma', type=float, default=2.0,
                      help='High-pass filter sigma (Nyquist fraction)')
@@ -789,7 +789,22 @@ def run(args):
         print(f'ERROR: --input {in_dir} not found')
         sys.exit(1)
 
-    # Validate template and mask
+    # Validate required TM args
+    missing = [name for val, name in [
+        (args.template,    '--template'),
+        (args.mask,        '--mask'),
+        (args.angincr,     '--angincr'),
+        (args.angiter,     '--angiter'),
+        (args.phi_angincr, '--phi-angincr'),
+        (args.phi_angiter, '--phi-angiter'),
+        (args.lp_rad,      '--lp-rad'),
+        (args.hp_rad,      '--hp-rad'),
+    ] if val is None]
+    if missing:
+        print(f'ERROR: the following arguments are required for template matching: {", ".join(missing)}')
+        sys.exit(1)
+
+    # Validate template and mask paths
     for path_arg, name in [(args.template, '--template'), (args.mask, '--mask')]:
         if not Path(path_arg).exists():
             print(f'ERROR: {name} {path_arg} not found')
