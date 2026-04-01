@@ -241,7 +241,11 @@ def _write_wedge_list(out_path, tomo_num, angpix, nx, ny, nz,
                 defocus_um.append(float('nan'))
                 pshift.append(0.0)
         data['defocus'] = defocus_um
-        data['pshift']  = pshift
+        # Only write pshift if any value is non-zero (phase plate data).
+        # gapstop bug: _array() returns a list so pshift[:,None] crashes;
+        # omitting the column lets gapstop fall back to np.zeros_like(defocus).
+        if any(p != 0.0 for p in pshift):
+            data['pshift'] = pshift
 
     data['exposure'] = list(exposure_arr)
 
