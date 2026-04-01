@@ -201,7 +201,8 @@ def _write_wedge_list(out_path, tomo_num, angpix, nx, ny, nz,
     Write a STOPGAP-format wedge list STAR file.
 
     Defocus values from AreTomo3 _CTF.txt are in Å; converted to µm here.
-    Defocus1/defocus2 are used if available; phase shift included if non-zero.
+    gapstop CTF filter requires a single 'defocus' column (µm); we use the
+    mean of defocus1 and defocus2. Phase shift included if non-zero.
     """
     try:
         import pandas as pd
@@ -228,20 +229,19 @@ def _write_wedge_list(out_path, tomo_num, angpix, nx, ny, nz,
     }
 
     if defocus_df is not None:
-        d1_um, d2_um, pshift = [], [], []
+        defocus_um, pshift = [], []
         for f in frames:
             entry = defocus_df.get(f['sec'])
             if entry:
-                d1_um.append(entry['defocus1_A'] / 1e4)
-                d2_um.append(entry['defocus2_A'] / 1e4)
+                # mean of defocus1 and defocus2; gapstop requires single 'defocus' column
+                d_um = (entry['defocus1_A'] + entry['defocus2_A']) / 2.0 / 1e4
+                defocus_um.append(d_um)
                 pshift.append(entry['phase_shift_rad'])
             else:
-                d1_um.append(float('nan'))
-                d2_um.append(float('nan'))
+                defocus_um.append(float('nan'))
                 pshift.append(0.0)
-        data['defocus1'] = d1_um
-        data['defocus2'] = d2_um
-        data['pshift']   = pshift
+        data['defocus'] = defocus_um
+        data['pshift']  = pshift
 
     data['exposure'] = list(exposure_arr)
 
