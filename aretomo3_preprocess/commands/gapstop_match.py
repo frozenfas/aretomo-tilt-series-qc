@@ -552,8 +552,8 @@ def add_parser(subparsers):
     opt.add_argument('--fourier-crop', type=lambda x: x.lower() != 'false',
                      default=True, metavar='BOOL',
                      help='Enable Fourier cropping (True/False)')
-    opt.add_argument('--tiling', default='legacy_fix',
-                     help='Tiling mode (default: legacy_fix)')
+    opt.add_argument('--tiling', default='new',
+                     help='Tiling mode (default: new; legacy_fix is deprecated)')
     opt.add_argument('--write-raw', type=lambda x: x.lower() != 'false',
                      default=False, metavar='BOOL',
                      help='Write raw score/angle maps in addition to MRC (True/False)')
