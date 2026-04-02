@@ -238,7 +238,7 @@ def slab_with_mask_b64(
 # Picks overlay
 # ─────────────────────────────────────────────────────────────────────────────
 
-_SCORE_COLS = ('rlnLCCmax', 'rlnMaxValueProbDistribution', 'score')
+_SCORE_COLS = ('rlnLCCmax', 'rlnMaxValueProbDistribution', 'rlnScore', 'score')
 
 
 def slab_with_picks_b64(
@@ -724,7 +724,7 @@ def make_picks_html_dev(
         if pd and pd.get('img_b64'):
             s_min   = pd['score_min']
             s_max   = pd['score_max']
-            s_init  = round(s_min + (s_max - s_min) * 0.3, 5)
+            s_init  = s_max
             s_step  = round((s_max - s_min) / 1000, 6) or 0.0001
             img_nx  = pd['img_nx']
             img_ny  = pd['img_ny']
@@ -893,7 +893,7 @@ function downloadCSV() {{
 function resetAll() {{
   document.querySelectorAll('.ts-slider').forEach(function(sl) {{
     var min=parseFloat(sl.min), max=parseFloat(sl.max);
-    sl.value = min + (max-min)*0.3;
+    sl.value = max;
     var tid = sl.id.replace('sl_','');
     drawPicks(tid, parseFloat(sl.value));
   }});
