@@ -861,12 +861,12 @@ function drawPicks(tid, thresh) {{
     ctx.beginPath();
     if (D.r) {{
       ctx.arc(p.x,p.y,D.r,0,2*Math.PI);
-      ctx.strokeStyle=col; ctx.lineWidth=0.9; ctx.globalAlpha=0.85;
+      ctx.strokeStyle=col; ctx.lineWidth=2.5; ctx.globalAlpha=0.9;
       ctx.stroke();
     }} else {{
       ctx.moveTo(p.x-4,p.y); ctx.lineTo(p.x+4,p.y);
       ctx.moveTo(p.x,p.y-4); ctx.lineTo(p.x,p.y+4);
-      ctx.strokeStyle=col; ctx.lineWidth=0.9; ctx.globalAlpha=0.85;
+      ctx.strokeStyle=col; ctx.lineWidth=2.5; ctx.globalAlpha=0.9;
       ctx.stroke();
     }}
     cnt++;
