@@ -384,22 +384,24 @@ def _build_extract_script(scores_em, angles_em, angles_list, tomo_id,
                            anglist_order):
     """Return a Python script string that runs cryoCAT extraction."""
     n_part_arg = f'n_particles={n_particles},' if n_particles is not None else ''
+    # Work around cryoCAT 0.7.1 bug: RelionMotl(df) leaves self.version=None
+    # → "NoneType >= float" crash at cryomotl.py:2266.  Extract to motl first,
+    # then construct RelionMotl explicitly with version=3.1.
     return (
-        'from cryocat import tmana, cryomap; '
+        'from cryocat import tmana, cryomap, cryomotl; '
         f'scores = cryomap.read("{scores_em}"); '
         f'angles = cryomap.read("{angles_em}"); '
-        f'tmana.scores_extract_particles('
+        f'motl = tmana.scores_extract_particles('
         f'scores_map=scores, angles_map=angles, '
         f'angles_list="{angles_list}", '
         f'tomo_id={tomo_id}, '
         f'particle_diameter={diam_px}, '
         f'scores_threshold={threshold}, '
         f'{n_part_arg}'
-        f'output_path="{out_star}", '
-        f'output_type="relion", '
         f'angles_order="{anglist_order}", '
         f'symmetry="{symmetry}", '
-        f'angles_numbering=0)'
+        f'angles_numbering=0); '
+        f'cryomotl.RelionMotl(motl.df, version=3.1).write_out(output_path="{out_star}")'
     )
 
 
