@@ -381,16 +381,17 @@ def _read_params_star(param_path):
 
 def _build_extract_script(scores_em, angles_em, angles_list, tomo_id,
                            diam_px, threshold, n_particles, out_star, symmetry,
-                           anglist_order):
+                           anglist_order, ts_name, angpix):
     """Return a Python script string that runs cryoCAT extraction."""
     n_part_arg = f'n_particles={n_particles},' if n_particles is not None else ''
     # Work around two cryoCAT 0.7.1 bugs:
     #   1. RelionMotl(df) leaves self.version=None → "NoneType >= float" crash
     #   2. RelionMotl.write_out uses DataFrame.applymap (removed in pandas 2.1)
-    # Solution: extract to raw motl, then write a simple RELION3 STAR ourselves
-    # using starfile (already installed in the gapstop env).
+    # Solution: extract to raw motl, then write a RELION5 STAR ourselves using
+    # starfile (already installed in the gapstop env).  Centered-Angstrom coords
+    # are computed using the score-map dimensions (same as tomogram).
     return (
-        'import starfile, pandas as pd; '
+        'import mrcfile, starfile, pandas as pd; '
         'from cryocat import tmana, cryomap; '
         f'scores = cryomap.read("{scores_em}"); '
         f'angles = cryomap.read("{angles_em}"); '
@@ -404,14 +405,21 @@ def _build_extract_script(scores_em, angles_em, angles_list, tomo_id,
         f'angles_order="{anglist_order}", '
         f'symmetry="{symmetry}", '
         f'angles_numbering=0); '
+        f'nz,ny,nx = mrcfile.open("{scores_em}",permissive=True).data.shape; '
+        f'apix = {angpix}; '
+        'x = (motl.df["x"] + motl.df["shift_x"] - nx/2) * apix; '
+        'y = (motl.df["y"] + motl.df["shift_y"] - ny/2) * apix; '
+        'z = (motl.df["z"] + motl.df["shift_z"] - nz/2) * apix; '
         'df = pd.DataFrame({'
-        '"rlnCoordinateX": motl.df["x"] + motl.df["shift_x"], '
-        '"rlnCoordinateY": motl.df["y"] + motl.df["shift_y"], '
-        '"rlnCoordinateZ": motl.df["z"] + motl.df["shift_z"], '
-        '"rlnAngleRot":    motl.df["phi"], '
-        '"rlnAngleTilt":   motl.df["theta"], '
-        '"rlnAnglePsi":    motl.df["psi"], '
-        '"rlnScore":       motl.df["score"]}); '
+        f'"rlnTomoName": "{ts_name}", '
+        '"rlnCenteredCoordinateXAngst": x, '
+        '"rlnCenteredCoordinateYAngst": y, '
+        '"rlnCenteredCoordinateZAngst": z, '
+        f'"rlnTomoTiltSeriesPixelSize": apix, '
+        '"rlnAngleRot":  motl.df["phi"].values, '
+        '"rlnAngleTilt": motl.df["theta"].values, '
+        '"rlnAnglePsi":  motl.df["psi"].values, '
+        '"rlnScore":     motl.df["score"].values}); '
         f'starfile.write({{"particles": df}}, "{out_star}")'
     )
 
@@ -438,6 +446,7 @@ def _run_extraction(ts_out, tomo_id, angpix, angles_list, python_bin, args,
         scores_em, angles_em, angles_list, tomo_id,
         diam_px, threshold, n_particles, out_star,
         symmetry, anglist_order,
+        ts_name=ts_out.name, angpix=angpix,
     )
     cmd = [python_bin, '-c', script]
 
