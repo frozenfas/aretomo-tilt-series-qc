@@ -835,7 +835,7 @@ td.mv {{ color:#ccc; }}
 <div class="cmd">{command}</div>
 <div class="top-bar">
   <span style="color:#888;font-size:11px">Slab: {slab_angst:.0f} Å</span>
-  <button class="btn" onclick="downloadCSV()">Download thresholds CSV</button>
+  <button class="btn" onclick="downloadCSV()">Save thresholds CSV</button>
   <button class="btn" onclick="resetAll()">Reset all thresholds</button>
 </div>
 <div class="grid">
