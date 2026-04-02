@@ -384,11 +384,14 @@ def _build_extract_script(scores_em, angles_em, angles_list, tomo_id,
                            anglist_order):
     """Return a Python script string that runs cryoCAT extraction."""
     n_part_arg = f'n_particles={n_particles},' if n_particles is not None else ''
-    # Work around cryoCAT 0.7.1 bug: RelionMotl(df) leaves self.version=None
-    # → "NoneType >= float" crash at cryomotl.py:2266.  Extract to motl first,
-    # then construct RelionMotl explicitly with version=3.1.
+    # Work around two cryoCAT 0.7.1 bugs:
+    #   1. RelionMotl(df) leaves self.version=None → "NoneType >= float" crash
+    #   2. RelionMotl.write_out uses DataFrame.applymap (removed in pandas 2.1)
+    # Solution: extract to raw motl, then write a simple RELION3 STAR ourselves
+    # using starfile (already installed in the gapstop env).
     return (
-        'from cryocat import tmana, cryomap, cryomotl; '
+        'import starfile, pandas as pd; '
+        'from cryocat import tmana, cryomap; '
         f'scores = cryomap.read("{scores_em}"); '
         f'angles = cryomap.read("{angles_em}"); '
         f'motl = tmana.scores_extract_particles('
@@ -401,7 +404,15 @@ def _build_extract_script(scores_em, angles_em, angles_list, tomo_id,
         f'angles_order="{anglist_order}", '
         f'symmetry="{symmetry}", '
         f'angles_numbering=0); '
-        f'cryomotl.RelionMotl(motl.df, version=3.1).write_out(output_path="{out_star}")'
+        'df = pd.DataFrame({'
+        '"rlnCoordinateX": motl.df["x"] + motl.df["shift_x"], '
+        '"rlnCoordinateY": motl.df["y"] + motl.df["shift_y"], '
+        '"rlnCoordinateZ": motl.df["z"] + motl.df["shift_z"], '
+        '"rlnAngleRot":    motl.df["phi"], '
+        '"rlnAngleTilt":   motl.df["theta"], '
+        '"rlnAnglePsi":    motl.df["psi"], '
+        '"rlnScore":       motl.df["score"]}); '
+        f'starfile.write({{"particles": df}}, "{out_star}")'
     )
 
 
