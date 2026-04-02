@@ -19,7 +19,7 @@ Typical usage
       --template ribosome_14A.mrc \\
       --mask ribosome_mask.mrc \\
       --angincr 3.5 --angiter 52 --phi-angincr 3.5 --phi-angiter 52 \\
-      --lp-rad 0.35 --hp-rad 0.02 \\
+      --lp-rad 16 --hp-rad 1 \\
       --voltage 300 --amplitude-contrast 0.07 --spherical-aberration 2.7 \\
       --output gapstop_match \\
       --dry-run
@@ -30,7 +30,7 @@ Typical usage
       --template ribosome_14A.mrc \\
       --mask ribosome_mask.mrc \\
       --angincr 3.5 --angiter 52 --phi-angincr 3.5 --phi-angiter 52 \\
-      --lp-rad 0.35 --hp-rad 0.02 \\
+      --lp-rad 16 --hp-rad 1 \\
       --n-tiles 4 \\
       --output gapstop_match
 
@@ -39,7 +39,7 @@ Typical usage
       --input run002-cmd2-sart-thr80 \\
       --template ribosome_14A.mrc --mask ribosome_mask.mrc \\
       --angincr 3.5 --angiter 52 --phi-angincr 3.5 --phi-angiter 52 \\
-      --lp-rad 0.35 --hp-rad 0.02 \\
+      --lp-rad 16 --hp-rad 1 \\
       --select-ts run002_analysis/ts-select.csv \\
       --bmask-dir run002-cmd2-sart-thr80/slabify \\
       --bmask-suffix _mask \\
@@ -609,30 +609,43 @@ def _picks_qc_entry(prefix, tomo_path, star_path, angpix, score_map, args):
     diam     = getattr(args, 'particle_diameter', None)
 
     img_b64 = score_b64 = None
+    n_total = n_shown = 0
 
-    # Tomogram slab with picks overlay
+    # Tomogram slab with picks overlay (or plain slab if no picks)
     picks_data = None
+    df = None
+    if star_path is not None:
+        try:
+            import warnings
+            import starfile
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                data = starfile.read(str(star_path), always_dict=True)
+            df = next(iter(data.values()))
+        except Exception:
+            df = None
+
     try:
-        import warnings
-        import starfile
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore')
-            data = starfile.read(str(star_path), always_dict=True)
-        df = next(iter(data.values()))
-        result = slab_with_picks_b64(tomo_path, df,
-                                     slab_angst=qc_thick,
-                                     particle_diameter=diam)
-        if result:
-            img_b64  = result['img_b64']
-            n_total  = result['n_total']
-            n_shown  = result['n_shown']
+        import pandas as pd
+        _df = df if df is not None else pd.DataFrame()
+        if len(_df):
+            result = slab_with_picks_b64(tomo_path, _df,
+                                         slab_angst=qc_thick,
+                                         particle_diameter=diam)
+            if result:
+                img_b64 = result['img_b64']
+                n_total = result['n_total']
+                n_shown = result['n_shown']
+            picks_data = slab_picks_data(tomo_path, _df,
+                                         slab_angst=qc_thick,
+                                         particle_diameter=diam)
         else:
-            n_total = n_shown = 0
-        picks_data = slab_picks_data(tomo_path, df,
-                                     slab_angst=qc_thick,
-                                     particle_diameter=diam)
+            # No particles — still render a plain tomo slab
+            proj = central_slab_projection(tomo_path, qc_thick)
+            if proj:
+                img_b64 = projection_to_b64png(proj['img'])
     except Exception:
-        n_total = n_shown = 0
+        pass
 
     # Score map
     if score_map and score_map.exists():
@@ -1002,10 +1015,12 @@ def run(args):
             score_map = _find_score_map(ts_out)
             star_path = ts_out / f'{prefix}_particles.star'
 
-            if do_extract and star_path.exists():
+            if do_extract:
                 # Show tomogram with picks overlay + score map
+                # (_picks_qc_entry handles missing/empty STAR gracefully)
                 qc_entries.append(_picks_qc_entry(
-                    prefix, tomo, star_path, angpix, score_map, args,
+                    prefix, tomo, star_path if star_path.exists() else None,
+                    angpix, score_map, args,
                 ))
             else:
                 # Matching only — show tomogram slab vs score map
