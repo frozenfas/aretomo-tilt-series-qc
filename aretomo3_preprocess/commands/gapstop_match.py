@@ -613,6 +613,9 @@ def add_parser(subparsers):
     ctl.add_argument('--extract-only', action='store_true',
                      help='Skip template matching; run extraction on existing score maps '
                           'in --output.  --input is not required in this mode.')
+    ctl.add_argument('--analyse-only', action='store_true',
+                     help='Skip extraction; regenerate QC HTML from existing '
+                          'particles STAR files in --output.')
     ctl.add_argument('--gapstop-dir', default=None,
                      help='Directory containing the gapstop binary '
                           '(default: /opt/miniconda3/envs/gapstop/bin/)')
@@ -810,12 +813,88 @@ def _run_extract_only(args, out_dir, sep):  # noqa: C901
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Analyse-only mode
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _run_analyse_only(args, out_dir, sep):
+    """Regenerate QC HTML from existing particles STAR files (no extraction)."""
+    ts_dirs = sorted(d for d in out_dir.iterdir() if d.is_dir())
+    if not ts_dirs:
+        print(f'ERROR: no per-TS subdirectories found in {out_dir}')
+        sys.exit(1)
+
+    selected_ts = resolve_selected_ts(getattr(args, 'select_ts', None))
+
+    jobs = []
+    for ts_dir in ts_dirs:
+        ts_name = ts_dir.name
+        if selected_ts is not None and ts_name not in selected_ts:
+            continue
+        param_file = ts_dir / f'{ts_name}_params.star'
+        if not param_file.exists():
+            continue
+        jobs.append((ts_name, ts_dir, param_file))
+
+    if not jobs:
+        print(f'ERROR: no per-TS param files found in {out_dir}')
+        sys.exit(1)
+
+    print(f'Tomograms to analyse: {len(jobs)}')
+    print(sep)
+
+    qc_entries = []
+    for ts_name, ts_dir, param_file in jobs:
+        print(f'  {ts_name}')
+        tomo_path = Path('.')
+        angpix = 1.0
+        try:
+            import starfile, warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                data = starfile.read(str(param_file), always_dict=True)
+            tomo_path = Path(next(iter(data.values())).iloc[0]['tomo_name'])
+            angpix = _mrc_angpix(tomo_path) or 1.0
+        except Exception:
+            pass
+
+        star_path = ts_dir / f'{ts_name}_particles.star'
+        score_map = _find_score_map(ts_dir)
+        qc_entries.append(_picks_qc_entry(
+            ts_name, tomo_path,
+            star_path if star_path.exists() else None,
+            angpix, score_map, args,
+        ))
+
+    print(sep)
+    html_path = (Path(args.analyse_output) if args.analyse_output
+                 else out_dir / 'gapstop_extract_qc.html')
+    make_picks_html(
+        entries    = qc_entries,
+        out_path   = html_path,
+        title      = 'gapstop-match picks QC',
+        command    = ' '.join(sys.argv),
+        slab_angst = getattr(args, 'analyse_thickness', 300.0),
+    )
+    make_picks_html_dev(
+        entries    = qc_entries,
+        out_path   = html_path.with_stem(html_path.stem + '_dev'),
+        title      = 'gapstop-match picks QC',
+        command    = ' '.join(sys.argv),
+        slab_angst = getattr(args, 'analyse_thickness', 300.0),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main run
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run(args):
     out_dir = Path(args.output).resolve()
     sep     = '─' * 70
+
+    if getattr(args, 'analyse_only', False):
+        _run_analyse_only(args, out_dir, sep)
+        return
 
     extract_only = getattr(args, 'extract_only', False)
     if extract_only:
