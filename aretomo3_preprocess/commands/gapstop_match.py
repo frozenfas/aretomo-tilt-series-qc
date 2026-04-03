@@ -18,7 +18,7 @@ Typical usage
       --input run002-cmd2-sart-thr80 \\
       --template ribosome_14A.mrc \\
       --mask ribosome_mask.mrc \\
-      --angincr 3.5 --angiter 52 --phi-angincr 3.5 --phi-angiter 52 \\
+      --angincr 3.5 \\
       --lp-rad 16 --hp-rad 1 \\
       --voltage 300 --amplitude-contrast 0.07 --spherical-aberration 2.7 \\
       --output gapstop_match \\
@@ -29,7 +29,7 @@ Typical usage
       --input run002-cmd2-sart-thr80 \\
       --template ribosome_14A.mrc \\
       --mask ribosome_mask.mrc \\
-      --angincr 3.5 --angiter 52 --phi-angincr 3.5 --phi-angiter 52 \\
+      --angincr 3.5 \\
       --lp-rad 16 --hp-rad 1 \\
       --n-tiles 4 \\
       --output gapstop_match
@@ -38,7 +38,7 @@ Typical usage
   aretomo3-preprocess gapstop-match \\
       --input run002-cmd2-sart-thr80 \\
       --template ribosome_14A.mrc --mask ribosome_mask.mrc \\
-      --angincr 3.5 --angiter 52 --phi-angincr 3.5 --phi-angiter 52 \\
+      --angincr 3.5 \\
       --lp-rad 16 --hp-rad 1 \\
       --select-ts run002_analysis/ts-select.csv \\
       --bmask-dir run002-cmd2-sart-thr80/slabify \\
@@ -943,14 +943,19 @@ def run(args):
         print(f'ERROR: --input {in_dir} not found')
         sys.exit(1)
 
+    # Fill angiter/phi_angiter defaults (gapstop uses 180/angincr when absent)
+    if args.angiter is None:
+        args.angiter = 180.0 / args.angincr
+    if args.phi_angincr is None:
+        args.phi_angincr = args.angincr
+    if args.phi_angiter is None:
+        args.phi_angiter = 180.0 / args.phi_angincr
+
     # Validate required TM args
     missing = [name for val, name in [
         (args.template,    '--template'),
         (args.mask,        '--mask'),
         (args.angincr,     '--angincr'),
-        (args.angiter,     '--angiter'),
-        (args.phi_angincr, '--phi-angincr'),
-        (args.phi_angiter, '--phi-angiter'),
         (args.lp_rad,      '--lp-rad'),
         (args.hp_rad,      '--hp-rad'),
     ] if val is None]
