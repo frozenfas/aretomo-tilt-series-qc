@@ -731,7 +731,12 @@ def run(args):
             ok.append(prefix)
             continue
 
+        import time as _time
+        _t0 = _time.perf_counter()
         ret = subprocess.run(cmd)
+        _elapsed = _time.perf_counter() - _t0
+        _h, _m, _s = int(_elapsed//3600), int((_elapsed%3600)//60), int(_elapsed%60)
+        print(f'  Search time: {_h:02d}:{_m:02d}:{_s:02d}')
         if ret.returncode != 0:
             print(f'  ERROR: pytom exited with code {ret.returncode}')
             failed.append(prefix)
@@ -758,8 +763,9 @@ def run(args):
                 'before_path': str(tomo),
                 'after_path':  str(score_files[0]) if score_files else '',
                 'metadata': {
-                    'template': Path(args.template).name,
-                    'voxel':    f'{args.voxel_size} Å',
+                    'template':    Path(args.template).name,
+                    'voxel':       f'{args.voxel_size} Å',
+                    'search time': f'{_h:02d}:{_m:02d}:{_s:02d}',
                 },
             })
 

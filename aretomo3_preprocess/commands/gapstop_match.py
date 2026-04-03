@@ -647,7 +647,7 @@ def add_parser(subparsers):
     return p
 
 
-def _picks_qc_entry(prefix, tomo_path, star_path, angpix, score_map, args):
+def _picks_qc_entry(prefix, tomo_path, star_path, angpix, score_map, args, extra_meta=None):
     """Build a QC entry dict with tomogram+picks overlay and score map."""
     qc_thick = getattr(args, 'analyse_thickness', 300.0)
     diam     = getattr(args, 'particle_diameter', None)
@@ -711,6 +711,7 @@ def _picks_qc_entry(prefix, tomo_path, star_path, angpix, score_map, args):
             'pixel size':  f'{angpix:.4g} Å',
             'threshold':   str(args.scores_threshold),
             'particles':   f'{n_shown} in slab / {n_total} total',
+            **(extra_meta or {}),
         },
     }
 
@@ -1116,7 +1117,12 @@ def run(args):
             ok.append(prefix)
             continue
 
+        import time as _time
+        _t0 = _time.perf_counter()
         ret = subprocess.run(cmd, env=cuda_env)
+        _elapsed = _time.perf_counter() - _t0
+        _h, _m, _s = int(_elapsed//3600), int((_elapsed%3600)//60), int(_elapsed%60)
+        print(f'  Search time: {_h:02d}:{_m:02d}:{_s:02d}')
         if ret.returncode != 0:
             print(f'  ERROR: gapstop exited with code {ret.returncode}')
             failed.append(prefix)
@@ -1149,6 +1155,7 @@ def run(args):
                 qc_entries.append(_picks_qc_entry(
                     prefix, tomo, star_path if star_path.exists() else None,
                     angpix, score_map, args,
+                    extra_meta={'search time': f'{_h:02d}:{_m:02d}:{_s:02d}'},
                 ))
             else:
                 # Matching only — show tomogram slab vs score map
@@ -1174,6 +1181,7 @@ def run(args):
                         'tilts':       str(len(tilt_angles)),
                         'n tiles':     str(n_tiles),
                         'lp / hp rad': f'{args.lp_rad} / {args.hp_rad}',
+                        'search time': f'{_h:02d}:{_m:02d}:{_s:02d}',
                     },
                 })
 
