@@ -737,9 +737,9 @@ def make_picks_html_dev(
             p_json  = pd['particles']   # already JSON string
 
             canvas_block = f"""
-<div class="canvas-wrap" style="position:relative;display:inline-block;line-height:0">
+<div class="canvas-wrap" style="position:relative;display:inline-block;line-height:0;width:100%">
   <img id="bg_{tid}" src="data:image/png;base64,{pd['img_b64']}"
-       style="display:block;max-width:100%">
+       style="display:block;width:100%;height:auto">
   <canvas id="cv_{tid}" width="{img_nx}" height="{img_ny}"
           style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none">
   </canvas>
@@ -749,14 +749,15 @@ def make_picks_html_dev(
     <input type="range" class="ts-slider" data-ts="{ts}"
            id="sl_{tid}" min="{s_min:.6f}" max="{s_max:.6f}"
            step="{s_step}" value="{s_init}"
-           oninput="drawPicks('{tid}',parseFloat(this.value))">
+           oninput="onSliderInput('{tid}','{ts}',parseFloat(this.value))">
     <span id="tv_{tid}">{s_init:.4f}</span>
   </label>
   <span id="cnt_{tid}" class="cnt">? / {n_total}</span>
+  <button class="fs-btn" onclick="openFullscreen('{tid}','{ts}')">&#x2922; fullscreen</button>
 </div>
 <script>
 (function(){{
-  var D={{particles:{p_json},zs:{zs},ze:{ze},r:{r_px},
+  var D={{particles:{p_json},zs:{zs},ze:{ze},r:{r_px},img_nx:{img_nx},img_ny:{img_ny},
           smin:{s_min},smax:{s_max},hasSc:{has_sc}}};
   window._pd=window._pd||{{}};window._pd['{tid}']=D;
   drawPicks('{tid}',{s_init});
@@ -814,9 +815,13 @@ h1 {{ color:#7eb8f7; margin-bottom:4px; }}
 .card {{ background:#16213e; border:1px solid #2a2a4a; border-radius:8px; padding:14px; }}
 .card-header {{ font-size:14px; font-weight:bold; color:#7eb8f7; margin-bottom:10px; }}
 .n-particles {{ color:#aaa; font-size:11px; margin-left:10px; }}
-.panels {{ display:flex; flex-wrap:wrap; gap:10px; }}
-.panel {{ flex:1; min-width:280px; }}
-.panel-label {{ font-size:11px; color:#888; margin-bottom:4px; }}
+.panels {{ display:flex; flex-wrap:wrap; gap:10px; align-items:flex-start; }}
+.panel {{ flex:1 1 0; min-width:280px; }}
+.panel-label {{ font-size:11px; color:#888; margin-bottom:4px; display:flex; justify-content:space-between; align-items:center; }}
+.panel img {{ width:100%; height:auto; display:block; }}
+.fs-btn {{ background:none; border:1px solid #3a3a6a; color:#7eb8f7; padding:1px 7px;
+           border-radius:3px; cursor:pointer; font-size:11px; font-family:monospace; }}
+.fs-btn:hover {{ background:#1e3a5f; }}
 .img-placeholder {{ background:#111; height:200px; display:flex;
                     align-items:center; justify-content:center; color:#444; }}
 .canvas-wrap {{ width:100%; }}
@@ -895,8 +900,102 @@ function resetAll() {{
     var min=parseFloat(sl.min), max=parseFloat(sl.max);
     sl.value = max;
     var tid = sl.id.replace('sl_','');
-    drawPicks(tid, parseFloat(sl.value));
+    onSliderInput(tid, sl.dataset.ts, parseFloat(sl.value));
   }});
+}}
+
+function onSliderInput(tid, ts, val) {{
+  drawPicks(tid, val);
+  try {{ localStorage.setItem('gs_thr_'+ts, String(val)); }} catch(e) {{}}
+}}
+
+function syncThreshold(tid, ts, val) {{
+  var sl = document.getElementById('sl_'+tid);
+  if (!sl) return;
+  sl.value = val;
+  drawPicks(tid, val);
+}}
+
+window.addEventListener('storage', function(e) {{
+  if (!e.key || e.key.indexOf('gs_thr_') !== 0) return;
+  var ts = e.key.slice(7);
+  document.querySelectorAll('.ts-slider').forEach(function(sl) {{
+    if (sl.dataset.ts !== ts) return;
+    var tid = sl.id.replace('sl_','');
+    sl.value = e.newValue;
+    drawPicks(tid, parseFloat(e.newValue));
+  }});
+}});
+
+window._plasmaColor = plasmaColor;
+
+function openFullscreen(tid, ts) {{
+  var D = window._pd && window._pd[tid];
+  if (!D) return;
+  var sl = document.getElementById('sl_'+tid);
+  var curVal = sl ? parseFloat(sl.value) : D.smax;
+  var bgEl = document.getElementById('bg_'+tid);
+  var imgSrc = bgEl ? bgEl.src : '';
+  var smin = D.smin, smax = D.smax;
+  var step = Math.round((smax-smin)/1000*1e6)/1e6 || 0.0001;
+  var storeKey = 'gs_thr_'+ts;
+  var w = window.open('','_blank');
+  w.document.write(
+    '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>'+ts+' \u2014 picks<\/title><style>' +
+    '*{{box-sizing:border-box;margin:0;padding:0}}' +
+    'body{{background:#000;display:flex;flex-direction:column;height:100vh;overflow:hidden}}' +
+    '.wrap{{flex:1;display:flex;align-items:center;justify-content:center;overflow:hidden}}' +
+    '.inner{{position:relative;display:inline-block;line-height:0}}' +
+    '.inner img{{max-width:100vw;max-height:calc(100vh - 52px);display:block}}' +
+    '.inner canvas{{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none}}' +
+    '.ctrl{{height:52px;padding:0 16px;background:#111;border-top:1px solid #222;' +
+           'display:flex;gap:12px;align-items:center}}' +
+    '.lbl{{color:#7eb8f7;font-size:13px;font-family:monospace}}' +
+    'input[type=range]{{flex:1;accent-color:#f89441}}' +
+    '.tv{{color:#ccc;font-size:12px;font-family:monospace;min-width:70px}}' +
+    '.cnt{{color:#f89441;font-size:12px;font-family:monospace;white-space:nowrap}}' +
+    '<\/style><\/head><body>' +
+    '<div class="wrap"><div class="inner">' +
+    '<img id="bg" src="'+imgSrc+'">' +
+    '<canvas id="cv" width="'+D.img_nx+'" height="'+D.img_ny+'"><\/canvas>' +
+    '<\/div><\/div>' +
+    '<div class="ctrl">' +
+    '<span class="lbl">'+ts+'<\/span>' +
+    '<input type="range" id="sl" min="'+smin+'" max="'+smax+'" step="'+step+'" value="'+curVal+'" oninput="onSlide(parseFloat(this.value))">' +
+    '<span class="tv" id="tv">'+curVal.toFixed(5)+'<\/span>' +
+    '<span class="cnt" id="cnt">...<\/span>' +
+    '<\/div>' +
+    '<script>' +
+    'function plasmaColor(t){{return window.opener&&window.opener._plasmaColor?window.opener._plasmaColor(t):"rgba(255,221,0,0.8)";}}' +
+    'var D=window.opener._pd["'+tid+'"];' +
+    'var SKEY="'+storeKey+'";' +
+    'function drawPicks(thresh){{' +
+    '  var cv=document.getElementById("cv");if(!cv||!D)return;' +
+    '  var ctx=cv.getContext("2d");ctx.clearRect(0,0,cv.width,cv.height);' +
+    '  var cnt=0,ps=D.particles,smin=D.smin,smax=D.smax,rng=smax-smin||1e-9;' +
+    '  for(var i=0;i<ps.length;i++){{' +
+    '    var p=ps[i];if(p.z<D.zs||p.z>D.ze||p.s<thresh)continue;' +
+    '    var col=D.hasSc?plasmaColor((p.s-smin)/rng):"rgba(255,221,0,0.8)";' +
+    '    ctx.beginPath();' +
+    '    if(D.r){{ctx.arc(p.x,p.y,D.r,0,2*Math.PI);ctx.strokeStyle=col;ctx.lineWidth=2.5;ctx.globalAlpha=0.9;ctx.stroke();}}' +
+    '    else{{ctx.moveTo(p.x-4,p.y);ctx.lineTo(p.x+4,p.y);ctx.moveTo(p.x,p.y-4);ctx.lineTo(p.x,p.y+4);ctx.strokeStyle=col;ctx.lineWidth=2.5;ctx.globalAlpha=0.9;ctx.stroke();}}' +
+    '    cnt++;' +
+    '  }}' +
+    '  var tv=document.getElementById("tv");if(tv)tv.textContent=thresh.toFixed(5);' +
+    '  var ce=document.getElementById("cnt");if(ce)ce.textContent=cnt+" / "+ps.length;' +
+    '}}' +
+    'function onSlide(val){{' +
+    '  drawPicks(val);' +
+    '  try{{localStorage.setItem(SKEY,String(val));}}catch(e){{}}' +
+    '  if(window.opener&&!window.opener.closed)window.opener.syncThreshold("'+tid+'","'+ts+'",val);' +
+    '}}' +
+    'window.addEventListener("storage",function(e){{' +
+    '  if(e.key===SKEY){{var v=parseFloat(e.newValue);document.getElementById("sl").value=v;drawPicks(v);}}' +
+    '}});' +
+    'drawPicks('+curVal+');' +
+    '<\/script><\/body><\/html>'
+  );
+  w.document.close();
 }}
 </script>
 </body></html>"""
