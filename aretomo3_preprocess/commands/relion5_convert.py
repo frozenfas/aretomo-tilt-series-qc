@@ -80,6 +80,7 @@ except ImportError:
 from aretomo3_preprocess.shared.parsers import (
     parse_aln_file, parse_ctf_file, parse_tlt_file, parse_mdoc_file,
 )
+from aretomo3_preprocess.shared.project_state import resolve_selected_ts
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -509,6 +510,9 @@ def add_parser(subparsers):
                    help='MTF file name for the detector (default: DUMMY).')
     p.add_argument('--optics-group', default='optics1', metavar='NAME',
                    help='Optics group name (default: optics1).')
+    p.add_argument('--select-ts', default=None, metavar='CSV',
+                   help='ts_selection.csv from select-ts; only TS with selected==1 '
+                        'are processed.')
     p.add_argument('--include', nargs='+', default=None, metavar='TS',
                    help='Process only these tilt-series names (e.g. ts-001 ts-002).')
     p.add_argument('--exclude', nargs='+', default=None, metavar='TS',
@@ -585,6 +589,8 @@ def run(args):
 
     all_ts = [f.stem for f in aln_files]
 
+    selected_ts = resolve_selected_ts(getattr(args, 'select_ts', None))
+
     if args.include:
         ts_list = [t for t in all_ts if t in set(args.include)]
         missing_ts = set(args.include) - set(all_ts)
@@ -592,6 +598,9 @@ def run(args):
             print(f'WARNING: --include names not found: {sorted(missing_ts)}')
     else:
         ts_list = all_ts
+
+    if selected_ts is not None:
+        ts_list = [t for t in ts_list if t in selected_ts]
 
     if args.exclude:
         excl = set(args.exclude)
