@@ -322,6 +322,19 @@ def _process_ts(ts_name: str, input_dir: Path, cmd0_dir: Path, imod_dir: Path,
         print(f'  ERROR: {ts_name}: no rows in _TLT.txt')
         return None
 
+    # alpha_offset: systematic tilt correction applied via aln-edit.
+    # _st.tlt contains nominal tilts only; adding alpha_offset gives the
+    # corrected tilt used for reconstruction (= TILT column in .aln).
+    alpha_offset = aln_data.get('alpha_offset') or 0.0
+    if alpha_offset != 0.0:
+        print(f'  alpha_offset = {alpha_offset:+.2f}° (from .aln) → applied to rlnTomoYTilt')
+
+    # Warn if .aln was manually edited (backup exists)
+    if (aln_path.parent / f'{aln_path.name}.bak').exists():
+        print(f'  WARNING: {aln_path.name}.bak found — .aln appears to have been '
+              f'manually edited (e.g. via aln-edit).  alpha_offset={alpha_offset:+.2f}° '
+              f'will be applied to rlnTomoYTilt.')
+
     n_tilts = len(tlt_data)
 
     dark_frame_bs  = {df['frame_b'] for df in aln_data['dark_frames']}
@@ -356,7 +369,8 @@ def _process_ts(ts_name: str, input_dir: Path, cmd0_dir: Path, imod_dir: Path,
         ctf_entry = ctf_data.get(tlt_row_idx, {})
         xf_idx    = tlt_row_idx - 1
         xf_entry  = xf_list[xf_idx] if xf_idx < len(xf_list) else {}
-        y_tilt    = itlt_list[xf_idx] if xf_idx < len(itlt_list) else tlt_entry['nominal_tilt']
+        y_tilt    = (itlt_list[xf_idx] if xf_idx < len(itlt_list)
+                     else tlt_entry['nominal_tilt']) + alpha_offset
         pre_exp   = prior_dose_map.get(acq_order, 0.0)
 
         tilts_dir = output_dir / 'tilts'
