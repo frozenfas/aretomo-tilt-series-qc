@@ -6,6 +6,7 @@ from aretomo3_preprocess.commands import (
     rename_ts, run_aretomo3, run_aretomo3_per_ts, cryocare, enrich, select_ts,
     imod_mtffilter, topaz_denoise3d, topaz_train, deep_dewedge, deep_dewedge_mw,
     aln_edit, pytom_match, membrain_seg, slabify, simple_box_mask, gapstop_match,
+    relion5_convert,
 )
 
 
@@ -38,6 +39,7 @@ def main():
     slabify.add_parser(sub)
     simple_box_mask.add_parser(sub)
     gapstop_match.add_parser(sub)
+    relion5_convert.add_parser(sub)
 
     args = ap.parse_args()
     args.func(args)
