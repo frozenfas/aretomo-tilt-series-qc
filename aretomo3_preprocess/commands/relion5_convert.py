@@ -254,7 +254,7 @@ def _unstack_mrc(src: Path, out_dir: Path, index_to_stem: dict,
 # Per-tomogram processing
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _process_ts(ts_name: str, input_dir: Path, cmd0_dir: Path,
+def _process_ts(ts_name: str, input_dir: Path, cmd0_dir: Path, imod_dir: Path,
                 output_dir: Path, session: dict,
                 movie_frames: int, mtf: str, optics_group: str,
                 no_unstack: bool, unstack_halves: bool, dry_run: bool,
@@ -263,6 +263,9 @@ def _process_ts(ts_name: str, input_dir: Path, cmd0_dir: Path,
     Process one tilt series.  Returns a dict of global-star fields, or None on
     fatal error.
 
+    imod_dir    : directory containing ts-XXX_Imod/ subdirectories (_st.xf, _st.tlt).
+                  For cmd=0/1 input this is the same as input_dir; for cmd=2 it is
+                  the cmd=0/1 dir (auto-detected or specified via --imod-dir).
     mdoc data is sourced from project.json when available; mdoc_dir is only
     used as a fallback if project.json is missing or the TS is not in it.
     """
@@ -270,8 +273,8 @@ def _process_ts(ts_name: str, input_dir: Path, cmd0_dir: Path,
     aln_path   = input_dir  / f'{ts_name}.aln'
     ctf_path   = input_dir  / f'{ts_name}_CTF.txt'
     tlt_path   = cmd0_dir   / f'{ts_name}_TLT.txt'
-    xf_path    = input_dir  / f'{ts_name}_Imod' / f'{ts_name}_st.xf'
-    itlt_path  = input_dir  / f'{ts_name}_Imod' / f'{ts_name}_st.tlt'
+    xf_path    = imod_dir   / f'{ts_name}_Imod' / f'{ts_name}_st.xf'
+    itlt_path  = imod_dir   / f'{ts_name}_Imod' / f'{ts_name}_st.tlt'
     mrc_path   = input_dir  / f'{ts_name}.mrc'
     ctf_mrc    = input_dir  / f'{ts_name}_CTF.mrc'
 
@@ -486,6 +489,12 @@ def add_parser(subparsers):
     p.add_argument('--cmd0-dir', default=None, metavar='DIR',
                    help='cmd=0 directory containing _TLT.txt and Session.json.  '
                         'Auto-detected from .mrc symlinks if not given.')
+    p.add_argument('--imod-dir', default=None, metavar='DIR',
+                   help='Directory containing ts-XXX_Imod/ subdirectories '
+                        '(_st.xf, _st.tlt alignment files).  '
+                        'Defaults to --cmd0-dir (auto-detected).  '
+                        'Set explicitly when alignment was done in a separate '
+                        'cmd=1 directory.')
     p.add_argument('--mdoc-dir', default=None, metavar='DIR',
                    help='Fallback directory containing ts-XXX.mdoc files.  '
                         'Not needed when aretomo3_project.json is present '
@@ -545,6 +554,10 @@ def run(args):
     cmd0_dir = Path(args.cmd0_dir).resolve() if args.cmd0_dir else _detect_cmd0_dir(input_dir)
     if cmd0_dir != input_dir:
         print(f'cmd0 directory: {cmd0_dir}')
+
+    imod_dir = Path(args.imod_dir).resolve() if args.imod_dir else cmd0_dir
+    if imod_dir != cmd0_dir:
+        print(f'_Imod directory: {imod_dir}')
 
     # ── load project JSON ─────────────────────────────────────────────────────
     from aretomo3_preprocess.shared.project_json import load as _load_project
@@ -612,6 +625,7 @@ def run(args):
             ts_name        = ts_name,
             input_dir      = input_dir,
             cmd0_dir       = cmd0_dir,
+            imod_dir       = imod_dir,
             output_dir     = output_dir,
             session        = session,
             movie_frames   = args.movie_frames,
