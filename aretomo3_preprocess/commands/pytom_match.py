@@ -654,16 +654,26 @@ def run(args):
     # ── QC setup ──────────────────────────────────────────────────────────
     do_qc    = getattr(args, 'analyse', False)
     qc_thick = getattr(args, 'analyse_thickness', 300.0)
-    qc_entries = []
+    qc_entries         = []
+    extract_qc_entries = []
+    do_qc_picks        = False
 
     if do_qc:
         try:
             from aretomo3_preprocess.shared.volume_qc import (
                 central_slab_projection, projection_to_b64png, make_comparison_html,
+                slab_with_picks_b64, slab_picks_data, make_picks_html, make_picks_html_dev,
             )
         except ImportError as e:
             print(f'WARNING: --analyse requires mrcfile and matplotlib ({e}); skipping report')
             do_qc = False
+        if do_qc and getattr(args, 'extract', False):
+            try:
+                import warnings as _warnings
+                import starfile as _starfile
+                do_qc_picks = True
+            except ImportError as e:
+                print(f'WARNING: picks QC requires starfile ({e}); skipping picks report')
 
     # ── Process each tomogram ──────────────────────────────────────────────
     ok, failed = [], []
@@ -788,12 +798,65 @@ def run(args):
                         eret = subprocess.run(ecmd)
                         if eret.returncode != 0:
                             print(f'  WARNING: extraction exited with code {eret.returncode}')
-                        elif args.imod:
-                            mod_dir = (Path(args.imod_dir).resolve()
-                                       if args.imod_dir else out_dir / 'mod')
-                            for star in sorted(out_subdir.glob('*_particles.star')):
-                                sphere_d = _sphere_diameter(args)
-                _star_to_mod(star, job_json, mod_dir, sphere_diameter=sphere_d)
+                        else:
+                            if args.imod:
+                                mod_dir = (Path(args.imod_dir).resolve()
+                                           if args.imod_dir else out_dir / 'mod')
+                                for star in sorted(out_subdir.glob('*_particles.star')):
+                                    sphere_d = _sphere_diameter(args)
+                                    _star_to_mod(star, job_json, mod_dir,
+                                                 sphere_diameter=sphere_d)
+                            if do_qc_picks:
+                                star_files  = sorted(out_subdir.glob('*_particles.star'))
+                                score_files = sorted(out_subdir.glob('*_scores.mrc'))
+                                ext_entry = {
+                                    'ts_name':   prefix,
+                                    'img_b64':   None,
+                                    'score_b64': None,
+                                    'n_total':   0,
+                                    'n_shown':   0,
+                                    'metadata':  {},
+                                }
+                                if star_files and Path(str(tomo)).exists():
+                                    try:
+                                        with _warnings.catch_warnings():
+                                            _warnings.simplefilter('ignore')
+                                            data = _starfile.read(str(star_files[0]))
+                                        df = (data[next(iter(data))]
+                                              if isinstance(data, dict) else data)
+                                        result = slab_with_picks_b64(
+                                            tomo, df,
+                                            slab_angst=qc_thick,
+                                            particle_diameter=args.particle_diameter,
+                                        )
+                                        sc_b64 = None
+                                        if score_files:
+                                            sproj = central_slab_projection(
+                                                score_files[0], qc_thick)
+                                            if sproj:
+                                                sc_b64 = projection_to_b64png(
+                                                    sproj['img'], pct=(50, 99.9),
+                                                    cmap='inferno', colorbar=True)
+                                        if result:
+                                            pd_data = slab_picks_data(
+                                                tomo, df,
+                                                slab_angst=qc_thick,
+                                                particle_diameter=args.particle_diameter,
+                                            )
+                                            ext_entry.update({
+                                                'img_b64':    result['img_b64'],
+                                                'score_b64':  sc_b64,
+                                                'n_total':    result['n_total'],
+                                                'n_shown':    result['n_shown'],
+                                                'picks_data': pd_data,
+                                                'metadata': {
+                                                    'slab':   f'{result["slab_a"]:.0f} Å  ({result["vox"]:.2f} Å/px)',
+                                                    'picked': f'{result["n_shown"]} / {result["n_total"]} in slab',
+                                                },
+                                            })
+                                    except Exception as exc:
+                                        print(f'  WARNING: picks QC render failed: {exc}')
+                                extract_qc_entries.append(ext_entry)
 
     # ── Summary ────────────────────────────────────────────────────────────
     print(f'\n{sep}')
@@ -813,6 +876,24 @@ def run(args):
             before_label = 'Tomogram',
             after_label  = 'Score map',
             slab_angst   = qc_thick,
+        )
+
+    if do_qc_picks and extract_qc_entries:
+        picks_html = out_dir / 'pytom_extract_qc.html'
+        make_picks_html(
+            entries    = extract_qc_entries,
+            out_path   = picks_html,
+            title      = 'pytom-extract QC',
+            command    = ' '.join(sys.argv),
+            slab_angst = qc_thick,
+        )
+        dev_path = picks_html.with_stem(picks_html.stem + '_dev')
+        make_picks_html_dev(
+            entries    = extract_qc_entries,
+            out_path   = dev_path,
+            title      = 'pytom-extract QC',
+            command    = ' '.join(sys.argv),
+            slab_angst = qc_thick,
         )
 
     if args.dry_run:
