@@ -405,18 +405,18 @@ def add_parser(subparsers):
     inp.add_argument('--dose', type=float, default=None,
                      help='Per-frame dose (e⁻/Å²); if omitted, reads from _TLT.txt')
 
-    tmpl = p.add_argument_group('template matching (required)')
-    tmpl.add_argument('--template', '-t', required=True,
+    tmpl = p.add_argument_group('template matching (required for matching)')
+    tmpl.add_argument('--template', '-t', default=None,
                       help='Template MRC file (inverted contrast for cryo-ET)')
-    tmpl.add_argument('--mask', '-m', required=True,
+    tmpl.add_argument('--mask', '-m', default=None,
                       help='Mask MRC file')
-    tmpl.add_argument('--voxel-size', type=float, required=True,
+    tmpl.add_argument('--voxel-size', type=float, default=None,
                       help='Voxel size in Å (tomogram and template must match)')
-    tmpl.add_argument('--gpu', '-g', nargs='+', type=int, required=True,
+    tmpl.add_argument('--gpu', '-g', nargs='+', type=int, default=None,
                       help='GPU ID(s) for pytom_match_template.py')
 
-    ang = p.add_argument_group('angular search (exactly one required)')
-    ang_grp = ang.add_mutually_exclusive_group(required=True)
+    ang = p.add_argument_group('angular search (required for matching)')
+    ang_grp = ang.add_mutually_exclusive_group(required=False)
     ang_grp.add_argument('--particle-diameter', type=float,
                          help='Particle diameter in Å (Crowther criterion sampling)')
     ang_grp.add_argument('--angular-search',
@@ -582,7 +582,19 @@ def run(args):
 
     # ── Matching mode ─────────────────────────────────────────────────────
     if args.input is None:
-        print('ERROR: --input is required unless --extract-only is set')
+        print('ERROR: --input is required unless --extract-only or --analyse-only is set')
+        sys.exit(1)
+
+    missing = [f'--{f}' for f, v in [('template', args.template), ('mask', args.mask),
+                                       ('voxel-size', args.voxel_size), ('gpu', args.gpu)]
+               if v is None]
+    if missing:
+        print(f'ERROR: the following arguments are required for matching: '
+              f'{", ".join(missing)}')
+        sys.exit(1)
+
+    if args.particle_diameter is None and args.angular_search is None:
+        print('ERROR: one of --particle-diameter or --angular-search is required for matching')
         sys.exit(1)
 
     in_dir = Path(args.input).resolve()
