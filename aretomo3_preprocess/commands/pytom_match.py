@@ -508,6 +508,10 @@ def add_parser(subparsers):
     ctl.add_argument('--extract-only', action='store_true',
                      help='Skip template matching; run extraction on existing job JSONs '
                           'in --output.  --input is not required in this mode.')
+    ctl.add_argument('--analyse-only', action='store_true',
+                     help='Regenerate the QC HTML reports from existing results in --output '
+                          'without re-running matching or extraction. '
+                          'Requires --analyse and --output pointing to a previous run.')
     ctl.add_argument('--pytom-dir', default=None,
                      help='Directory containing pytom binaries '
                           '(default: /opt/miniconda3/envs/pytom_tm/bin/)')
@@ -565,10 +569,15 @@ def run(args):
     out_dir = Path(args.output).resolve()
     sep     = '─' * 70
 
-    extract_only = getattr(args, 'extract_only', False)
+    extract_only  = getattr(args, 'extract_only',  False)
+    analyse_only  = getattr(args, 'analyse_only',  False)
 
     if extract_only:
         _run_extract_only(args, out_dir, sep)
+        return
+
+    if analyse_only:
+        _run_analyse_only(args, out_dir, sep)
         return
 
     # ── Matching mode ─────────────────────────────────────────────────────
@@ -911,6 +920,152 @@ def run(args):
         },
         backup_dir=out_dir,
     )
+
+
+def _run_analyse_only(args, out_dir, sep):
+    """Regenerate QC HTML from existing results without re-running matching or extraction."""
+    if not out_dir.is_dir():
+        print(f'ERROR: --output {out_dir} not found')
+        sys.exit(1)
+
+    if not getattr(args, 'analyse', False):
+        print('ERROR: --analyse-only requires --analyse')
+        sys.exit(1)
+
+    try:
+        import warnings as _warnings
+        import starfile as _starfile
+        from aretomo3_preprocess.shared.volume_qc import (
+            central_slab_projection, projection_to_b64png,
+            make_comparison_html, slab_with_picks_b64, slab_picks_data,
+            make_picks_html, make_picks_html_dev,
+        )
+    except ImportError as e:
+        print(f'ERROR: --analyse-only requires mrcfile, matplotlib, starfile ({e})')
+        sys.exit(1)
+
+    qc_thick = getattr(args, 'analyse_thickness', 300.0)
+    selected_ts = resolve_selected_ts(getattr(args, 'select_ts', None))
+    jobs = _find_job_jsons(out_dir, selected_ts)
+
+    if not jobs:
+        print(f'ERROR: no *_job.json files found in {out_dir}/')
+        sys.exit(1)
+
+    print(f'Tomograms to analyse: {len(jobs)}')
+    print(sep)
+
+    match_entries   = []
+    extract_entries = []
+
+    for i, (ts_name, job_json) in enumerate(jobs):
+        print(f'\n[{i+1}/{len(jobs)}] {ts_name}')
+        with open(job_json) as fh:
+            job = json.load(fh)
+        tomo_path = job.get('tomogram') or job.get('tomogram_path') or job.get('volume_path')
+        star_files  = sorted(job_json.parent.glob('*_particles.star'))
+        score_files = sorted(job_json.parent.glob('*_scores.mrc'))
+
+        # ── Match QC (score map comparison) ───────────────────────────────
+        before_b64 = after_b64 = None
+        if tomo_path and Path(tomo_path).exists():
+            proj = central_slab_projection(tomo_path, qc_thick)
+            if proj:
+                before_b64 = projection_to_b64png(proj['img'])
+        if score_files:
+            sproj = central_slab_projection(score_files[0], qc_thick)
+            if sproj:
+                after_b64 = projection_to_b64png(sproj['img'], pct=(50, 99.9),
+                                                   cmap='inferno', colorbar=True)
+        match_entries.append({
+            'ts_name':     ts_name,
+            'before_b64':  before_b64,
+            'after_b64':   after_b64,
+            'before_path': tomo_path or '',
+            'after_path':  str(score_files[0]) if score_files else '',
+            'metadata':    {},
+        })
+
+        # ── Extract QC (picks overlay + slider) ────────────────────────────
+        ext_entry = {
+            'ts_name':   ts_name,
+            'img_b64':   None,
+            'score_b64': after_b64,
+            'n_total':   0,
+            'n_shown':   0,
+            'metadata':  {},
+        }
+        if star_files and tomo_path and Path(tomo_path).exists():
+            try:
+                with _warnings.catch_warnings():
+                    _warnings.simplefilter('ignore')
+                    data = _starfile.read(str(star_files[0]))
+                df = data[next(iter(data))] if isinstance(data, dict) else data
+                result = slab_with_picks_b64(
+                    tomo_path, df,
+                    slab_angst=qc_thick,
+                    particle_diameter=getattr(args, 'particle_diameter', None),
+                )
+                if result:
+                    pd_data = slab_picks_data(
+                        tomo_path, df,
+                        slab_angst=qc_thick,
+                        particle_diameter=getattr(args, 'particle_diameter', None),
+                    )
+                    ext_entry.update({
+                        'img_b64':    result['img_b64'],
+                        'n_total':    result['n_total'],
+                        'n_shown':    result['n_shown'],
+                        'picks_data': pd_data,
+                        'metadata': {
+                            'slab':   f'{result["slab_a"]:.0f} Å  ({result["vox"]:.2f} Å/px)',
+                            'picked': f'{result["n_shown"]} / {result["n_total"]} in slab',
+                        },
+                    })
+                    print(f'  {result["n_shown"]} / {result["n_total"]} particles in slab')
+            except Exception as exc:
+                print(f'  WARNING: QC render failed: {exc}')
+        extract_entries.append(ext_entry)
+
+    print(f'\n{sep}')
+
+    # ── Match QC HTML ─────────────────────────────────────────────────────
+    match_html = (Path(args.analyse_output) if args.analyse_output
+                  else out_dir / 'pytom_match_qc.html')
+    make_comparison_html(
+        entries      = match_entries,
+        out_path     = match_html,
+        title        = 'pytom-match QC',
+        command      = ' '.join(sys.argv),
+        before_label = 'Tomogram',
+        after_label  = 'Score map',
+        slab_angst   = qc_thick,
+    )
+    print(f'Match QC:   {match_html}')
+
+    # ── Extract QC HTML ───────────────────────────────────────────────────
+    has_picks = any(e.get('img_b64') for e in extract_entries)
+    if has_picks:
+        picks_html = out_dir / 'pytom_extract_qc.html'
+        make_picks_html(
+            entries    = extract_entries,
+            out_path   = picks_html,
+            title      = 'pytom-extract QC',
+            command    = ' '.join(sys.argv),
+            slab_angst = qc_thick,
+        )
+        dev_path = picks_html.with_stem(picks_html.stem + '_dev')
+        make_picks_html_dev(
+            entries    = extract_entries,
+            out_path   = dev_path,
+            title      = 'pytom-extract QC',
+            command    = ' '.join(sys.argv),
+            slab_angst = qc_thick,
+        )
+        print(f'Extract QC: {picks_html}')
+        print(f'Dev HTML:   {dev_path}')
+    else:
+        print('No extracted particles found — skipping picks QC HTML')
 
 
 def _run_extract_only(args, out_dir, sep):
