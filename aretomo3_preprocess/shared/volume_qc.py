@@ -110,7 +110,7 @@ def projection_to_b64png(
         ax  = fig.add_axes([0, 0, img_frac - 0.02, 1])
         cax = fig.add_axes([img_frac + 0.01, 0.05, 0.06, 0.9])
         im  = ax.imshow(img_n, cmap=cmap, aspect='equal', interpolation='bilinear',
-                        vmin=0, vmax=1)
+                        origin='lower', vmin=0, vmax=1)
         cb  = fig.colorbar(im, cax=cax)
         cb.set_ticks([0, 0.5, 1])
         cb.set_ticklabels([f'{p_lo:.3g}', f'{(p_lo+p_hi)/2:.3g}', f'{p_hi:.3g}'])
@@ -120,7 +120,7 @@ def projection_to_b64png(
     else:
         ax = fig.add_axes([0, 0, 1, 1])
         ax.imshow(img_n, cmap=cmap, aspect='equal', interpolation='bilinear',
-                  vmin=0, vmax=1)
+                  origin='lower', vmin=0, vmax=1)
 
     ax.axis('off')
 
@@ -222,7 +222,7 @@ def slab_with_mask_b64(
         figh = max(3.0, ny / dpi)
         fig  = Figure(figsize=(figw, figh), dpi=dpi)
         ax   = fig.add_axes([0, 0, 1, 1])
-        ax.imshow(rgb, origin='upper', aspect='equal', interpolation='bilinear')
+        ax.imshow(rgb, origin='lower', aspect='equal', interpolation='bilinear')
         ax.axis('off')
 
         buf = io.BytesIO()
@@ -345,7 +345,7 @@ def slab_with_picks_b64(
     img_right = 1.0 - cb_frac - (0.01 if has_scores else 0.0)
     ax = fig.add_axes([0, 0, img_right, 1.0])
     ax.imshow(img, cmap='gray', vmin=p_lo, vmax=p_hi,
-              origin='upper', aspect='equal', interpolation='bilinear')
+              origin='lower', aspect='equal', interpolation='bilinear')
 
     if n_shown > 0:
         if has_scores:
@@ -372,7 +372,7 @@ def slab_with_picks_b64(
                         markeredgewidth=0.8, alpha=0.8)
 
     ax.set_xlim(0, nx)
-    ax.set_ylim(ny, 0)
+    ax.set_ylim(0, ny)
     ax.axis('off')
 
     # Colorbar
@@ -1127,9 +1127,9 @@ def orthoslices_with_mask_b64(
         ax_yz = fig.add_axes([(nx + gap) / W,  0,            ny / W, nz / H])
 
         for ax, rgb, origin in [
-            (ax_xy, rgb_xy, 'upper'),
-            (ax_xz, rgb_xz, 'upper'),
-            (ax_yz, rgb_yz, 'upper'),
+            (ax_xy, rgb_xy, 'lower'),
+            (ax_xz, rgb_xz, 'lower'),
+            (ax_yz, rgb_yz, 'lower'),
         ]:
             ax.imshow(rgb, origin=origin, aspect='auto', interpolation='nearest')
             ax.axis('off')
