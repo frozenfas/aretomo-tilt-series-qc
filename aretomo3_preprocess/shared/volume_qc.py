@@ -596,13 +596,15 @@ def slab_picks_data(
     # Scale slab Z bounds to PNG space (Z not rescaled, keep as-is)
     slab_scale_z = scale   # same scale applies
 
-    # Render background as grayscale PNG via PIL at scaled size
+    # Render background as grayscale PNG via PIL at scaled size.
+    # PIL fromarray treats row 0 as the top of the image; MRC row 0 is the
+    # bottom, so flipud before converting to match MRC/matplotlib convention.
     try:
         from PIL import Image as _PIL
         p1, p99 = float(np.percentile(img, 1)), float(np.percentile(img, 99))
         span = (p99 - p1) or 1.0
         arr = np.clip((img - p1) / span * 255, 0, 255).astype(np.uint8)
-        pil = _PIL.fromarray(arr, mode='L').resize((img_nx, img_ny), _PIL.LANCZOS)
+        pil = _PIL.fromarray(np.flipud(arr), mode='L').resize((img_nx, img_ny), _PIL.LANCZOS)
         buf = io.BytesIO()
         pil.save(buf, format='PNG')
         buf.seek(0)
@@ -627,9 +629,10 @@ def slab_picks_data(
     else:
         return None
 
-    # Scale coordinates to PNG pixel space
+    # Scale coordinates to PNG pixel space.
+    # Y is flipped to match the flipud'd PIL background (MRC row 0 = canvas bottom).
     x_png = x_mrc * scale
-    y_png = y_mrc * scale
+    y_png = img_ny - y_mrc * scale
     z_png = z_mrc  # Z not rescaled (used only for slab bounds comparison)
 
     score_col = next((c for c in _SCORE_COLS if c in df.columns), None)
