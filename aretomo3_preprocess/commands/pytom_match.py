@@ -541,6 +541,28 @@ def _sphere_diameter(args):
     return getattr(args, 'particle_diameter', None)
 
 
+def _fix_tomo_names(star_path):
+    """
+    Strip the AreTomo3 volume suffix (_Vol and anything after) from rlnTomoName
+    in a pytom-extracted particles STAR file, in place.
+
+    pytom uses the volume filename stem (ts-144_Vol.mrc → ts-144_Vol) as the
+    tomo_id, but RELION expects just ts-144.  RELION cannot match particles to
+    tomograms when the names differ.
+    """
+    import re as _re
+    path = Path(star_path)
+    text = path.read_text()
+    # Strip _Vol and any trailing suffix (e.g. _Vol_b2) from tomo name tokens.
+    # pytom writes the volume stem (ts-144_Vol.mrc → ts-144_Vol) as rlnTomoName;
+    # RELION expects the bare TS name (ts-144).
+    fixed = _re.sub(r'(ts-\d+)_Vol\S*', r'\1', text)
+    if fixed != text:
+        path.write_text(fixed)
+        return True
+    return False
+
+
 def _load_threshold_csv(csv_path):
     """Return {ts_name: threshold} from a CSV produced by the interactive QC report."""
     import csv as _csv
@@ -841,6 +863,10 @@ def run(args):
                         if eret.returncode != 0:
                             print(f'  WARNING: extraction exited with code {eret.returncode}')
                         else:
+                            # Strip _Vol suffix so rlnTomoName matches RELION tomogram set
+                            for star in sorted(out_subdir.glob('*_particles.star')):
+                                if _fix_tomo_names(star):
+                                    print(f'  Fixed rlnTomoName (_Vol stripped): {star.name}')
                             if args.imod:
                                 mod_dir = (Path(args.imod_dir).resolve()
                                            if args.imod_dir else out_dir / 'mod')
@@ -1203,6 +1229,11 @@ def _run_extract_only(args, out_dir, sep):
             continue
 
         ok.append(ts_name)
+
+        # Strip _Vol suffix from rlnTomoName so names match the RELION tomogram set
+        for star in sorted(job_json.parent.glob('*_particles.star')):
+            if _fix_tomo_names(star):
+                print(f'  Fixed rlnTomoName (_Vol suffix stripped): {star.name}')
 
         if args.imod:
             star_files = sorted(job_json.parent.glob('*_particles.star'))
