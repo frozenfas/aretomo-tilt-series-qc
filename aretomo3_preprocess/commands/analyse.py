@@ -1507,6 +1507,10 @@ def add_parser(subparsers):
                    help='Ignore saved lamella assignments in project.json and '
                         're-run K-means clustering from scratch.  Requires '
                         '--n-lamellae.  Overwrites the saved assignments.')
+    p.add_argument('--reuse-plots', action='store_true',
+                   help='Skip regenerating per-TS plots that already exist in '
+                        '--output.  Useful when re-running to update the HTML '
+                        'or summary without re-plotting every tilt series.')
     p.add_argument('--compare-previous', '-C', default=None,
                    help='Output directory from a previous analyse run.  '
                         'Previous run data is shown in grey in per-TS overlap '
@@ -1824,10 +1828,13 @@ def run(args):
         png_name = f'{ts_name}.png'
         vol_path = in_dir / f'{ts_name}_Vol.mrc'
         _tp = time.perf_counter()
-        plot_tilt_series(ts_name, data, args.threshold,
-                         str(out_dir / png_name), global_ranges,
-                         prev_data=prev_all_ts.get(ts_name),
-                         vol_path=vol_path if vol_path.exists() else None)
+        if getattr(args, 'reuse_plots', False) and (out_dir / png_name).exists():
+            pass  # reuse existing plot
+        else:
+            plot_tilt_series(ts_name, data, args.threshold,
+                             str(out_dir / png_name), global_ranges,
+                             prev_data=prev_all_ts.get(ts_name),
+                             vol_path=vol_path if vol_path.exists() else None)
         _t2_plot += time.perf_counter() - _tp
 
         ts_entries.append({
@@ -1890,27 +1897,25 @@ def run(args):
             for ts in sorted(new_ts):
                 print(f'    {ts}')
     else:
-        # No saved assignments exist yet — require the user to declare the
-        # number of lamellae so assignments are established intentionally.
+        # No saved assignments exist yet.
         if args.n_lamellae is None:
             print(
-                f'\nERROR: No lamella assignments found for this project.\n'
-                f'       Please re-run with --n-lamellae N to cluster the\n'
-                f'       {len(all_ts)} tilt series into N lamellae, e.g.:\n\n'
-                f'         aretomo3-preprocess analyse ... --n-lamellae 6\n\n'
-                f'       Assignments will be saved to project.json and locked\n'
-                f'       for all future runs.\n'
+                f'  NOTE: --n-lamellae not set and no saved lamella assignments found.\n'
+                f'        Stage-position and per-lamella plots will be skipped.\n'
+                f'        Re-run with --n-lamellae N to enable them.'
             )
-            sys.exit(1)
 
     _tp = time.perf_counter()
-    stage_entries, lamella_stats = plot_stage_positions(
-        all_ts,
-        out_dir              = out_dir,
-        n_lamellae           = args.n_lamellae,
-        lookup               = stage_lookup or None,
-        cluster_ids_override = cluster_ids_override,
-    )
+    if args.n_lamellae is not None or cluster_ids_override is not None:
+        stage_entries, lamella_stats = plot_stage_positions(
+            all_ts,
+            out_dir              = out_dir,
+            n_lamellae           = args.n_lamellae,
+            lookup               = stage_lookup or None,
+            cluster_ids_override = cluster_ids_override,
+        )
+    else:
+        stage_entries, lamella_stats = [], {}
     _t2_stage = time.perf_counter() - _tp
 
     # Save lamella assignments to project.json.
