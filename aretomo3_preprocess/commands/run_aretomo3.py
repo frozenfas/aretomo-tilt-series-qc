@@ -1055,57 +1055,37 @@ def run(args):
 
     print(f'Output directory : {out_dir}')
     print(f'Log file         : {log_path}')
-    print('Running AreTomo3 (streaming live)...\n')
+    print('Running AreTomo3 (no live streaming — see note below)...\n')
 
-    # Pipe AreTomo3's stdout/stderr straight into `tee` (the same as running
-    # `... 2>&1 | tee log_path` by hand) instead of draining the pipe line by
-    # line in Python. A Python for-loop over proc.stdout does text decoding
-    # plus two writes and a list append per line, with an explicit flush()
-    # after each one — slow enough, relative to a native `tee`, that it
-    # measurably paces how fast AreTomo3's stdout pipe buffer drains. That
-    # back-pressure has been observed (2026-07 investigation, see git log)
-    # to change the timing of AreTomo3's internal kernel-launch/logging
-    # calls enough to reproducibly steer alignment onto a crash-triggering
-    # execution path that a fast native consumer (plain `tee`) mostly
-    # avoided in side-by-side testing. Shelling out to the real `tee`
-    # binary removes Python entirely from the hot I/O path, matching the
-    # direct command's behavior exactly.
-    tee_bin = shutil.which('tee')
-    if tee_bin is None:
-        # Fallback: no `tee` available, drain in Python as before. Slower
-        # and — per the investigation above — more likely to provoke
-        # AreTomo3 crashes on marginal data, but functionally correct.
-        print('Warning: `tee` not found on PATH; falling back to Python-side '
-              'streaming (slower, may increase AreTomo3 crash risk).\n')
-        log_lines = []
-        with open(log_path, 'w') as log_fh:
-            with subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                bufsize=1,
-                universal_newlines=True,
-            ) as proc:
-                for line in proc.stdout:
-                    sys.stdout.write(line)
-                    sys.stdout.flush()
-                    log_fh.write(line)
-                    log_lines.append(line)
-        returncode = proc.returncode
-    else:
-        aretomo_proc = subprocess.Popen(
+    # Redirect AreTomo3's stdout/stderr straight to the log file's underlying
+    # fd — the same mechanism as `... > log_path 2>&1` from a shell — instead
+    # of going through any pipe (Python-side draining, or a `tee` subprocess).
+    #
+    # Both of those earlier approaches still put a *pipe* between AreTomo3
+    # and the log file, and a pipe has a small, finite kernel buffer (64KB on
+    # Linux) that needs an active reader to keep draining it; if the reader
+    # doesn't get scheduled promptly, AreTomo3's own write() calls can block.
+    # A plain file redirect has no such reader dependency — writes land in
+    # the page cache and effectively never block. That's a structural
+    # difference from every "direct" AreTomo3 invocation we've ever run
+    # (always `> log 2>&1`, never piped), and per the 2026-07 investigation
+    # it's suspected to be *why* wrapper-launched runs crash far more often
+    # than direct ones on marginal/low-signal data: AreTomo3 reseeds an
+    # internal RNG from the wall clock on every refinement iteration
+    # (MaUtil/GGenRandoms.cu), and pipe-induced stalls are a plausible way to
+    # perturb exactly when those reseeds land relative to real time.
+    #
+    # The trade-off: no more live console output while AreTomo3 runs (that
+    # required a pipe). Progress is only visible by tailing the log file
+    # (`tail -f run_aretomo3.log`) while this runs, or reading it after.
+    with open(log_path, 'wb') as log_fh:
+        proc = subprocess.Popen(
             cmd,
-            stdout=subprocess.PIPE,
+            stdout=log_fh,
             stderr=subprocess.STDOUT,
         )
-        tee_proc = subprocess.Popen(
-            [tee_bin, str(log_path)],
-            stdin=aretomo_proc.stdout,
-        )
-        aretomo_proc.stdout.close()  # let aretomo_proc see SIGPIPE if tee dies
-        tee_proc.wait()
-        returncode = aretomo_proc.wait()
-        log_lines = log_path.read_text(errors='replace').splitlines(keepends=True)
+        returncode = proc.wait()
+    log_lines = log_path.read_text(errors='replace').splitlines(keepends=True)
 
     # ── Surface warnings/errors from log ──────────────────────────────────
     _WARN_KEYWORDS = ('warning', 'error', 'fail', 'abort', 'fatal', 'segfault')
