@@ -3,13 +3,33 @@ validate-mdoc — check and optionally repair SerialEM mdoc files for AreTomo3.
 
 What it checks
 --------------
-AreTomo3 reads four fields from each tilt section using a strict sequential
-state machine (CReadMdoc::DoIt):
+As of AreTomo3 2.3.0, CReadMdoc::DoIt reads FIVE fields per tilt section
+using a strict, sequential, destructive state machine:
 
-    ZValue  →  TiltAngle  →  ExposureDose  →  SubFramePath
+    ZValue  →  TiltAngle  →  ExposureDose  →  SubFramePath  →  ExposureTime
 
-If *any* of these are absent the parser stalls and the whole file fails
-(returns false, tilt series skipped).
+("Destructive" meaning each field is searched for only after the previous
+one is found, and lines are consumed as they're read -- the parser never
+backtracks.) If *any* of these are absent, OR if they appear in a different
+relative order than listed above within a section, the parser stalls: it
+keeps consuming lines -- including the next section's [ZValue] header and
+its own fields -- until it happens to find a line matching whatever field
+it's still waiting for. This silently merges two (or more) tilt sections
+into a single output entry instead of failing outright, which is worse than
+an outright failure because the file "succeeds" with corrupted acquisition
+indices.
+
+ExposureTime was added to this validator after a real-world case (project
+bi38262-21-akinetes, ts-069) where every section had ExposureTime present
+(29 sections, 29 ExposureTime occurrences -- a simple presence/count check
+passes cleanly) but AreTomo3 2.3.0 still only recovered 14 of 29 tilts, with
+acquisition indices stepping by 2 each time. The field was present but out
+of the order this parser hard-codes, most likely with SubFramePath appearing
+before ExposureDose in that project's mdoc convention -- exactly the
+"present but wrong order" case count-only checks can't catch. Versions of
+AreTomo3 before 2.3.0 only require the first four fields (through
+SubFramePath) and know nothing about ExposureTime, so mdocs written for
+older pipelines are especially likely to have it absent or out of place.
 
 The most common failure mode is a missing ExposureDose field.  This arises
 when mdoc files are exported or reconstructed by software that does not inject
@@ -28,15 +48,24 @@ per-frame dose ≈ 0.065 e⁻/Å², consistent with low-dose K3 tilt series.
 
 Usage
 -----
-  # Validate only — report issues and suggest fix command:
+  # Validate only — report issues (missing dose, missing exptime, wrong
+  # order) and the exact fix command to run for each, without changing
+  # anything:
   aretomo3-preprocess validate-mdoc frames/ts-128.mdoc frames/ts-129.mdoc
   aretomo3-preprocess validate-mdoc frames/ts-*.mdoc
 
-  # Apply fix — inject ExposureDose into sections where it is missing:
-  aretomo3-preprocess validate-mdoc frames/ts-128.mdoc --fix --dose 0.52
+  # Fields present but in the wrong order (no value needed):
+  aretomo3-preprocess validate-mdoc frames/ts-128.mdoc --fix-order
 
-  # Fix all failing files at once:
-  aretomo3-preprocess validate-mdoc frames/ts-*.mdoc --fix --dose 0.52
+  # ExposureDose missing entirely:
+  aretomo3-preprocess validate-mdoc frames/ts-128.mdoc --fix-dose --dose 0.52
+
+  # ExposureTime missing entirely (AreTomo3 >= 2.3.0 only):
+  aretomo3-preprocess validate-mdoc frames/ts-128.mdoc --fix-exptime --exptime 1.0
+
+  # Any combination, applied together in one pass (order first, then
+  # missing fields are injected into the now-reordered file):
+  aretomo3-preprocess validate-mdoc frames/ts-*.mdoc --fix-order --fix-dose --dose 0.52 --fix-exptime --exptime 1.0
 
 Backup
 ------
@@ -111,6 +140,18 @@ def _extract_frame_path(line):
     return path.strip() or None
 
 
+def _extract_exptime(line):
+    """Mirrors CReadMdoc::mExtractExpTime (AreTomo3 >= 2.3.0 only)."""
+    if 'ExposureTime' not in line:
+        return False, 0.0
+    idx = line.rfind('=')
+    if idx < 0:
+        return False, 0.0
+    if len(line[idx:]) < 2:
+        return False, 0.0
+    return True, _atof(line[idx + 1:])
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Simulate CReadMdoc::DoIt
 # ─────────────────────────────────────────────────────────────────────────────
@@ -120,12 +161,23 @@ def _simulate_aretomo3(lines):
     Simulate the AreTomo3 mdoc parser state machine.
 
     Returns (n_tilts_loaded, failure_state) where failure_state is one of:
-      None                   — success
-      'no_zvalue'            — no [ZValue = N] sections found
-      'missing_tiltangle'    — stuck waiting for TiltAngle
-      'missing_exposuredose' — stuck waiting for ExposureDose
-      'missing_subframepath' — stuck waiting for SubFramePath
-      'too_few_tilts'        — parsed OK but fewer than 7 tilts
+      None                    — success
+      'no_zvalue'             — no [ZValue = N] sections found
+      'missing_tiltangle'     — stuck waiting for TiltAngle
+      'missing_exposuredose'  — stuck waiting for ExposureDose
+      'missing_subframepath'  — stuck waiting for SubFramePath
+      'missing_exposuretime'  — stuck waiting for ExposureTime (AreTomo3 >= 2.3.0)
+      'too_few_tilts'         — parsed OK but fewer than 7 tilts
+
+    NOTE: unlike a simple per-field presence count, this simulates the real
+    parser's destructive, sequential behavior. A field that is present
+    somewhere in the file but out of order (e.g. SubFramePath appearing
+    before ExposureDose within a section) will NOT be caught by presence
+    counts alone -- it shows up here as sections silently merging (fewer
+    tilts than [ZValue] sections, with no explicit failure reported), which
+    is exactly the "present but wrong order" case that caused AreTomo3
+    2.3.0 to only recover half of ts-069's 29 real tilts despite
+    ExposureTime being present in every section.
     """
     n = 0
     li = 0
@@ -137,7 +189,7 @@ def _simulate_aretomo3(lines):
         if _extract_val_z(line) < 0:
             continue
 
-        bTilt = bDose = bFm = False
+        bTilt = bDose = bFm = bExpTime = False
         while li < total:
             line = lines[li]; li += 1
             if not bTilt:
@@ -151,6 +203,10 @@ def _simulate_aretomo3(lines):
             elif not bFm:
                 if _extract_frame_path(line) is not None:
                     bFm = True
+            elif not bExpTime:
+                ok, _ = _extract_exptime(line)
+                if ok:
+                    bExpTime = True
             else:
                 n += 1
                 break
@@ -162,7 +218,9 @@ def _simulate_aretomo3(lines):
                 last_failure = 'missing_exposuredose'
             elif not bFm:
                 last_failure = 'missing_subframepath'
-            elif bFm:
+            elif not bExpTime:
+                last_failure = 'missing_exposuretime'
+            elif bExpTime:
                 n += 1   # last section at EOF — commit it
             break
 
@@ -206,6 +264,24 @@ def _scan_fields(lines):
     if current_z is not None and not has_dose_in_section:
         missing_dose_sections.append(current_z)
 
+    # Which sections are missing ExposureTime? (presence-only check; does NOT
+    # catch the "present but wrong relative order" case -- that requires the
+    # full sequential simulation in _simulate_aretomo3.)
+    missing_exptime_sections = []
+    current_z = None
+    has_exptime_in_section = False
+    for line in lines:
+        z = _extract_val_z(line)
+        if z >= 0:
+            if current_z is not None and not has_exptime_in_section:
+                missing_exptime_sections.append(current_z)
+            current_z = z
+            has_exptime_in_section = False
+        if current_z is not None and 'ExposureTime' in line and '=' in line:
+            has_exptime_in_section = True
+    if current_z is not None and not has_exptime_in_section:
+        missing_exptime_sections.append(current_z)
+
     issues = []
     if n_dose == 0 and n_exptime > 0:
         issues.append(
@@ -231,6 +307,20 @@ def _scan_fields(lines):
         issues.append(
             'SubFramePath present {}× but {} sections'.format(n_path, n_zval)
         )
+    if n_exptime < n_zval:
+        issues.append(
+            'ExposureTime present {}× but {} sections (required by AreTomo3 '
+            '>= 2.3.0)'.format(n_exptime, n_zval)
+        )
+    elif missing_exptime_sections:
+        # Shouldn't normally happen if n_exptime == n_zval, but section-level
+        # accounting can differ from a flat count if lines are malformed.
+        issues.append(
+            'ExposureTime missing from {} section(s): ZValue {}'.format(
+                len(missing_exptime_sections),
+                missing_exptime_sections[:10],
+            )
+        )
     if n_zval < _MIN_TILTS:
         issues.append(
             'Only {} ZValue section(s) — minimum is {}'.format(n_zval, _MIN_TILTS)
@@ -247,8 +337,195 @@ def _scan_fields(lines):
     return dict(
         n_sections=n_zval, n_tilt=n_tilt, n_dose=n_dose, n_path=n_path,
         n_exptime=n_exptime, missing_dose_sections=missing_dose_sections,
+        missing_exptime_sections=missing_exptime_sections,
         issues=issues,
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Field ORDER check — independent of presence/absence.
+#
+# A field can be present in every section and still break AreTomo3's parser
+# if it's in the wrong relative position, because CReadMdoc::DoIt searches
+# for each field only after the previous one, consuming lines as it goes.
+# This is checked structurally (by position within each section) rather
+# than by re-running the destructive simulation, because a bad order can
+# still yield >= _MIN_TILTS merged "tilts" and read as a simulation SUCCESS
+# even though the data is corrupted -- exactly what happened with ts-069.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_CANONICAL_ORDER = ['TiltAngle', 'ExposureDose', 'SubFramePath', 'ExposureTime']
+
+_FIELD_CHECKERS = {
+    'TiltAngle':     lambda l: _extract_tilt(l)[0],
+    'ExposureDose':  lambda l: _extract_dose(l)[0],
+    'SubFramePath':  lambda l: _extract_frame_path(l) is not None,
+    'ExposureTime':  lambda l: _extract_exptime(l)[0],
+}
+
+
+def _split_sections(lines):
+    """
+    Split lines into (header_line, body_lines) per [ZValue] section.
+    Returns a list of (zval, header_line, body_lines) tuples. Lines before
+    the first [ZValue] are not included (there is no section to attach them
+    to).
+    """
+    sections = []
+    i = 0
+    total = len(lines)
+    while i < total:
+        z = _extract_val_z(lines[i])
+        if z < 0:
+            i += 1
+            continue
+        header = lines[i]
+        i += 1
+        body = []
+        while i < total and _extract_val_z(lines[i]) < 0:
+            body.append(lines[i])
+            i += 1
+        sections.append((z, header, body))
+    return sections
+
+
+def _field_positions(body_lines):
+    """
+    Return an ordered dict {field_name: line} for the FIRST occurrence of
+    each of the four required fields found in body_lines, in the order
+    they actually appear (encounter order, not canonical order).
+    """
+    found = {}
+    for line in body_lines:
+        for name, check in _FIELD_CHECKERS.items():
+            if name in found:
+                continue
+            if check(line):
+                found[name] = line
+                break
+    return found
+
+
+def _check_order(lines):
+    """
+    Check every section's field order against _CANONICAL_ORDER.
+
+    Returns a list of dicts, one per out-of-order section:
+      {zval, found_order, expected_order}
+    Only fields that are actually PRESENT in a section are compared --
+    missing fields are a separate problem (see _scan_fields) and are
+    skipped here rather than counted as "out of order".
+    """
+    out_of_order = []
+    for zval, header, body in _split_sections(lines):
+        found = _field_positions(body)
+        if len(found) < 2:
+            continue  # nothing meaningful to compare
+        encounter_order = list(found.keys())
+        expected_order = [f for f in _CANONICAL_ORDER if f in found]
+        if encounter_order != expected_order:
+            out_of_order.append(dict(
+                zval=zval,
+                found_order=encounter_order,
+                expected_order=expected_order,
+            ))
+    return out_of_order
+
+
+def _describe_order_issue(out_of_order):
+    """Build a short, human-readable summary of an order-check result."""
+    if not out_of_order:
+        return None
+    example = out_of_order[0]
+    return (
+        '{} section(s) have fields out of order (e.g. ZValue {}: found {}, '
+        'AreTomo3 expects {}) — parser will silently merge sections instead '
+        'of failing outright'.format(
+            len(out_of_order), example['zval'],
+            ' → '.join(example['found_order']),
+            ' → '.join(example['expected_order']),
+        )
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fix: reorder existing fields into canonical order (no new values needed)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _reorder_section_body(body_lines):
+    """
+    Reorder the (up to four) required fields within one section's body into
+    _CANONICAL_ORDER, without touching any other line's position. The
+    reordered fields are consolidated at the position of whichever one
+    appeared FIRST in the original body.
+
+    Returns (new_body_lines, changed_bool).
+    """
+    found = {}
+    other = []
+    first_target_pos = None
+
+    for line in body_lines:
+        matched = None
+        for name, check in _FIELD_CHECKERS.items():
+            if name in found:
+                continue
+            if check(line):
+                matched = name
+                break
+        if matched:
+            found[matched] = line
+            if first_target_pos is None:
+                first_target_pos = len(other)
+        else:
+            other.append(line)
+
+    if len(found) < 2:
+        return body_lines, False  # nothing meaningful to reorder
+
+    encounter_order = list(found.keys())
+    expected_order = [f for f in _CANONICAL_ORDER if f in found]
+    if encounter_order == expected_order:
+        return body_lines, False  # already correct
+
+    ordered_targets = [found[name] for name in expected_order]
+    new_body = other[:first_target_pos] + ordered_targets + other[first_target_pos:]
+    return new_body, True
+
+
+def _reorder_fields(lines):
+    """
+    Return a new list of lines with every section's TiltAngle/ExposureDose/
+    SubFramePath/ExposureTime fields reordered to match _CANONICAL_ORDER.
+    Only sections that are actually out of order are modified; everything
+    else (other metadata lines, their relative order, blank lines) is left
+    untouched. Sections missing two or more of the four fields are left
+    alone (nothing meaningful to reorder -- see _inject_dose/_inject_exptime
+    for filling in missing fields first).
+
+    Returns (new_lines, n_reordered).
+    """
+    out = []
+    n_reordered = 0
+    i = 0
+    total = len(lines)
+    while i < total:
+        line = lines[i]
+        if _extract_val_z(line) < 0:
+            out.append(line)
+            i += 1
+            continue
+        out.append(line)  # the [ZValue] header itself
+        i += 1
+        body = []
+        while i < total and _extract_val_z(lines[i]) < 0:
+            body.append(lines[i])
+            i += 1
+        new_body, changed = _reorder_section_body(body)
+        if changed:
+            n_reordered += 1
+        out.extend(new_body)
+    return out, n_reordered
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -299,6 +576,64 @@ def _inject_dose(lines, dose_value):
             if ok:
                 tilt_seen = True
                 out.append(dose_line)
+                n_injected += 1
+
+    return out, n_injected
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fix: inject ExposureTime into sections where it is absent
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _inject_exptime(lines, exptime_value):
+    """
+    Return a new list of lines with ExposureTime = <exptime_value> inserted
+    immediately after each section's SubFramePath line, in any section that
+    lacks ExposureTime entirely. Only modifies sections missing it; leaves
+    existing ExposureTime values untouched.
+
+    The insertion point (right after SubFramePath) matches the canonical
+    order AreTomo3 >= 2.3.0 requires, so this also can't introduce a new
+    order problem. Sections that already HAVE ExposureTime but in the wrong
+    position are a --fix-order problem, not a --fix-exptime one -- this
+    function only fills in a truly absent field.
+
+    A uniform value across every section is safe for AreTomo3's own use of
+    this field: it normalizes ExposureTime into a fraction of the series
+    total (CReadMdoc::mMakeExpTimeRelative), so identical values everywhere
+    just yield equal per-tilt weighting -- the same fallback AreTomo3 itself
+    uses when total exposure time is zero.
+    """
+    scan = _scan_fields(lines)
+    missing = set(scan['missing_exptime_sections'])
+
+    if not missing:
+        return lines, 0  # nothing to do
+
+    exptime_line = 'ExposureTime = {}\n'.format(exptime_value)
+
+    out = []
+    n_injected = 0
+    current_z = None
+    path_seen = False
+    exptime_seen = False
+
+    for line in lines:
+        z = _extract_val_z(line)
+        if z >= 0:
+            current_z = z
+            path_seen = False
+            exptime_seen = False
+
+        if current_z is not None and 'ExposureTime' in line and '=' in line:
+            exptime_seen = True
+
+        out.append(line)
+
+        if (current_z in missing and not path_seen and not exptime_seen):
+            if _extract_frame_path(line) is not None:
+                path_seen = True
+                out.append(exptime_line)
                 n_injected += 1
 
     return out, n_injected
@@ -426,49 +761,79 @@ def _rebuild_from_subframes(lines, subframes_path, dose):
 # Validate (and optionally fix) a single file
 # ─────────────────────────────────────────────────────────────────────────────
 
-def validate_file(path, fix_dose=False, fix_subframes=None, dose=4.16):
+def validate_file(path, fix_dose=False, fix_exptime=False, fix_order=False,
+                  fix_subframes=None, dose=4.16, exptime=1.0):
     """
     Validate one mdoc file.  Optionally apply fixes.
 
-    fix_dose      — inject missing ExposureDose (--fix-dose)
+    fix_dose      — inject missing ExposureDose (--fix-dose, needs --dose)
+    fix_exptime   — inject missing ExposureTime (--fix-exptime, needs --exptime)
+    fix_order     — reorder existing-but-misplaced fields into canonical
+                    order (--fix-order; no value needed, nothing is added
+                    or removed, only reordered)
     fix_subframes — path to a directory of SubFramePaths .txt files;
                     used to rebuild mdocs that are too short (--fix-subframes)
 
+    Order is checked independently of presence/absence: a field can be
+    present in every section and AreTomo3 will still silently corrupt the
+    file if that field is in the wrong relative position (see
+    _check_order's docstring). This is reported as an issue even when the
+    file "passes" the destructive parser simulation, since a bad order can
+    still produce >= _MIN_TILTS merged (wrong) tilts and look like success.
+
+    Fixes are applied in order (reorder → inject dose → inject exptime) so
+    that, for example, a file needing both --fix-order and --fix-exptime
+    gets its existing fields straightened out before a new one is added
+    after SubFramePath. All fixes are combined into a single write with one
+    backup, not one write per fix.
+
     Returns a dict with keys:
-      path, success, n_tilts, failure, issues, fixed, fix_type,
-      n_injected, backed_up
+      path, success, n_tilts, failure, issues, order_issues, fixed,
+      fix_types, n_injected, backed_up
     """
     try:
         raw = Path(path).read_bytes()
     except OSError as e:
         return dict(path=path, success=False, n_tilts=0,
-                    failure=str(e), issues=[], fixed=False, fix_type=None,
-                    n_injected=0, backed_up=False)
+                    failure=str(e), issues=[], order_issues=[], fixed=False,
+                    fix_types=[], n_injected=0, backed_up=False)
 
     text = raw.decode('latin-1', errors='replace')
     lines = [l + '\n' for l in text.splitlines()]
 
     n_tilts, failure = _simulate_aretomo3(lines)
     scan = _scan_fields(lines)
+    order_issues = _check_order(lines)
+    order_msg = _describe_order_issue(order_issues)
+
+    issues = list(scan['issues'])
+    if order_msg:
+        issues.append(order_msg)
 
     result = dict(
         path=path,
-        success=(failure is None),
+        # A file that "passes" the simulation but has an order problem is
+        # NOT actually fine -- it's exactly the case that produces
+        # corrupted-but-successful output. Report it as failing.
+        success=(failure is None and not order_issues),
         n_tilts=n_tilts,
         failure=failure,
-        issues=scan['issues'],
+        issues=issues,
+        order_issues=order_issues,
         missing_dose_sections=scan['missing_dose_sections'],
+        missing_exptime_sections=scan['missing_exptime_sections'],
         n_sections=scan['n_sections'],
         fixed=False,
-        fix_type=None,
+        fix_types=[],
         n_injected=0,
         backed_up=False,
     )
 
-    if failure is None:
-        return result  # already valid
+    if result['success']:
+        return result  # already valid, in order, nothing to do
 
-    # ── Fix subframes (too-short / restarted series) ────────────────────────
+    # ── Fix subframes (too-short / restarted series) ─────────────────────────
+    # Mutually exclusive with the other fixes: a full rebuild, not a patch.
     if fix_subframes is not None and scan['n_sections'] < _MIN_TILTS:
         sf_arg = Path(fix_subframes)
         if sf_arg.is_file():
@@ -496,57 +861,95 @@ def validate_file(path, fix_dose=False, fix_subframes=None, dose=4.16):
         result['issues'].extend(warnings)
 
         n_after, failure_after = _simulate_aretomo3(new_lines)
-        if failure_after is not None:
+        order_after = _check_order(new_lines)
+        if failure_after is not None or order_after:
             result['issues'].append(
                 'Rebuilt mdoc still fails AreTomo3 simulation ({}) '
-                '— file NOT written'.format(failure_after)
+                '— file NOT written'.format(failure_after or 'order mismatch')
             )
             return result
 
         Path(path).write_text(''.join(new_lines), encoding='latin-1')
         result['fixed'] = True
-        result['fix_type'] = 'subframes'
+        result['fix_types'] = ['subframes']
         result['n_injected'] = n_sections
         result['success'] = True
         result['n_tilts'] = n_after
         result['failure'] = None
+        result['order_issues'] = []
         return result
 
-    # ── Fix dose (missing ExposureDose) ─────────────────────────────────────
+    # ── Combined pipeline: reorder → inject dose → inject exptime ───────────
+    if not (fix_order or fix_dose or fix_exptime):
+        return result  # validate-only run, no fix flags given
+
+    if fix_dose and failure not in (None, 'missing_exposuredose') and not order_issues:
+        result['issues'].append(
+            'Cannot auto-fix failure type "{}" with --fix-dose alone; '
+            'check whether --fix-order or --fix-exptime is also needed'.format(failure)
+        )
+    if fix_exptime and failure not in (None, 'missing_exposuretime') and not order_issues:
+        result['issues'].append(
+            'Cannot auto-fix failure type "{}" with --fix-exptime alone; '
+            'check whether --fix-order or --fix-dose is also needed'.format(failure)
+        )
+
+    working = lines
+    fix_types = []
+    n_injected_total = 0
+
+    if fix_order and order_issues:
+        working, n_reordered = _reorder_fields(working)
+        if n_reordered:
+            fix_types.append('order')
+            n_injected_total += n_reordered
+
     if fix_dose:
-        if failure != 'missing_exposuredose':
-            result['issues'].append(
-                'Cannot auto-fix failure type "{}"; '
-                '--fix-dose only repairs missing ExposureDose'.format(failure)
-            )
-            return result
+        working, n_dose_injected = _inject_dose(working, dose)
+        if n_dose_injected:
+            fix_types.append('dose')
+            n_injected_total += n_dose_injected
 
-        bak_path = Path(str(path) + '.original.bak')
-        if not bak_path.exists():
-            shutil.copy2(path, bak_path)
-            result['backed_up'] = True
-        else:
-            result['issues'].append(
-                'Backup already exists at {}; skipping backup'.format(bak_path)
-            )
+    if fix_exptime:
+        working, n_exptime_injected = _inject_exptime(working, exptime)
+        if n_exptime_injected:
+            fix_types.append('exptime')
+            n_injected_total += n_exptime_injected
 
-        new_lines, n_injected = _inject_dose(lines, dose)
+    if not fix_types:
+        result['issues'].append(
+            'No applicable fix flags matched this file\'s problem(s) — '
+            'nothing changed'
+        )
+        return result
 
-        n_after, failure_after = _simulate_aretomo3(new_lines)
-        if failure_after is not None:
-            result['issues'].append(
-                'Fix did not resolve parse failure ({}) — file NOT written'.format(
-                    failure_after)
-            )
-            return result
+    n_after, failure_after = _simulate_aretomo3(working)
+    order_after = _check_order(working)
+    if failure_after is not None or order_after:
+        result['issues'].append(
+            'Fix did not fully resolve the problem (failure={}, '
+            '{} section(s) still out of order) — file NOT written'.format(
+                failure_after, len(order_after))
+        )
+        return result
 
-        Path(path).write_text(''.join(new_lines), encoding='latin-1')
-        result['fixed'] = True
-        result['fix_type'] = 'dose'
-        result['n_injected'] = n_injected
-        result['success'] = True
-        result['n_tilts'] = n_after
-        result['failure'] = None
+    bak_path = Path(str(path) + '.original.bak')
+    if not bak_path.exists():
+        shutil.copy2(path, bak_path)
+        result['backed_up'] = True
+    else:
+        result['issues'].append(
+            'Backup already exists at {}; skipping backup'.format(bak_path)
+        )
+
+    Path(path).write_text(''.join(working), encoding='latin-1')
+    result['fixed'] = True
+    result['fix_types'] = fix_types
+    result['n_injected'] = n_injected_total
+    result['success'] = True
+    result['n_tilts'] = n_after
+    result['failure'] = None
+    result['order_issues'] = []
 
     return result
 
@@ -559,7 +962,8 @@ def add_parser(subparsers):
     p = subparsers.add_parser(
         'validate-mdoc',
         help='Validate SerialEM mdoc files for AreTomo3 compatibility; '
-             'optionally inject missing ExposureDose',
+             'optionally reorder fields and/or inject missing '
+             'ExposureDose/ExposureTime',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=__doc__,
     )
@@ -568,8 +972,22 @@ def add_parser(subparsers):
         help='One or more .mdoc files to validate (glob expansion handled by shell)',
     )
     p.add_argument(
+        '--fix-order', action='store_true', default=False,
+        help='Reorder existing TiltAngle/ExposureDose/SubFramePath/'
+             'ExposureTime fields into the order AreTomo3 >= 2.3.0 expects. '
+             'Only reorders fields that are already present -- does not add '
+             'or remove anything, and does not need a value. Combine with '
+             '--fix-dose/--fix-exptime if fields are also missing outright.',
+    )
+    p.add_argument(
         '--fix-dose', action='store_true', default=False,
-        help='Inject missing ExposureDose into failing files.',
+        help='Inject missing ExposureDose into failing files (needs --dose).',
+    )
+    p.add_argument(
+        '--fix-exptime', action='store_true', default=False,
+        help='Inject missing ExposureTime into failing files (needs '
+             '--exptime). Required by AreTomo3 >= 2.3.0; older versions '
+             'never check for this field at all.',
     )
     p.add_argument(
         '--fix-subframes', metavar='DIR', default=None,
@@ -586,8 +1004,17 @@ def add_parser(subparsers):
         help='ExposureDose value to inject (e⁻/Å² per tilt; '
              'total dose for the whole exposure, not per frame). '
              'Default: 4.16 (8 sub-frames × 0.52 e⁻/Å² per frame, '
-             'typical for K3 TIFF tilt series).  Used by both --fix-dose '
+             'typical for K3 TIFF tilt series).  Used by --fix-dose '
              'and --fix-subframes.',
+    )
+    p.add_argument(
+        '--exptime', type=float, default=1.0, metavar='SECONDS',
+        help='ExposureTime value to inject when entirely absent (seconds; '
+             'AreTomo3 only uses this to weight per-tilt dose RELATIVE to '
+             'the series total, so an identical value in every section is '
+             'safe and just yields equal weighting -- the same fallback '
+             'AreTomo3 itself uses when the total is zero). Default: 1.0. '
+             'Used by --fix-exptime.',
     )
     p.set_defaults(func=run)
     return p
@@ -595,10 +1022,13 @@ def add_parser(subparsers):
 
 def run(args):
     paths = args.mdoc_files
+    fix_order = args.fix_order
     fix_dose = args.fix_dose
+    fix_exptime = args.fix_exptime
     fix_subframes = args.fix_subframes
+    any_fix = fix_order or fix_dose or fix_exptime or fix_subframes
     n_pass = n_fail = n_fixed = 0
-    n_fail_dose = n_fail_short = 0
+    n_fail_dose = n_fail_exptime = n_fail_order = n_fail_short = 0
     col_w = max(len(Path(p).name) for p in paths)
 
     print()
@@ -610,8 +1040,9 @@ def run(args):
 
     for path in paths:
         fname = Path(path).name
-        r = validate_file(path, fix_dose=fix_dose,
-                          fix_subframes=fix_subframes, dose=args.dose)
+        r = validate_file(path, fix_dose=fix_dose, fix_exptime=fix_exptime,
+                          fix_order=fix_order, fix_subframes=fix_subframes,
+                          dose=args.dose, exptime=args.exptime)
 
         if r['success'] and not r.get('fixed'):
             status = 'PASS'
@@ -627,34 +1058,48 @@ def run(args):
             n_fail += 1
             if r.get('n_sections', _MIN_TILTS) < _MIN_TILTS:
                 n_fail_short += 1
-            elif r.get('failure') == 'missing_exposuredose':
+            if r.get('failure') == 'missing_exposuredose':
                 n_fail_dose += 1
+            if r.get('failure') == 'missing_exposuretime':
+                n_fail_exptime += 1
+            if r.get('order_issues'):
+                n_fail_order += 1
 
         note_parts = []
         if r['failure'] and not r['fixed']:
             note_parts.append(_failure_message(r['failure'], r))
         if r['fixed']:
-            if r.get('fix_type') == 'subframes':
-                note_parts.append(
-                    'rebuilt from SubFramePaths ({} sections); '
-                    'backup: {}.original.bak'.format(r['n_injected'], fname)
+            fix_types = r.get('fix_types', [])
+            fix_descriptions = []
+            if 'subframes' in fix_types:
+                fix_descriptions.append(
+                    'rebuilt from SubFramePaths ({} sections)'.format(r['n_injected'])
                 )
-            else:
-                note_parts.append(
-                    'injected ExposureDose={} into {} section(s); '
-                    'backup: {}.original.bak'.format(
-                        args.dose, r['n_injected'], fname)
-                )
+            if 'order' in fix_types:
+                fix_descriptions.append('reordered fields')
+            if 'dose' in fix_types:
+                fix_descriptions.append('injected ExposureDose={}'.format(args.dose))
+            if 'exptime' in fix_types:
+                fix_descriptions.append('injected ExposureTime={}'.format(args.exptime))
+            note_parts.append(
+                '; '.join(fix_descriptions) +
+                '; backup: {}.original.bak'.format(fname)
+            )
         note = '; '.join(note_parts) if note_parts else ''
 
         print('{:<{w}}  {:6}  {:5d}  {}'.format(
             fname, status, r['n_tilts'], note, w=col_w))
 
-        for issue in r.get('issues', []):
-            print('  {:<{w}}         └─ {}'.format('', issue, w=col_w))
+        # Only show the pre-fix diagnostic issues when the file is still
+        # failing -- once fixed, r['issues'] still contains the original
+        # description (kept for auditing) but showing it under a FIXED row
+        # reads as if the problem is still present.
+        if status == 'FAIL':
+            for issue in r.get('issues', []):
+                print('  {:<{w}}         └─ {}'.format('', issue, w=col_w))
 
     print()
-    if fix_dose or fix_subframes:
+    if any_fix:
         print('Summary: {} already valid, {} fixed, {} could not be fixed  '
               '(out of {} files)'.format(
                   n_pass - n_fixed, n_fixed, n_fail, len(paths)))
@@ -663,9 +1108,15 @@ def run(args):
             n_pass, n_fail, len(paths)))
 
         if n_fail > 0:
+            if n_fail_order:
+                print('  {:3d} field(s) out of order  → fix with --fix-order '
+                      '(no value needed)'.format(n_fail_order))
             if n_fail_dose:
-                print('  {:3d} missing ExposureDose  → fix with --fix-dose'.format(
-                    n_fail_dose))
+                print('  {:3d} missing ExposureDose  → fix with --fix-dose '
+                      '--dose <value>'.format(n_fail_dose))
+            if n_fail_exptime:
+                print('  {:3d} missing ExposureTime  → fix with --fix-exptime '
+                      '--exptime <value>'.format(n_fail_exptime))
             if n_fail_short:
                 print('  {:3d} too short (< {} sections)'.format(
                     n_fail_short, _MIN_TILTS))
@@ -735,6 +1186,11 @@ def _failure_message(failure, r):
         ),
         'missing_tiltangle':    'TiltAngle missing from one or more sections',
         'missing_subframepath': 'SubFramePath missing from one or more sections',
+        'missing_exposuretime': (
+            'ExposureTime missing (or out of order relative to TiltAngle/'
+            'ExposureDose/SubFramePath) in one or more sections — required '
+            'by AreTomo3 >= 2.3.0; parser stalls after SubFramePath'
+        ),
         'no_zvalue':            'No [ZValue = N] sections found',
         'too_few_tilts':        'Fewer than {} tilts loaded'.format(_MIN_TILTS),
     }
