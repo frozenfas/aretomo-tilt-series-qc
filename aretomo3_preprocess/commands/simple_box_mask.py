@@ -34,7 +34,6 @@ Typical usage
       --dry-run
 """
 
-import re
 import sys
 import datetime
 from pathlib import Path
@@ -44,35 +43,15 @@ from aretomo3_preprocess.shared.project_json import update_section, args_to_dict
 from aretomo3_preprocess.shared.project_state import resolve_selected_ts
 from aretomo3_preprocess.shared.output_guard import check_output_dir
 from aretomo3_preprocess.shared.volume_qc import orthoslices_with_mask_b64, make_ortho_html
+from aretomo3_preprocess.shared.discovery import (
+    find_volumes as _find_volumes,
+    filter_by_include_exclude,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
-
-def _find_volumes(in_dir, vol_suffix=None):
-    """Return sorted list of (prefix, vol_path) tuples."""
-    if vol_suffix:
-        vol_glob = f'ts-*{vol_suffix}_Vol.mrc'
-    else:
-        vol_glob = 'ts-*_Vol.mrc'
-
-    vols = [v for v in sorted(in_dir.glob(vol_glob))
-            if '_EVN' not in v.name and '_ODD' not in v.name]
-
-    if not vols and not vol_suffix:
-        vols = [v for v in sorted(in_dir.glob('ts-*.mrc'))
-                if not any(t in v.name for t in ('_EVN', '_ODD', '_CTF'))]
-
-    def _prefix(v):
-        name = v.stem
-        for tag in ('_Vol', vol_suffix or ''):
-            if tag and name.endswith(tag):
-                name = name[:-len(tag)]
-        return name
-
-    return [(_prefix(v), v) for v in vols]
-
 
 def _make_mask(vol_path, border, thickness):
     """
@@ -201,14 +180,7 @@ def run(args):
     vol_map  = {p: v for p, v in pairs}
 
     # include / exclude filtering
-    if args.include:
-        inc = args.include[0].split(',') if len(args.include) == 1 else args.include
-        prefixes = [p for p in prefixes
-                    if any(re.match(f'^{pat.replace("*", ".*")}$', p) for pat in inc)]
-    if args.exclude:
-        exc = args.exclude[0].split(',') if len(args.exclude) == 1 else args.exclude
-        prefixes = [p for p in prefixes
-                    if not any(re.match(f'^{pat.replace("*", ".*")}$', p) for pat in exc)]
+    prefixes = filter_by_include_exclude(prefixes, args.include, args.exclude)
 
     # select-ts filter
     selected_ts = resolve_selected_ts(getattr(args, 'select_ts', None))

@@ -48,7 +48,6 @@ so results can be inspected in 3dmod while the remaining TS are still running:
 import json
 import re
 import shutil
-import struct
 import sys
 import datetime
 import subprocess
@@ -62,6 +61,12 @@ from aretomo3_preprocess.shared.project_json import (
     update_section, args_to_dict,
 )
 from aretomo3_preprocess.shared.project_state import resolve_selected_ts
+from aretomo3_preprocess.shared.discovery import (
+    print_cmd as _print_cmd,
+    find_volumes as _find_volumes,
+    mrc_dims as _mrc_dims,
+    filter_by_include_exclude,
+)
 
 # Default pytom binary location
 _PYTOM_BIN = '/opt/miniconda3/envs/pytom_tm/bin/pytom_match_template.py'
@@ -96,13 +101,6 @@ def _find_pytom_extract(pytom_dir=None):
         if Path(c).exists():
             return c
     return shutil.which('pytom_extract_candidates.py')
-
-
-def _mrc_dims(mrc_path):
-    """Read (nx, ny, nz) from an MRC header without mrcfile dependency."""
-    with open(mrc_path, 'rb') as f:
-        hdr = f.read(12)
-    return struct.unpack_from('<3i', hdr, 0)
 
 
 def _find_job_jsons(input_dir, selected_ts=None):
@@ -602,17 +600,6 @@ def _build_extract_cmd(extract_bin, job_json, args, cut_off_override=None):
     return cmd
 
 
-def _print_cmd(cmd):
-    it = iter(cmd)
-    lines = ['  $ ' + next(it)]
-    for tok in it:
-        if tok.startswith('-'):
-            lines.append('      ' + tok)
-        else:
-            lines[-1] += '  ' + tok
-    print(' \\\n'.join(lines))
-
-
 def run(args):
     out_dir = Path(args.output).resolve()
     sep     = '─' * 70
@@ -664,40 +651,17 @@ def run(args):
             sys.exit(1)
 
     # ── Find tomogram prefixes ─────────────────────────────────────────────
-    if args.vol_suffix:
-        vol_glob = f'ts-*{args.vol_suffix}_Vol.mrc'
-    else:
-        vol_glob = 'ts-*_Vol.mrc'
-
-    vols = [v for v in sorted(in_dir.glob(vol_glob))
-            if '_EVN' not in v.name and '_ODD' not in v.name]
-    if not vols and not args.vol_suffix:
-        vols = [v for v in sorted(in_dir.glob('ts-*.mrc'))
-                if not any(tag in v.name for tag in ('_EVN', '_ODD', '_CTF'))]
-
-    if not vols:
+    pairs = _find_volumes(in_dir, args.vol_suffix)
+    if not pairs:
+        vol_glob = f'ts-*{args.vol_suffix}_Vol.mrc' if args.vol_suffix else 'ts-*_Vol.mrc'
         print(f'ERROR: no tomogram volumes found in {in_dir}/ '
               f'(pattern: {vol_glob})')
         sys.exit(1)
 
-    def _prefix_from_vol(vol, vol_suffix):
-        name = vol.stem
-        for tag in ('_Vol', vol_suffix):
-            if tag and name.endswith(tag):
-                name = name[:-len(tag)]
-        return name
-
-    prefixes = [_prefix_from_vol(v, args.vol_suffix) for v in vols]
+    prefixes = [p for p, _ in pairs]
 
     # ── include / exclude filtering ────────────────────────────────────────
-    if args.include:
-        inc = args.include[0].split(',') if len(args.include) == 1 else args.include
-        prefixes = [p for p in prefixes
-                    if any(re.match(f'^{pat.replace("*", ".*")}$', p) for pat in inc)]
-    if args.exclude:
-        exc = args.exclude[0].split(',') if len(args.exclude) == 1 else args.exclude
-        prefixes = [p for p in prefixes
-                    if not any(re.match(f'^{pat.replace("*", ".*")}$', p) for pat in exc)]
+    prefixes = filter_by_include_exclude(prefixes, args.include, args.exclude)
 
     # ── select-ts filter ───────────────────────────────────────────────────
     selected_ts = resolve_selected_ts(getattr(args, 'select_ts', None))
@@ -1164,14 +1128,9 @@ def _run_extract_only(args, out_dir, sep):
     selected_ts = resolve_selected_ts(getattr(args, 'select_ts', None))
     jobs = _find_job_jsons(out_dir, selected_ts)
 
-    if getattr(args, 'include', None):
-        inc = args.include[0].split(',') if len(args.include) == 1 else args.include
-        jobs = [(n, j) for n, j in jobs
-                if any(re.match(f'^{pat.replace("*", ".*")}$', n) for pat in inc)]
-    if getattr(args, 'exclude', None):
-        exc = args.exclude[0].split(',') if len(args.exclude) == 1 else args.exclude
-        jobs = [(n, j) for n, j in jobs
-                if not any(re.match(f'^{pat.replace("*", ".*")}$', n) for pat in exc)]
+    kept_names = set(filter_by_include_exclude(
+        [n for n, _ in jobs], getattr(args, 'include', None), getattr(args, 'exclude', None)))
+    jobs = [(n, j) for n, j in jobs if n in kept_names]
 
     if not jobs:
         print(f'ERROR: no *_job.json files found in {out_dir}/')

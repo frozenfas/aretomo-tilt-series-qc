@@ -70,6 +70,12 @@ from aretomo3_preprocess.shared.volume_qc import (
     make_picks_html, make_picks_html_dev,
     make_comparison_html,
 )
+from aretomo3_preprocess.shared.discovery import (
+    print_cmd as _print_cmd,
+    find_volumes as _find_volumes,
+    mrc_dims as _mrc_dims,
+    filter_by_include_exclude,
+)
 
 _GAPSTOP_BIN    = '/opt/miniconda3/envs/gapstop/bin/gapstop'
 _GAPSTOP_PYTHON = '/opt/miniconda3/envs/gapstop/bin/python'
@@ -103,13 +109,6 @@ def _find_gapstop_python(gapstop_dir=None):
     return shutil.which('python3')
 
 
-def _mrc_dims(mrc_path):
-    """Read (nx, ny, nz) from MRC header without mrcfile."""
-    with open(mrc_path, 'rb') as f:
-        hdr = f.read(12)
-    return struct.unpack_from('<3i', hdr, 0)
-
-
 def _mrc_angpix(mrc_path):
     """Read pixel size (Å/px) from MRC header cell_a.x / nx."""
     with open(mrc_path, 'rb') as f:
@@ -119,30 +118,6 @@ def _mrc_angpix(mrc_path):
     if nx > 0 and cell_x > 0:
         return cell_x / nx
     return None
-
-
-def _find_volumes(in_dir, vol_suffix=None):
-    """Return sorted list of (prefix, vol_path) tuples."""
-    if vol_suffix:
-        vol_glob = f'ts-*{vol_suffix}_Vol.mrc'
-    else:
-        vol_glob = 'ts-*_Vol.mrc'
-
-    vols = [v for v in sorted(in_dir.glob(vol_glob))
-            if '_EVN' not in v.name and '_ODD' not in v.name]
-
-    if not vols and not vol_suffix:
-        vols = [v for v in sorted(in_dir.glob('ts-*.mrc'))
-                if not any(t in v.name for t in ('_EVN', '_ODD', '_CTF'))]
-
-    def _prefix(v):
-        name = v.stem
-        for tag in ('_Vol', vol_suffix or ''):
-            if tag and name.endswith(tag):
-                name = name[:-len(tag)]
-        return name
-
-    return [(_prefix(v), v) for v in vols]
 
 
 def _read_ts_metadata(aretomo_dir, prefix, dose_override=None):
@@ -315,18 +290,6 @@ def _write_gapstop_params(param_path, tomo_path, tomo_num, wedge_path,
     df = pd.DataFrame(params)
     starfile.write(df, str(param_path))
     return param_path
-
-
-def _print_cmd(cmd):
-    """Print command multi-line, one flag+value per line."""
-    it = iter(cmd)
-    lines = ['  $ ' + next(it)]
-    for tok in it:
-        if tok.startswith('-'):
-            lines.append('      ' + tok)
-        else:
-            lines[-1] += '  ' + tok
-    print(' \\\n'.join(lines))
 
 
 def _find_score_map(ts_out):
@@ -1016,14 +979,7 @@ def run(args):
     vol_map  = {p: v for p, v in pairs}
 
     # include / exclude filtering
-    if args.include:
-        inc = args.include[0].split(',') if len(args.include) == 1 else args.include
-        prefixes = [p for p in prefixes
-                    if any(re.match(f'^{pat.replace("*", ".*")}$', p) for pat in inc)]
-    if args.exclude:
-        exc = args.exclude[0].split(',') if len(args.exclude) == 1 else args.exclude
-        prefixes = [p for p in prefixes
-                    if not any(re.match(f'^{pat.replace("*", ".*")}$', p) for pat in exc)]
+    prefixes = filter_by_include_exclude(prefixes, args.include, args.exclude)
 
     # select-ts filter
     selected_ts = resolve_selected_ts(getattr(args, 'select_ts', None))
