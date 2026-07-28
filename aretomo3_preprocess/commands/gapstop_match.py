@@ -173,10 +173,11 @@ def _read_ts_metadata(aretomo_dir, prefix, dose_override=None):
     if not frames:
         raise ValueError(f'{prefix}: no aligned frames in .aln')
 
-    # .aln TILT column is always the nominal (uncorrected) stage tilt --
-    # AreTomo3 never bakes AlphaOffset into it, whether from -TiltCor's
-    # automatic estimate or aln-edit.  Apply it explicitly (same convention
-    # as pytom_match.py / relion5_convert.py).
+    # Tilt angles: the .aln TILT column is always the nominal (uncorrected)
+    # stage tilt -- AreTomo3 never bakes AlphaOffset into it, whether it came
+    # from -TiltCor's automatic estimate or was set via aln-edit.  Apply it
+    # here to get the specimen-referenced tilt (same convention as
+    # pytom_match.py / relion5_convert.py).
     alpha_offset = aln.get('alpha_offset') or 0.0
     tilt_angles = np.array([f['tilt'] + alpha_offset for f in frames])
 
