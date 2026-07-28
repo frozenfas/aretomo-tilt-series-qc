@@ -51,6 +51,7 @@ from aretomo3_preprocess.shared.project_json import (
 )
 from aretomo3_preprocess.shared.project_state import resolve_selected_ts
 from aretomo3_preprocess.shared.denoise_training import find_evn_odd_pairs as _find_evn_odd_pairs
+from aretomo3_preprocess.shared.parsers import parse_aln_file
 from aretomo3_preprocess.commands.deep_dewedge import (
     _find_best_checkpoint, _write_yaml, _run_ddw,
 )
@@ -79,26 +80,15 @@ def _mw_from_aln(aln_path: Path):
     """
     max_pos = 0.0   # furthest positive tilt
     max_neg = 0.0   # furthest negative tilt (stored positive)
-    found   = False
     try:
-        with open(aln_path) as fh:
-            for line in fh:
-                stripped = line.strip()
-                if stripped.startswith('#') or not stripped:
-                    continue
-                parts = stripped.split()
-                if len(parts) == 10:
-                    try:
-                        tilt    = float(parts[9])
-                        max_pos = max(max_pos,  tilt)
-                        max_neg = max(max_neg, -tilt)
-                        found   = True
-                    except ValueError:
-                        pass
+        frames = parse_aln_file(aln_path)['frames']
     except OSError:
         return None
-    if not found:
+    if not frames:
         return None
+    for f in frames:
+        max_pos = max(max_pos,  f['tilt'])
+        max_neg = max(max_neg, -f['tilt'])
     # Use the smaller of the two max tilts (conservative — covers the side
     # with the larger missing wedge).
     effective_max_tilt = min(max_pos, max_neg)

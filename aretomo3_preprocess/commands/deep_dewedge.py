@@ -64,6 +64,7 @@ from aretomo3_preprocess.shared.denoise_training import (
     load_tsselect_defocus as _load_tsselect_defocus,
     stratified_sample as _stratified_sample,
 )
+from aretomo3_preprocess.shared.parsers import parse_aln_file
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -103,22 +104,13 @@ def _detect_mw_angle(in_dir: Path):
     n_read   = 0
     for aln_file in aln_files:
         try:
-            with open(aln_file) as fh:
-                for line in fh:
-                    stripped = line.strip()
-                    if stripped.startswith('#') or not stripped:
-                        continue
-                    parts = stripped.split()
-                    if len(parts) == 10:
-                        try:
-                            tilt    = float(parts[9])
-                            max_pos = max(max_pos,  tilt)
-                            max_neg = max(max_neg, -tilt)
-                        except ValueError:
-                            pass
-            n_read += 1
+            frames = parse_aln_file(aln_file)['frames']
         except Exception:
-            pass
+            continue
+        for f in frames:
+            max_pos = max(max_pos,  f['tilt'])
+            max_neg = max(max_neg, -f['tilt'])
+        n_read += 1
 
     if n_read == 0:
         return None
