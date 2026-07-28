@@ -815,6 +815,128 @@ def _check_mdocs(mdoc_files: list) -> tuple:
     return errors, stats
 
 
+def _detect_aretomo3_version(binary: str) -> str:
+    """
+    Best-effort AreTomo3 version string for the preflight log.
+
+    AreTomo3 has no confirmed stable --version flag across releases, so
+    this tries a few common patterns with a short timeout and falls back
+    to the resolved binary path + modification date (often reflects an
+    install/build date, sometimes a version-named directory) if none
+    produce a recognizable version string. Never authoritative -- just a
+    transparency aid so the log always states what actually ran, given
+    this whole preflight exists because of a version-specific parser
+    change.
+    """
+    resolved = shutil.which(binary) or binary
+    for flag in ('--version', '-version', '-v'):
+        try:
+            proc = subprocess.run([binary, flag], capture_output=True,
+                                  text=True, timeout=5)
+        except Exception:
+            continue
+        out = (proc.stdout + proc.stderr).strip()
+        m = re.search(r'\d+\.\d+(\.\d+)?', out)
+        if m:
+            return f'{m.group(0)} (via {flag})'
+    try:
+        mtime = datetime.datetime.fromtimestamp(
+            Path(resolved).stat().st_mtime).strftime('%Y-%m-%d')
+        return f'unknown (no --version support found; binary: {resolved}, modified {mtime})'
+    except OSError:
+        return f'unknown (binary not found at {resolved!r})'
+
+
+def _check_gpus(requested_gpus: list) -> list:
+    """
+    Best-effort GPU availability check via nvidia-smi.
+
+    Returns a list of warning strings. Empty if nvidia-smi isn't available
+    (not itself a problem -- e.g. it may not be on PATH even though CUDA
+    works) or every requested GPU ID is present.
+    """
+    try:
+        proc = subprocess.run(
+            ['nvidia-smi', '--query-gpu=index', '--format=csv,noheader'],
+            capture_output=True, text=True, timeout=10)
+    except Exception:
+        return []
+    if proc.returncode != 0:
+        return []
+    available = {int(x) for x in proc.stdout.split() if x.strip().isdigit()}
+    if not available:
+        return []
+    missing = [g for g in requested_gpus if g not in available]
+    if missing:
+        return [f'Requested GPU ID(s) not found by nvidia-smi: {missing} '
+                f'(available: {sorted(available)})']
+    return []
+
+
+def _check_disk_space(out_dir: Path) -> list:
+    """
+    Warn if free space on --output's filesystem is low.
+
+    A precise "enough space for this run" estimate depends on VolZ/AtBin/
+    dtype/split-sum and is easy to get wrong; this only flags an absolute
+    low-water mark as a sanity check, not a prediction. (A batch tomogram
+    run genuinely crashed the project.json write from exactly this cause
+    -- see project_json.py's atomic-write fix -- so even a rough warning
+    here is worth having.)
+    """
+    check_dir = out_dir if out_dir.exists() else out_dir.parent
+    try:
+        usage = shutil.disk_usage(check_dir)
+    except OSError:
+        return []
+    free_gb = usage.free / 1e9
+    if free_gb < 20:
+        return [f'Low disk space on {check_dir} filesystem: {free_gb:.1f} GB free '
+                f'-- a batch tomogram run can consume far more than this']
+    return []
+
+
+def _check_output_tilt_counts(expected_sections: dict, out_dir: Path) -> tuple:
+    """
+    Post-run sanity check: for every TS whose .aln now exists in out_dir,
+    compare its total_frames (RawSize third value) against the mdoc's own
+    section count recorded during preflight.
+
+    This deliberately re-reads the structured .aln/RawSize output rather
+    than scraping AreTomo3's free-text stdout log -- the log's format is
+    not a stable, version-safe parsing target (ironic given this whole
+    check exists because AreTomo3's *mdoc* parsing changed between
+    versions), whereas .aln's RawSize field is the same well-defined
+    interchange value this codebase already depends on elsewhere.
+
+    Run this regardless of whether AreTomo3 exited cleanly or crashed --
+    whichever TS did get an .aln written are worth checking either way,
+    and a mismatch here is exactly the "AreTomo3 recovered the wrong
+    number of tilts" signature that would flag a future parser regression
+    even if it wasn't caught at the mdoc-preflight stage.
+
+    Returns (mismatches, n_checked) where mismatches is a list of
+    '{ts_name}: expected N, got M' strings.
+    """
+    from aretomo3_preprocess.shared.parsers import parse_aln_file
+
+    mismatches = []
+    n_checked = 0
+    for ts_name, expected in expected_sections.items():
+        aln_path = out_dir / f'{ts_name}.aln'
+        if not aln_path.exists():
+            continue
+        n_checked += 1
+        try:
+            actual = parse_aln_file(aln_path)['total_frames']
+        except Exception:
+            continue
+        if actual is not None and actual != expected:
+            mismatches.append(f'{ts_name}: expected {expected} tilts (from mdoc), '
+                              f'got {actual} (from .aln)')
+    return mismatches, n_checked
+
+
 def _load_global_params(analysis_dir: Path) -> dict:
     """Load global_suggested TiltAxis and AlignZ from an analyse output dir.
 
@@ -834,12 +956,20 @@ def _load_global_params(analysis_dir: Path) -> dict:
 def _validate(args) -> tuple:
     """Run pre-flight checks.
 
-    Returns (errors, warnings) where:
-      errors   — fatal, always abort
-      warnings — abort unless --force
+    Returns (errors, warnings, mdoc_stats) where:
+      errors     — fatal, always abort
+      warnings   — abort unless --force
+      mdoc_stats — dict from _check_mdocs (has 'expected_sections' for the
+                   post-run tilt-count check), or None outside mdoc mode
     """
-    errors   = []
-    warnings = []
+    errors     = []
+    warnings   = []
+    mdoc_stats = None
+
+    print(f'  AreTomo3 binary : {_detect_aretomo3_version(args.aretomo3_bin)}')
+
+    warnings.extend(_check_gpus(args.gpu))
+    warnings.extend(_check_disk_space(Path(args.output)))
 
     # ── 1. Gain / fm-dose (only needed for cmd 0 = full pipeline) ─────────
     if args.gain is not None:
@@ -995,7 +1125,7 @@ def _validate(args) -> tuple:
             else:
                 print(f'  Voltage         : OK  ({volt} kV matches --kv {args.kv})')
 
-    return errors, warnings
+    return errors, warnings, mdoc_stats
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1185,7 +1315,7 @@ def run(args):
 
     # ── Pre-flight validation ──────────────────────────────────────────────
     print('Pre-flight checks:')
-    errors, warnings = _validate(args)
+    errors, warnings, mdoc_stats = _validate(args)
 
     if errors:
         print()
@@ -1332,6 +1462,22 @@ def run(args):
             print(f'  {line}')
         if len(flagged) > 20:
             print(f'  ... ({len(flagged) - 20} more — see log)')
+
+    # ── Post-run tilt-count check (mdoc mode only; runs whether AreTomo3
+    # succeeded or crashed -- whatever .aln files exist are worth checking) ──
+    if mdoc_stats is not None:
+        mismatches, n_checked = _check_output_tilt_counts(
+            mdoc_stats['expected_sections'], out_dir)
+        if n_checked:
+            print(f'\nTilt-count check: {n_checked - len(mismatches)}/{n_checked} '
+                  f'TS match mdoc-expected tilt count')
+            if mismatches:
+                print(f'  ** {len(mismatches)} TS recovered a different tilt count '
+                      f'than the mdoc has -- possible parser regression: **')
+                for line in mismatches[:20]:
+                    print(f'    {line}')
+                if len(mismatches) > 20:
+                    print(f'    ... ({len(mismatches) - 20} more)')
 
     print()
     if returncode != 0:
