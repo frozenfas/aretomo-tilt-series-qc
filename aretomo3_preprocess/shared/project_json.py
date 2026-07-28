@@ -28,6 +28,7 @@ Reverting from a backup
     cp gain_check/aretomo3_project.json .
 """
 
+import os
 import sys
 import json
 import shutil
@@ -46,12 +47,33 @@ def _read(path: Path) -> dict:
     if not path.exists():
         return {}
     with open(path) as fh:
-        return json.load(fh)
+        try:
+            return json.load(fh)
+        except json.JSONDecodeError as e:
+            print(f'ERROR: {path} is corrupt JSON ({e}).')
+            print(f'       This should no longer happen going forward (writes are now')
+            print(f'       atomic), but pre-existing corruption from an interrupted or')
+            print(f'       concurrent write needs manual recovery. Look for a backup copy')
+            print(f'       under one of this project\'s command output directories (every')
+            print(f'       update_section() call copies one to backup_dir), e.g.:')
+            print(f'         find {path.parent} -name {path.name!r}')
+            print(f'       Restore with: cp <output_dir>/{path.name} {path}')
+            sys.exit(1)
 
 
 def _write(data: dict, path: Path):
-    with open(path, 'w') as fh:
+    """
+    Write atomically: full contents land in a same-directory temp file first,
+    then one os.replace() swaps it into place. A plain open(path, 'w') would
+    leave a truncated, corrupt JSON file behind if the write is interrupted
+    (killed process, concurrent writer, out of disk) partway through --
+    os.replace() is a single filesystem rename, so readers only ever see the
+    fully-old or fully-new file, never a partial one.
+    """
+    tmp_path = path.with_suffix(path.suffix + f'.tmp{os.getpid()}')
+    with open(tmp_path, 'w') as fh:
         json.dump(data, fh, indent=2)
+    os.replace(tmp_path, path)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
