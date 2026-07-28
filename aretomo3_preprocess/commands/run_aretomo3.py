@@ -745,8 +745,17 @@ def _check_mdocs(mdoc_files: list) -> tuple:
     distinct failure reason (collapsed with a count + example filename,
     since a shared mdoc collection template typically means the same
     problem affects every TS, not just one); stats has n_mdocs / n_valid /
-    median_tilts / min_tilts / max_tilts / median_frames_per_tilt (any of
-    the numeric fields may be None if no mdoc parsed successfully).
+    median_tilts / min_tilts / max_tilts / median_frames_per_tilt / n_v222 /
+    n_v230 / expected_sections (dict of ts_name -> n_sections, for the
+    post-run tilt-count check) -- any numeric field may be None if no mdoc
+    parsed successfully.
+
+    Fatal/abort is always keyed to AreTomo3 >= 2.3.0 conformance (the
+    stricter, currently-shipping ruleset), regardless of what's actually
+    installed -- being conservative here is cheap insurance. v222/v230
+    conformance is reported separately so a "worked before, breaks on
+    2.3.0" mdoc (passes v222, fails v230) is visible even when the exact
+    installed AreTomo3 version isn't known at preflight time.
     """
     from aretomo3_preprocess.commands.validate_mdoc import validate_file
     from aretomo3_preprocess.shared.parsers import parse_mdoc_file
@@ -754,9 +763,17 @@ def _check_mdocs(mdoc_files: list) -> tuple:
     bad_by_reason = {}   # reason -> [filenames]
     tilts_per_ts = []
     frames_per_tilt = []
+    expected_sections = {}   # ts_name -> n_sections (for post-run check)
+    n_v222 = n_v230 = 0
 
     for path in mdoc_files:
         result = validate_file(path)
+        expected_sections[path.stem] = result['n_sections']
+        if result['passes_v222']:
+            n_v222 += 1
+        if result['passes_v230']:
+            n_v230 += 1
+
         if not result['success']:
             reason = result['failure'] or 'field order'
             bad_by_reason.setdefault(reason, []).append(path.name)
@@ -786,11 +803,14 @@ def _check_mdocs(mdoc_files: list) -> tuple:
     stats = {
         'n_mdocs':      len(mdoc_files),
         'n_valid':      len(tilts_per_ts),
+        'n_v222':       n_v222,
+        'n_v230':       n_v230,
         'median_tilts': int(statistics.median(tilts_per_ts)) if tilts_per_ts else None,
         'min_tilts':    min(tilts_per_ts) if tilts_per_ts else None,
         'max_tilts':    max(tilts_per_ts) if tilts_per_ts else None,
         'median_frames_per_tilt':
             int(statistics.median(frames_per_tilt)) if frames_per_tilt else None,
+        'expected_sections': expected_sections,
     }
     return errors, stats
 
@@ -865,13 +885,46 @@ def _validate(args) -> tuple:
         mdoc_errors, mdoc_stats = _check_mdocs(mdoc_files)
         if mdoc_errors:
             errors.extend(mdoc_errors)
+
+        n = mdoc_stats['n_mdocs']
+        v222, v230 = mdoc_stats['n_v222'], mdoc_stats['n_v230']
+        print(f'  Mdoc parsing    : {v230}/{n} OK for AreTomo3 >=2.3.0'
+              f'  |  {v222}/{n} OK for AreTomo3 <2.3.0')
+        if v222 != v230:
+            print(f'                    ** {abs(v222 - v230)} mdoc(s) parse differently '
+                  f'depending on AreTomo3 version -- '
+                  f'{"would break on upgrade to" if v222 > v230 else "require"} 2.3.0 **')
+
         if mdoc_stats['median_tilts'] is not None:
             tilt_range = (f'  (range {mdoc_stats["min_tilts"]}-{mdoc_stats["max_tilts"]})'
                           if mdoc_stats['min_tilts'] != mdoc_stats['max_tilts'] else '')
             fpt = (f'  |  {mdoc_stats["median_frames_per_tilt"]} frames/tilt (median)'
                   if mdoc_stats['median_frames_per_tilt'] is not None else '')
-            print(f'  Mdoc parsing    : {mdoc_stats["n_valid"]}/{mdoc_stats["n_mdocs"]} OK'
+            print(f'                    {mdoc_stats["n_valid"]}/{n} tilts recovered OK'
                   f'  |  {mdoc_stats["median_tilts"]} tilts/TS (median){tilt_range}{fpt}')
+
+        # All-mdocs internal consistency (not just the first file against
+        # --apix/--kv below): the mdoc's own PixelSpacing is uncalibrated and
+        # routinely overridden by --apix on purpose, so disagreement with
+        # --apix is expected and not itself a red flag. But every mdoc in
+        # one batch disagreeing with EACH OTHER means a mixed-session
+        # dataset (different mag/settings), which is worth flagging.
+        ps_values, kv_values = set(), set()
+        for path in mdoc_files:
+            meta = _read_mdoc_metadata(path)
+            if meta.get('PixelSpacing') is not None:
+                ps_values.add(round(meta['PixelSpacing'], 4))
+            if meta.get('Voltage') is not None:
+                kv_values.add(round(meta['Voltage'], 1))
+        if len(ps_values) > 1:
+            warnings.append(
+                f'Mdocs disagree on PixelSpacing (uncalibrated): {sorted(ps_values)} '
+                f'-- mixed-session dataset?'
+            )
+        if len(kv_values) > 1:
+            warnings.append(
+                f'Mdocs disagree on Voltage: {sorted(kv_values)} kV -- mixed-session dataset?'
+            )
 
     # ── 3. .aln files present (cmd=2 only) ────────────────────────────────
     if args.cmd == 2 and in_dir.is_dir():

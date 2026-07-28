@@ -156,9 +156,15 @@ def _extract_exptime(line):
 # Simulate CReadMdoc::DoIt
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _simulate_aretomo3(lines):
+def _simulate_aretomo3(lines, require_exptime=True):
     """
     Simulate the AreTomo3 mdoc parser state machine.
+
+    require_exptime=True  (default) simulates AreTomo3 >= 2.3.0, which reads
+    a 5th field (ExposureTime) after SubFramePath.  require_exptime=False
+    simulates AreTomo3 < 2.3.0 (e.g. 2.2.2), which only ever reads the first
+    four fields and has no notion of ExposureTime at all -- its presence or
+    position anywhere in the file is irrelevant to that parser.
 
     Returns (n_tilts_loaded, failure_state) where failure_state is one of:
       None                    — success
@@ -166,7 +172,8 @@ def _simulate_aretomo3(lines):
       'missing_tiltangle'     — stuck waiting for TiltAngle
       'missing_exposuredose'  — stuck waiting for ExposureDose
       'missing_subframepath'  — stuck waiting for SubFramePath
-      'missing_exposuretime'  — stuck waiting for ExposureTime (AreTomo3 >= 2.3.0)
+      'missing_exposuretime'  — stuck waiting for ExposureTime (only possible
+                                 when require_exptime=True)
       'too_few_tilts'         — parsed OK but fewer than 7 tilts
 
     NOTE: unlike a simple per-field presence count, this simulates the real
@@ -189,7 +196,8 @@ def _simulate_aretomo3(lines):
         if _extract_val_z(line) < 0:
             continue
 
-        bTilt = bDose = bFm = bExpTime = False
+        bTilt = bDose = bFm = False
+        bExpTime = not require_exptime   # pre-satisfied when not required
         while li < total:
             line = lines[li]; li += 1
             if not bTilt:
@@ -355,6 +363,9 @@ def _scan_fields(lines):
 # ─────────────────────────────────────────────────────────────────────────────
 
 _CANONICAL_ORDER = ['TiltAngle', 'ExposureDose', 'SubFramePath', 'ExposureTime']
+# AreTomo3 < 2.3.0 never reads ExposureTime, so its position is irrelevant
+# to that parser -- only the first three fields' relative order matters.
+_CANONICAL_ORDER_V222 = ['TiltAngle', 'ExposureDose', 'SubFramePath']
 
 _FIELD_CHECKERS = {
     'TiltAngle':     lambda l: _extract_tilt(l)[0],
@@ -389,15 +400,17 @@ def _split_sections(lines):
     return sections
 
 
-def _field_positions(body_lines):
+def _field_positions(body_lines, fields=None):
     """
     Return an ordered dict {field_name: line} for the FIRST occurrence of
-    each of the four required fields found in body_lines, in the order
-    they actually appear (encounter order, not canonical order).
+    each field in `fields` (default: all four) found in body_lines, in the
+    order they actually appear (encounter order, not canonical order).
     """
+    checkers = {k: v for k, v in _FIELD_CHECKERS.items()
+                if fields is None or k in fields}
     found = {}
     for line in body_lines:
-        for name, check in _FIELD_CHECKERS.items():
+        for name, check in checkers.items():
             if name in found:
                 continue
             if check(line):
@@ -406,9 +419,12 @@ def _field_positions(body_lines):
     return found
 
 
-def _check_order(lines):
+def _check_order(lines, canonical_order=_CANONICAL_ORDER):
     """
-    Check every section's field order against _CANONICAL_ORDER.
+    Check every section's field order against `canonical_order`.
+
+    Pass canonical_order=_CANONICAL_ORDER_V222 to check against AreTomo3
+    < 2.3.0's rules instead (ExposureTime ignored entirely).
 
     Returns a list of dicts, one per out-of-order section:
       {zval, found_order, expected_order}
@@ -418,11 +434,11 @@ def _check_order(lines):
     """
     out_of_order = []
     for zval, header, body in _split_sections(lines):
-        found = _field_positions(body)
+        found = _field_positions(body, fields=canonical_order)
         if len(found) < 2:
             continue  # nothing meaningful to compare
         encounter_order = list(found.keys())
-        expected_order = [f for f in _CANONICAL_ORDER if f in found]
+        expected_order = [f for f in canonical_order if f in found]
         if encounter_order != expected_order:
             out_of_order.append(dict(
                 zval=zval,
@@ -445,6 +461,33 @@ def _describe_order_issue(out_of_order):
             ' → '.join(example['found_order']),
             ' → '.join(example['expected_order']),
         )
+    )
+
+
+def check_parser_conformance(lines):
+    """
+    Check whether a mdoc would parse correctly under AreTomo3 < 2.3.0
+    (4-field, no ExposureTime) versus >= 2.3.0 (5-field, ExposureTime
+    required and order-checked).
+
+    A file can pass one and fail the other -- that combination (passes
+    2.2.2, fails 2.3.0) is exactly the "worked fine for years, then broke
+    on upgrade" failure mode this module exists to catch pre-emptively.
+
+    Returns a dict:
+      passes_v222, passes_v230  — bool
+      n_tilts_v222, n_tilts_v230 — int
+    """
+    n222, fail222 = _simulate_aretomo3(lines, require_exptime=False)
+    order222 = _check_order(lines, canonical_order=_CANONICAL_ORDER_V222)
+    n230, fail230 = _simulate_aretomo3(lines, require_exptime=True)
+    order230 = _check_order(lines, canonical_order=_CANONICAL_ORDER)
+
+    return dict(
+        passes_v222=(fail222 is None and not order222),
+        passes_v230=(fail230 is None and not order230),
+        n_tilts_v222=n222,
+        n_tilts_v230=n230,
     )
 
 
@@ -789,14 +832,20 @@ def validate_file(path, fix_dose=False, fix_exptime=False, fix_order=False,
 
     Returns a dict with keys:
       path, success, n_tilts, failure, issues, order_issues, fixed,
-      fix_types, n_injected, backed_up
+      fix_types, n_injected, backed_up, n_sections,
+      passes_v222, passes_v230, n_tilts_v222, n_tilts_v230
+      (success/n_tilts/failure always reflect the current, >= 2.3.0 rules;
+      passes_v222/passes_v230 additionally report conformance to each
+      AreTomo3 generation separately -- see check_parser_conformance)
     """
     try:
         raw = Path(path).read_bytes()
     except OSError as e:
         return dict(path=path, success=False, n_tilts=0,
                     failure=str(e), issues=[], order_issues=[], fixed=False,
-                    fix_types=[], n_injected=0, backed_up=False)
+                    fix_types=[], n_injected=0, backed_up=False, n_sections=0,
+                    passes_v222=False, passes_v230=False,
+                    n_tilts_v222=0, n_tilts_v230=0)
 
     text = raw.decode('latin-1', errors='replace')
     lines = [l + '\n' for l in text.splitlines()]
@@ -805,6 +854,7 @@ def validate_file(path, fix_dose=False, fix_exptime=False, fix_order=False,
     scan = _scan_fields(lines)
     order_issues = _check_order(lines)
     order_msg = _describe_order_issue(order_issues)
+    conformance = check_parser_conformance(lines)
 
     issues = list(scan['issues'])
     if order_msg:
@@ -827,6 +877,7 @@ def validate_file(path, fix_dose=False, fix_exptime=False, fix_order=False,
         fix_types=[],
         n_injected=0,
         backed_up=False,
+        **conformance,
     )
 
     if result['success']:
