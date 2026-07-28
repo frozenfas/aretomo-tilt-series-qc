@@ -71,9 +71,13 @@ def _write(data: dict, path: Path):
     fully-old or fully-new file, never a partial one.
     """
     tmp_path = path.with_suffix(path.suffix + f'.tmp{os.getpid()}')
-    with open(tmp_path, 'w') as fh:
-        json.dump(data, fh, indent=2)
-    os.replace(tmp_path, path)
+    try:
+        with open(tmp_path, 'w') as fh:
+            json.dump(data, fh, indent=2)
+        os.replace(tmp_path, path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 # ─────────────────────────────────────────────────────────────────────────────
