@@ -51,12 +51,17 @@ def plot_tilt_series(ts_name, data, threshold, out_path, global_ranges,
     W, H        = data['width'], data['height']
     dark_frames = data['dark_frames']
 
-    tilts    = np.array([f['tilt']         for f in frames])
+    # .aln TILT is always the nominal (uncorrected) stage tilt -- AreTomo3
+    # never bakes AlphaOffset into it.  Apply it here for display, same
+    # convention as pytom_match.py / gapstop_match.py / relion5_convert.py.
+    curr_alpha = data.get('alpha_offset') or 0.0
+
+    tilts    = np.array([f['tilt'] + curr_alpha for f in frames])
     overlaps = np.array([f['overlap_pct']  for f in frames])
     is_ref   = np.array([f['is_reference'] for f in frames])
     rot      = frames[0]['rot'] if frames else 0.0
 
-    dark_tilts = [df['tilt'] for df in dark_frames]
+    dark_tilts = [df['tilt'] + curr_alpha for df in dark_frames]
     n_bad      = int(np.sum(overlaps < threshold))
     ovl_cols   = [_ovl_colour(o) for o in overlaps]
     ovl_sm     = _ovl_sm()
@@ -117,16 +122,13 @@ def plot_tilt_series(ts_name, data, threshold, out_path, global_ranges,
     )
 
     # ── Panel 1 : Overlap % vs tilt angle ────────────────────────────────────
-    # Corrected tilt = nominal + alpha_offset.  When comparing across runs the
-    # alpha_offset may differ, so we re-express the previous tilts in the
-    # current run's alpha space:  prev_tilt - prev_alpha + current_alpha
-    curr_alpha = data.get('alpha_offset') or 0.0
+    # Both current and previous .aln TILT columns are nominal-only; apply
+    # each run's own alpha_offset to get corrected tilts on the same axis.
     if prev_data is not None:
         prev_alpha  = prev_data.get('alpha_offset') or 0.0
         prev_frames = prev_data.get('frames', [])
         if prev_frames:
-            alpha_delta   = curr_alpha - prev_alpha
-            prev_tilts    = [f['tilt'] + alpha_delta for f in prev_frames]
+            prev_tilts    = [f['tilt'] + prev_alpha for f in prev_frames]
             prev_overlaps = [f['overlap_pct']        for f in prev_frames]
             ax1.scatter(prev_tilts, prev_overlaps, color='#aaaaaa', s=25,
                         marker='o', alpha=0.5, zorder=2, label='previous run')
@@ -301,7 +303,8 @@ def _validate_ts(data, tlt_data, mdoc_data, mrc_path=None):
 
     Checks performed:
       1. MRC header nx/ny/nz vs .aln width/height/total_frames
-      2. _TLT.txt nominal_tilt + AlphaOffset ≈ .aln corrected tilt  (per frame)
+      2. _TLT.txt nominal_tilt ≈ .aln TILT  (both nominal -- AreTomo3 never
+         bakes AlphaOffset into either)  (per frame)
       3. Every aligned frame's z_value maps to a key in the mdoc
       4. _TLT.txt rows are fully covered by aligned SECs ∪ dark frame_bs
       5. Mdoc TiltAngle ≈ _TLT.txt nominal_tilt  (via z_value linkage)
@@ -309,7 +312,6 @@ def _validate_ts(data, tlt_data, mdoc_data, mrc_path=None):
     Returns a list of warning strings (empty = all OK).
     """
     warnings = []
-    alpha = data.get('alpha_offset') or 0.0
 
     # 1. MRC header
     if mrc_path is not None and mrc_path.exists():
@@ -329,18 +331,20 @@ def _validate_ts(data, tlt_data, mdoc_data, mrc_path=None):
         except Exception as e:
             warnings.append(f'MRC header read failed: {e}')
 
-    # 2. Corrected tilt: TLT nominal + alpha ≈ .aln TILT
+    # 2. Nominal tilt cross-check: _TLT.txt nominal_tilt ≈ .aln TILT.  Both
+    # are always nominal (uncorrected) -- AlphaOffset lives only in the
+    # header and is never baked into either file by AreTomo3 or aln-edit.
     if tlt_data:
         bad = []
         for f in data['frames']:
             tlt = tlt_data.get(f['sec'])
             if tlt is None:
                 continue
-            if abs(tlt['nominal_tilt'] + alpha - f['tilt']) > 0.05:
+            if abs(tlt['nominal_tilt'] - f['tilt']) > 0.05:
                 bad.append(f['sec'])
         if bad:
             warnings.append(
-                f'{len(bad)} frame(s) |TLT nominal+α − .aln tilt| > 0.05°: '
+                f'{len(bad)} frame(s) |TLT nominal − .aln tilt| > 0.05°: '
                 f'SEC {bad}')
 
     # 3. ZValue linkage: every frame's z_value must appear in mdoc
@@ -1719,8 +1723,9 @@ def run(args):
     # ── Compute global axis ranges ────────────────────────────────────────────
     all_tilts, all_defocus, all_spacing = [], [], []
     for data in all_ts.values():
+        _alpha = data.get('alpha_offset') or 0.0
         for f in data['frames']:
-            all_tilts.append(f['tilt'])
+            all_tilts.append(f['tilt'] + _alpha)
             if f.get('mean_defocus_um') is not None:
                 all_defocus.append(f['mean_defocus_um'])
             if f.get('fit_spacing_A') is not None:
@@ -1785,6 +1790,7 @@ def run(args):
         bad_frames    = [f for f in data['frames'] if f['is_flagged']]
         n_bad         = len(bad_frames)
         total_flagged += n_bad
+        _ts_alpha     = data.get('alpha_offset') or 0.0
 
         status = '✗' if n_bad else '✓'
         _pwrite(sep)
@@ -1799,12 +1805,12 @@ def run(args):
             _pwrite(f'     {"SEC":>4}  {"Tilt (°)":>9}  {"TX (px)":>10}  '
                     f'{"TY (px)":>10}  {"Overlap":>8}')
             for f in bad_frames:
-                _pwrite(f'     {f["sec"]:>4}  {f["tilt"]:>9.2f}  {f["tx"]:>10.1f}  '
+                _pwrite(f'     {f["sec"]:>4}  {f["tilt"] + _ts_alpha:>9.2f}  {f["tx"]:>10.1f}  '
                         f'{f["ty"]:>10.1f}  {f["overlap_pct"]:>7.1f}%')
                 flagged_rows.append({
                     'ts':          ts_name,
                     'sec':         f['sec'],
-                    'tilt':        f['tilt'],
+                    'tilt':        f['tilt'] + _ts_alpha,
                     'tx':          f['tx'],
                     'ty':          f['ty'],
                     'overlap_pct': f['overlap_pct'],
