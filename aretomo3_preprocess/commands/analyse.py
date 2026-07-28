@@ -51,17 +51,18 @@ def plot_tilt_series(ts_name, data, threshold, out_path, global_ranges,
     W, H        = data['width'], data['height']
     dark_frames = data['dark_frames']
 
-    # .aln TILT is always the nominal (uncorrected) stage tilt -- AreTomo3
-    # never bakes AlphaOffset into it.  Apply it here for display, same
-    # convention as pytom_match.py / gapstop_match.py / relion5_convert.py.
-    curr_alpha = data.get('alpha_offset') or 0.0
-
-    tilts    = np.array([f['tilt'] + curr_alpha for f in frames])
+    # Deliberately nominal, not alpha-corrected: this plot is for QC pattern
+    # detection (which frames are bad), and alpha_offset can change between
+    # refinements/re-runs.  Nominal tilt is stable across runs so overlays
+    # and repeated analyse passes stay comparable.  (Correction matters for
+    # tomogram/picking geometry -- relion5_convert.py, pytom_match.py,
+    # gapstop_match.py -- not for this QC view.)
+    tilts    = np.array([f['tilt']         for f in frames])
     overlaps = np.array([f['overlap_pct']  for f in frames])
     is_ref   = np.array([f['is_reference'] for f in frames])
     rot      = frames[0]['rot'] if frames else 0.0
 
-    dark_tilts = [df['tilt'] + curr_alpha for df in dark_frames]
+    dark_tilts = [df['tilt'] for df in dark_frames]
     n_bad      = int(np.sum(overlaps < threshold))
     ovl_cols   = [_ovl_colour(o) for o in overlaps]
     ovl_sm     = _ovl_sm()
@@ -122,14 +123,13 @@ def plot_tilt_series(ts_name, data, threshold, out_path, global_ranges,
     )
 
     # ── Panel 1 : Overlap % vs tilt angle ────────────────────────────────────
-    # Both current and previous .aln TILT columns are nominal-only; apply
-    # each run's own alpha_offset to get corrected tilts on the same axis.
+    # Nominal tilt for both runs (see note above) -- always comparable
+    # regardless of what alpha_offset each run happened to use.
     if prev_data is not None:
-        prev_alpha  = prev_data.get('alpha_offset') or 0.0
         prev_frames = prev_data.get('frames', [])
         if prev_frames:
-            prev_tilts    = [f['tilt'] + prev_alpha for f in prev_frames]
-            prev_overlaps = [f['overlap_pct']        for f in prev_frames]
+            prev_tilts    = [f['tilt']        for f in prev_frames]
+            prev_overlaps = [f['overlap_pct'] for f in prev_frames]
             ax1.scatter(prev_tilts, prev_overlaps, color='#aaaaaa', s=25,
                         marker='o', alpha=0.5, zorder=2, label='previous run')
 
@@ -1721,11 +1721,11 @@ def run(args):
     print()
 
     # ── Compute global axis ranges ────────────────────────────────────────────
+    # Nominal tilt (see plot_tilt_series note) -- stable across re-runs.
     all_tilts, all_defocus, all_spacing = [], [], []
     for data in all_ts.values():
-        _alpha = data.get('alpha_offset') or 0.0
         for f in data['frames']:
-            all_tilts.append(f['tilt'] + _alpha)
+            all_tilts.append(f['tilt'])
             if f.get('mean_defocus_um') is not None:
                 all_defocus.append(f['mean_defocus_um'])
             if f.get('fit_spacing_A') is not None:
@@ -1790,7 +1790,6 @@ def run(args):
         bad_frames    = [f for f in data['frames'] if f['is_flagged']]
         n_bad         = len(bad_frames)
         total_flagged += n_bad
-        _ts_alpha     = data.get('alpha_offset') or 0.0
 
         status = '✗' if n_bad else '✓'
         _pwrite(sep)
@@ -1805,12 +1804,12 @@ def run(args):
             _pwrite(f'     {"SEC":>4}  {"Tilt (°)":>9}  {"TX (px)":>10}  '
                     f'{"TY (px)":>10}  {"Overlap":>8}')
             for f in bad_frames:
-                _pwrite(f'     {f["sec"]:>4}  {f["tilt"] + _ts_alpha:>9.2f}  {f["tx"]:>10.1f}  '
+                _pwrite(f'     {f["sec"]:>4}  {f["tilt"]:>9.2f}  {f["tx"]:>10.1f}  '
                         f'{f["ty"]:>10.1f}  {f["overlap_pct"]:>7.1f}%')
                 flagged_rows.append({
                     'ts':          ts_name,
                     'sec':         f['sec'],
-                    'tilt':        f['tilt'] + _ts_alpha,
+                    'tilt':        f['tilt'],
                     'tx':          f['tx'],
                     'ty':          f['ty'],
                     'overlap_pct': f['overlap_pct'],
