@@ -17,9 +17,9 @@ from aretomo3_preprocess.shared.parsers import (
 )
 
 DATA_DIR = Path('/mnt/McQueen-002/sconnell/TEST-ARETOMO-PARSE/relion')
-RUN001   = DATA_DIR / 'run001'
+RUN001   = DATA_DIR / 'run001-cmd0'
 FRAMES   = DATA_DIR / 'frames'
-MRC_DIR  = Path('/mnt/McQueen-002/parry/bi38262-21-akinetes/relion/run002')
+MRC_DIR  = Path('/mnt/McQueen-002/parry/bi38262-21-akinetes/relion/run001')
 TS       = 'ts-001'
 
 skip_if_no_data = pytest.mark.skipif(
@@ -49,9 +49,9 @@ class TestParseAln:
         assert aln['total_frames'] == 29
 
     def test_header_values(self, aln):
-        assert aln['alpha_offset'] == pytest.approx(-18.6)
+        assert aln['alpha_offset'] == pytest.approx(-14.0)
         assert aln['beta_offset']  == pytest.approx(0.0)
-        assert aln['thickness']    == 590
+        assert aln['thickness']    == 890
         assert aln['num_patches']  == 0
 
     def test_aligned_frame_count(self, aln):
@@ -69,15 +69,17 @@ class TestParseAln:
         # Reference frame: tx=0, ty=0
         refs = [f for f in aln['frames'] if f['tx'] == 0.0 and f['ty'] == 0.0]
         assert len(refs) == 1
-        assert refs[0]['sec']  == 17
-        assert refs[0]['tilt'] == pytest.approx(1.38, abs=0.01)
+        assert refs[0]['sec']  == 10
+        assert refs[0]['tilt'] == pytest.approx(-15.01, abs=0.01)
 
     def test_dark_frame_fields(self, aln):
-        # First dark frame: frame_a=18, frame_b=19, tilt=7.38 (corrected)
+        # First dark frame: frame_a=18, frame_b=19. tilt is the raw nominal
+        # stage tilt -- DarkFrame header lines are never alpha-corrected,
+        # by AreTomo3 or by aln-edit (only the per-frame TILT data rows are).
         df0 = aln['dark_frames'][0]
         assert df0['frame_a'] == 18
         assert df0['frame_b'] == 19
-        assert df0['tilt']    == pytest.approx(7.38, abs=0.01)
+        assert df0['tilt']    == pytest.approx(25.98, abs=0.01)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -111,8 +113,8 @@ class TestParseTlt:
             assert row['z_value'] == row['acq_order'] - 1
 
     def test_corrected_tilt_of_row_matches_aln(self, tlt):
-        # Row 15: nominal 13.98 + alpha_offset -18.6 = -4.62  → SEC 15 tilt in .aln
-        assert tlt[15]['nominal_tilt'] + (-18.6) == pytest.approx(-4.62, abs=0.02)
+        # Row 15: nominal 13.98 + alpha_offset -14.0 = -0.02  → SEC 15 tilt in .aln
+        assert tlt[15]['nominal_tilt'] + (-14.0) == pytest.approx(-0.02, abs=0.02)
 
     def test_acq_orders_are_unique(self, tlt):
         orders = [r['acq_order'] for r in tlt.values()]
@@ -142,11 +144,11 @@ class TestParseCtf:
 
     def test_sec1_defocus_values(self, ctf):
         row = ctf[1]
-        assert row['defocus1_A']      == pytest.approx(32009.17, abs=0.1)
-        assert row['defocus2_A']      == pytest.approx(29657.20, abs=0.1)
+        assert row['defocus1_A']      == pytest.approx(32011.59, abs=0.1)
+        assert row['defocus2_A']      == pytest.approx(29423.21, abs=0.1)
         assert row['mean_defocus_um'] == pytest.approx(
-            (32009.17 + 29657.20) / 2 / 1e4, rel=1e-4)
-        assert row['cc']              == pytest.approx(0.0408, abs=1e-4)
+            (32011.59 + 29423.21) / 2 / 1e4, rel=1e-4)
+        assert row['cc']              == pytest.approx(0.038, abs=1e-4)
         assert row['fit_spacing_A']   == pytest.approx(20.864, abs=0.01)
 
     def test_astig_is_abs_defocus_difference(self, ctf):
@@ -223,14 +225,19 @@ class TestCrossValidation:
             assert z in mdoc, f"SEC {f['sec']}: z_value {z} not found in mdoc"
 
     def test_dark_frame_b_indexes_tlt_row(self, all_data):
-        """DarkFrame frame_b is the direct 1-indexed row number in _TLT.txt."""
+        """
+        DarkFrame frame_b is the direct 1-indexed row number in _TLT.txt.
+
+        DarkFrame's tilt is the raw nominal stage tilt, matching _TLT.txt's
+        nominal_tilt directly -- unlike the per-frame TILT data rows,
+        AreTomo3 (and aln-edit) never apply alpha_offset to DarkFrame
+        header lines.
+        """
         aln, tlt, _ = all_data
-        alpha = aln['alpha_offset']
         for df in aln['dark_frames']:
             row = tlt[df['frame_b']]
-            corrected = row['nominal_tilt'] + alpha
-            assert corrected == pytest.approx(df['tilt'], abs=0.02), \
-                f"Dark frame_b {df['frame_b']}: expected {df['tilt']}, got {corrected}"
+            assert row['nominal_tilt'] == pytest.approx(df['tilt'], abs=0.02), \
+                f"Dark frame_b {df['frame_b']}: expected {df['tilt']}, got {row['nominal_tilt']}"
 
     def test_dark_frame_z_value_in_mdoc(self, all_data):
         """z_value for each dark frame maps to a valid mdoc ZValue."""
