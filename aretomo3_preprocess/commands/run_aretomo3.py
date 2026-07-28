@@ -71,6 +71,7 @@ import sys
 import json
 import shutil
 import datetime
+import statistics
 import subprocess
 from pathlib import Path
 import argparse
@@ -125,6 +126,71 @@ _FLAG_COMMENTS = {
     '-CorrCTF':      'local CTF correction before reconstruction',
     '-OutXF':        'write IMOD XF transform files',
     '-OutImod':      'write IMOD support files for RELION',
+}
+
+# Very short (2-3 word) summaries for the grouped preflight parameter dump --
+# distinct from _FLAG_COMMENTS above, which is more verbose and used for the
+# annotated dry-run command listing.
+_FLAG_SHORT = {
+    '-InPrefix':     'input prefix',
+    '-InSuffix':     'input suffix',
+    '-InSkips':      'skip patterns',
+    '-OutDir':       'output dir',
+    '-Gpu':          'GPU IDs',
+    '-Cmd':          'pipeline mode',
+    '-Serial':       'batch mode',
+    '-PixSize':      'pixel size',
+    '-Kv':           'voltage',
+    '-Cs':           'spherical aberration',
+    '-AmpContrast':  'amplitude contrast',
+    '-Gain':         'gain reference',
+    '-FlipGain':     'gain flip',
+    '-RotGain':      'gain rotation',
+    '-FmDose':       'dose per frame',
+    '-McBin':        'motion-corr binning',
+    '-McPatch':      'motion-corr patches',
+    '-FmInt':        'frames per rendered frame',
+    '-EerSampling':  'EER supersampling',
+    '-SplitSum':     'odd/even halves',
+    '-VolZ':         'reconstruction thickness',
+    '-AtBin':        'tomogram binning',
+    '-AtPatch':      'local align patches',
+    '-Wbp':          'reconstruction method',
+    '-Sart':         'SART iterations',
+    '-FlipVol':      'volume flip',
+    '-TiltCor':      'tilt offset correction',
+    '-DarkTol':      'dark-frame tolerance',
+    '-TiltAxis':     'tilt axis angle',
+    '-AlignZ':       'alignment thickness',
+    '-Group':        'frame grouping',
+    '-CorrCTF':      'CTF correction',
+    '-OutXF':        'IMOD xf output',
+    '-OutImod':      'IMOD support files',
+}
+
+# Grouping for the preflight parameter dump, mirroring AreTomo3's own log
+# sections ("Motion correction input parameters" / "Tomography input
+# parameters"), with a third "General" group for I/O/global flags that
+# AreTomo3 prints ungrouped at the top of its own dump.
+_FLAG_GROUP = {
+    '-InPrefix': 'general', '-InSuffix': 'general', '-InSkips': 'general',
+    '-OutDir': 'general', '-Gpu': 'general', '-Cmd': 'general',
+    '-Serial': 'general', '-PixSize': 'general', '-Kv': 'general',
+    '-Cs': 'general', '-AmpContrast': 'general',
+
+    '-Gain': 'motion', '-FlipGain': 'motion', '-RotGain': 'motion',
+    '-FmDose': 'motion', '-McBin': 'motion', '-McPatch': 'motion',
+    '-FmInt': 'motion', '-EerSampling': 'motion', '-SplitSum': 'motion',
+
+    '-VolZ': 'tomo', '-AtBin': 'tomo', '-AtPatch': 'tomo', '-Wbp': 'tomo',
+    '-Sart': 'tomo', '-FlipVol': 'tomo', '-TiltCor': 'tomo',
+    '-DarkTol': 'tomo', '-TiltAxis': 'tomo', '-AlignZ': 'tomo',
+    '-Group': 'tomo', '-CorrCTF': 'tomo', '-OutXF': 'tomo', '-OutImod': 'tomo',
+}
+_GROUP_TITLES = {
+    'general': 'General',
+    'motion':  'Motion correction parameters',
+    'tomo':    'Alignment / reconstruction parameters',
 }
 
 
@@ -184,6 +250,35 @@ def _fmt_command(cmd: list, annotate: bool = False) -> str:
                 lines.append(f'    {text}{cont}')
 
     return '\n'.join(lines)
+
+
+def _print_grouped_params(cmd: list) -> None:
+    """
+    Print the resolved AreTomo3 parameters grouped like AreTomo3's own log
+    output (see e.g. 'Motion correction input parameters' / 'Tomography
+    input parameters' sections in run_aretomo3.log), each with a short
+    (2-3 word) summary of what it controls.
+    """
+    by_section = {'general': [], 'motion': [], 'tomo': []}
+    for g in _group_cmd(cmd)[1:]:   # skip the executable itself
+        flag = g[0]
+        by_section.setdefault(_FLAG_GROUP.get(flag, 'general'), []).append(g)
+
+    for key in ('general', 'motion', 'tomo'):
+        entries = by_section.get(key, [])
+        if not entries:
+            continue
+        title = _GROUP_TITLES[key]
+        print(title)
+        print('-' * len(title))
+        for g in entries:
+            flag, vals = g[0], ' '.join(g[1:])
+            short = _FLAG_SHORT.get(flag, '')
+            line = f'  {flag:<14} {vals}'
+            if short:
+                line = f'{line:<40}  ({short})'
+            print(line)
+        print()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -635,6 +730,71 @@ def _filter_alns_for_overlap(staging_dir: Path, src_in_dir: Path,
     return n_total
 
 
+def _check_mdocs(mdoc_files: list) -> tuple:
+    """
+    Validate mdoc parsing for every discovered file and collect basic
+    per-TS stats.
+
+    Reuses validate-mdoc's AreTomo3 parser simulation (missing fields AND
+    out-of-order fields, e.g. the AreTomo3 >= 2.3.0 ExposureTime ordering
+    issue) so a mdoc that would silently corrupt tilt indices is caught
+    here as a fatal error, rather than AreTomo3 quietly recovering the
+    wrong number of tilts partway through a batch run.
+
+    Returns (errors, stats).  errors is a list of fatal messages, one per
+    distinct failure reason (collapsed with a count + example filename,
+    since a shared mdoc collection template typically means the same
+    problem affects every TS, not just one); stats has n_mdocs / n_valid /
+    median_tilts / min_tilts / max_tilts / median_frames_per_tilt (any of
+    the numeric fields may be None if no mdoc parsed successfully).
+    """
+    from aretomo3_preprocess.commands.validate_mdoc import validate_file
+    from aretomo3_preprocess.shared.parsers import parse_mdoc_file
+
+    bad_by_reason = {}   # reason -> [filenames]
+    tilts_per_ts = []
+    frames_per_tilt = []
+
+    for path in mdoc_files:
+        result = validate_file(path)
+        if not result['success']:
+            reason = result['failure'] or 'field order'
+            bad_by_reason.setdefault(reason, []).append(path.name)
+            continue
+        tilts_per_ts.append(result['n_tilts'])
+
+        mdoc_frames, _ = parse_mdoc_file(path)
+        nsub = [f['num_subframes'] for f in mdoc_frames.values()
+                if f.get('num_subframes')]
+        if nsub:
+            frames_per_tilt.append(statistics.median(nsub))
+
+    # One collapsed error per distinct failure reason, not one per file --
+    # with many mdocs sharing the same collection template, the same
+    # problem (e.g. a field-order issue) typically affects all of them.
+    errors = []
+    in_dir = mdoc_files[0].parent
+    for reason, names in bad_by_reason.items():
+        example = names[0] if len(names) == 1 else f'{names[0]} (+{len(names) - 1} more)'
+        errors.append(
+            f'{len(names)}/{len(mdoc_files)} mdoc(s) would silently fail/corrupt '
+            f'(reason={reason}): {example}\n'
+            f'       run validate-mdoc for details/fix, e.g.:\n'
+            f'         aretomo3-preprocess validate-mdoc {in_dir}/*.mdoc'
+        )
+
+    stats = {
+        'n_mdocs':      len(mdoc_files),
+        'n_valid':      len(tilts_per_ts),
+        'median_tilts': int(statistics.median(tilts_per_ts)) if tilts_per_ts else None,
+        'min_tilts':    min(tilts_per_ts) if tilts_per_ts else None,
+        'max_tilts':    max(tilts_per_ts) if tilts_per_ts else None,
+        'median_frames_per_tilt':
+            int(statistics.median(frames_per_tilt)) if frames_per_tilt else None,
+    }
+    return errors, stats
+
+
 def _load_global_params(analysis_dir: Path) -> dict:
     """Load global_suggested TiltAxis and AlignZ from an analyse output dir.
 
@@ -699,6 +859,19 @@ def _validate(args) -> tuple:
     else:
         print(f'  Input files     : {len(mdoc_files)} .{args.in_suffix} files '
               f'found ({in_dir}/{pattern})')
+
+    # ── 2b. Mdoc parsing preflight (mdoc mode only) ───────────────────────
+    if args.in_suffix == 'mdoc' and mdoc_files:
+        mdoc_errors, mdoc_stats = _check_mdocs(mdoc_files)
+        if mdoc_errors:
+            errors.extend(mdoc_errors)
+        if mdoc_stats['median_tilts'] is not None:
+            tilt_range = (f'  (range {mdoc_stats["min_tilts"]}-{mdoc_stats["max_tilts"]})'
+                          if mdoc_stats['min_tilts'] != mdoc_stats['max_tilts'] else '')
+            fpt = (f'  |  {mdoc_stats["median_frames_per_tilt"]} frames/tilt (median)'
+                  if mdoc_stats['median_frames_per_tilt'] is not None else '')
+            print(f'  Mdoc parsing    : {mdoc_stats["n_valid"]}/{mdoc_stats["n_mdocs"]} OK'
+                  f'  |  {mdoc_stats["median_tilts"]} tilts/TS (median){tilt_range}{fpt}')
 
     # ── 3. .aln files present (cmd=2 only) ────────────────────────────────
     if args.cmd == 2 and in_dir.is_dir():
@@ -1035,6 +1208,9 @@ def run(args):
 
     # ── Build and print command ────────────────────────────────────────────
     cmd = _build_cmd(args)
+
+    _print_grouped_params(cmd)
+
     prefix = '[DRY RUN] ' if args.dry_run else ''
     print(f'{prefix}AreTomo3 command:\n')
     print(_fmt_command(cmd, annotate=True))
