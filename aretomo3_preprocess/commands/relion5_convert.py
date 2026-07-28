@@ -322,9 +322,11 @@ def _process_ts(ts_name: str, input_dir: Path, cmd0_dir: Path, imod_dir: Path,
         print(f'  ERROR: {ts_name}: no rows in _TLT.txt')
         return None
 
-    # alpha_offset: systematic tilt correction applied via aln-edit.
-    # _st.tlt contains nominal tilts only; adding alpha_offset gives the
-    # corrected tilt used for reconstruction (= TILT column in .aln).
+    # alpha_offset: systematic tilt correction, either -TiltCor's automatic
+    # per-TS estimate or set by hand via aln-edit.  AreTomo3 never bakes this
+    # into the TILT column (.aln or _st.tlt) -- both always hold the nominal,
+    # uncorrected stage tilt -- so it must be applied explicitly here to get
+    # the specimen-referenced tilt used for reconstruction.
     alpha_offset = aln_data.get('alpha_offset') or 0.0
     if alpha_offset != 0.0:
         print(f'  alpha_offset = {alpha_offset:+.2f}° (from .aln) → applied to rlnTomoYTilt')
@@ -416,7 +418,7 @@ def _process_ts(ts_name: str, input_dir: Path, cmd0_dir: Path, imod_dir: Path,
             'rlnTomoZRot':                  xf_entry.get('z_rot', 0.0),
             'rlnTomoXShiftAngst':           xf_entry.get('x_shift_angst', 0.0),
             'rlnTomoYShiftAngst':           xf_entry.get('y_shift_angst', 0.0),
-            'rlnCtfScalefactor':            math.cos(math.radians(nominal_tilt)),
+            'rlnCtfScalefactor':            math.cos(math.radians(y_tilt)),
             'rlnIncluded':                  not is_dark,
         })
 

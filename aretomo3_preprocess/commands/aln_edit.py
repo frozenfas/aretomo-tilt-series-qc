@@ -2,9 +2,13 @@
 aln-edit — edit AreTomo3 .aln files in bulk.
 
 Currently supports applying a tilt angle offset to all .aln files in a
-directory.  The offset is added to the TILT column (last column) and the
-# AlphaOffset header is updated to track the cumulative change.  All other
-alignment parameters (ROT, TX, TY, GMAG, etc.) are left unchanged.
+directory.  Only the # AlphaOffset header is updated to track the offset;
+the TILT column (last column) and all other alignment parameters (ROT, TX,
+TY, GMAG, etc.) are left unchanged.  This matches AreTomo3's own convention:
+whether AlphaOffset comes from -TiltCor's automatic per-TS estimate or is
+set here by hand, AreTomo3 never bakes it into the TILT column itself — it
+is always stored as a separate correction that downstream consumers apply
+explicitly (see relion5_convert.py, pytom_match.py).
 
 Backup / restore behaviour
 --------------------------
@@ -40,8 +44,10 @@ def add_parser(subparsers):
 
     mode = p.add_mutually_exclusive_group(required=True)
     mode.add_argument('--apply-offset', type=float, metavar='DEGREES',
-                      help='Tilt angle offset in degrees to add to the TILT '
-                           'column and AlphaOffset header of every .aln file')
+                      help='Tilt angle offset in degrees to add to the '
+                           'AlphaOffset header of every .aln file.  The TILT '
+                           'column itself is left unchanged (AreTomo3 '
+                           'convention — consumers apply the offset themselves).')
     mode.add_argument('--restore', action='store_true',
                       help='Restore original .aln files from .bak backups')
 
@@ -74,7 +80,8 @@ def _apply_offset(aln_files: list, offset: float, dry_run: bool):
     if not dry_run:
         print('This will:')
         print(f'  1. Back up each ts-xxx.aln to ts-xxx.aln.bak  (skipped if .bak exists)')
-        print(f'  2. Overwrite each ts-xxx.aln: TILT += {offset:+.4f}°, AlphaOffset updated')
+        print(f'  2. Overwrite each ts-xxx.aln: AlphaOffset header only ({offset:+.4f}°); '
+              f'TILT column left unchanged')
         print(f'  {len(aln_files)} files in {aln_files[0].parent}')
         print()
         if not _confirm('Proceed?'):
@@ -108,21 +115,16 @@ def _apply_offset(aln_files: list, offset: float, dry_run: bool):
                 out_lines.append(f'# AlphaOffset = {new_alpha:8.2f}\n')
                 continue
 
-            # Pass through other comment / blank lines unchanged
-            if not stripped or stripped.startswith('#'):
-                out_lines.append(line)
-                continue
-
-            # Data row: shift TILT (last column)
-            parts = stripped.split()
-            try:
-                parts[-1] = f'{float(parts[-1]) + offset:.2f}'
-                out_lines.append('  '.join(parts) + '\n')
+            # Everything else (data rows, other comment/blank lines) passes
+            # through unchanged -- TILT column is never modified, matching
+            # AreTomo3's own convention of keeping AlphaOffset a separate,
+            # header-only correction.
+            out_lines.append(line)
+            if stripped and not stripped.startswith('#'):
                 n_data += 1
-            except (ValueError, IndexError):
-                out_lines.append(line)
 
-        print(f'{prefix}Offset : {aln_path.name}  ({n_data} tilts, {offset:+.4f}°)')
+        print(f'{prefix}Offset : {aln_path.name}  (AlphaOffset header only, '
+              f'{n_data} tilts unchanged, {offset:+.4f}°)')
         if not dry_run:
             aln_path.write_text(''.join(out_lines))
 
