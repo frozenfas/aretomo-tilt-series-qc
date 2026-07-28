@@ -59,10 +59,10 @@ from aretomo3_preprocess.shared.project_json import (
     load_or_create, update_section, args_to_dict,
 )
 from aretomo3_preprocess.shared.project_state import resolve_selected_ts
-from aretomo3_preprocess.commands.cryocare import (
-    _find_evn_odd_pairs,
-    _load_tsselect_defocus,
-    _stratified_sample,
+from aretomo3_preprocess.shared.denoise_training import (
+    find_evn_odd_pairs as _find_evn_odd_pairs,
+    load_tsselect_defocus as _load_tsselect_defocus,
+    stratified_sample as _stratified_sample,
 )
 
 
