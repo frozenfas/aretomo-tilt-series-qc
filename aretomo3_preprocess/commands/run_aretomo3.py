@@ -1524,6 +1524,7 @@ def run(args):
     #        (from project.json input_stacks) are created directly in --output/.
     #        AreTomo3 is pointed at --output/.  src_in_dir (e.g. run003) is
     #        NEVER modified.
+    selected_ts = None
     if args.in_suffix == 'mrc' and args.cmd == 2:
         selected_ts = resolve_selected_ts(getattr(args, 'select_ts', None))
         staging_dir = _setup_cmd2_staging(
@@ -1542,6 +1543,15 @@ def run(args):
     # ── Pre-flight validation ──────────────────────────────────────────────
     print('Pre-flight checks:')
     errors, warnings, mdoc_stats, input_ts_names = _validate(args)
+
+    # _setup_cmd2_staging only ever ADDS symlinks, never removes ones left
+    # over from a prior run into the same --output with a broader (or no)
+    # --select-ts -- so input_ts_names (globbed from the staging dir) can
+    # include stale, no-longer-selected TS. Filter against the CURRENT
+    # selection so the progress bar / completeness check "expected" count
+    # reflects what's actually being run, not stale staging leftovers.
+    if selected_ts is not None:
+        input_ts_names = input_ts_names & selected_ts
 
     if errors:
         print()
