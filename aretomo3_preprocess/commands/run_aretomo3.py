@@ -285,16 +285,31 @@ def _print_grouped_params(cmd: list) -> None:
 # Command builder
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _effective_in_skips(in_skips: list) -> list:
+    """
+    Filter -InSkips patterns the same way _build_cmd does before handing
+    them to AreTomo3: only file-type skip patterns (e.g. _CTF, _Vol) are
+    passed to -InSkips. TS-name patterns (e.g. ts-008) are dropped here --
+    passing them overflows AreTomo3's -InSkips buffer, and for cmd=2 staging
+    they're meant to be handled by not symlinking those files instead. For
+    cmd=0/1 (no staging step), a ts-name pattern currently has no exclusion
+    mechanism at all and is silently ignored by AreTomo3.
+
+    Preflight file/mdoc discovery must filter with this SAME effective list
+    (not the raw args.in_skips) so it validates the file set AreTomo3 will
+    actually see, not a smaller one that a ts-name pattern only appears to
+    exclude.
+    """
+    return [s for s in (in_skips or []) if s and not s.startswith('ts-')]
+
+
 def _build_cmd(args) -> list:
     """Assemble the AreTomo3 command as a flat list of string tokens."""
     cmd = [args.aretomo3_bin]
 
     cmd += ['-InPrefix', args.in_prefix]
     cmd += ['-InSuffix', args.in_suffix]
-    # Only pass file-type skip patterns to AreTomo3 (e.g. _CTF, _Vol).
-    # TS-name patterns (e.g. ts-008) are handled by not symlinking those files,
-    # so passing them to -InSkips is unnecessary and overflows AreTomo3's buffer.
-    skips = [s for s in (args.in_skips or []) if s and not s.startswith('ts-')]
+    skips = _effective_in_skips(args.in_skips)
     if skips:
         cmd += ['-InSkips', ','.join(skips)]
 
@@ -780,7 +795,17 @@ def _check_mdocs(mdoc_files: list) -> tuple:
             continue
         tilts_per_ts.append(result['n_tilts'])
 
-        mdoc_frames, _ = parse_mdoc_file(path)
+        # validate_file()'s hand-rolled AreTomo3-simulation passed above, but
+        # parse_mdoc_file() is a separate (mdocfile-library-based) parser
+        # that can still fail on a quirk the simulation doesn't check for --
+        # don't let that crash the whole preflight with an unhandled
+        # traceback; surface it as the same kind of fatal error as any other
+        # mdoc problem caught here.
+        try:
+            mdoc_frames, _ = parse_mdoc_file(path)
+        except Exception as e:
+            bad_by_reason.setdefault(f'mdocfile parse error: {e}', []).append(path.name)
+            continue
         nsub = [f['num_subframes'] for f in mdoc_frames.values()
                 if f.get('num_subframes')]
         if nsub:
@@ -929,7 +954,9 @@ def _check_output_tilt_counts(expected_sections: dict, out_dir: Path) -> tuple:
         n_checked += 1
         try:
             actual = parse_aln_file(aln_path)['total_frames']
-        except Exception:
+        except Exception as e:
+            mismatches.append(f'{ts_name}: expected {expected} tilts (from mdoc), '
+                              f'but .aln failed to parse ({e})')
             continue
         if actual is not None and actual != expected:
             mismatches.append(f'{ts_name}: expected {expected} tilts (from mdoc), '
@@ -982,8 +1009,21 @@ def _validate(args) -> tuple:
         errors.append('--fm-dose is required for --cmd 0 (motion correction mode)')
 
     # ── 2. Input files found ───────────────────────────────────────────────
+    # Filter with the SAME effective skip list _build_cmd will actually pass
+    # to AreTomo3 (ts-name patterns are dropped there), so preflight counts
+    # and mdoc checks reflect the file set that's really about to be run.
+    _effective_skips = _effective_in_skips(args.in_skips)
+    _dropped_ts_skips = [s for s in (args.in_skips or [])
+                         if s and s.startswith('ts-')]
+    if _dropped_ts_skips and args.cmd != 2:
+        warnings.append(
+            f'--in-skips {_dropped_ts_skips} — TS-name patterns have no '
+            f'effect for --cmd {args.cmd} (no exclusion mechanism exists '
+            f'for direct/mdoc-mode input; only file-type patterns like '
+            f'_CTF/_Vol are passed to -InSkips). These TS will be processed.'
+        )
     in_dir, pattern, mdoc_files = _find_input_files(
-        args.in_prefix, args.in_suffix, args.in_skips)
+        args.in_prefix, args.in_suffix, _effective_skips)
     if not in_dir.is_dir() and not (args.in_suffix == 'mrc' and args.cmd == 2):
         errors.append(f'Input directory not found: {in_dir}/')
     elif not mdoc_files:
@@ -1069,11 +1109,14 @@ def _validate(args) -> tuple:
             print(f'  .aln files      : {len(aln_files)} found in {in_dir}/')
 
     # ── 4. Gain transform vs gain_check JSON (only if gain provided) ──────
-    try:
-        project = load_or_create()
-        gc = project.get('gain_check', {})
-    except SystemExit:
-        gc = {}
+    # load_or_create() only raises SystemExit for a genuinely serious problem
+    # (working_dir mismatch or corrupt JSON, with its own clear error message
+    # already printed) -- let it propagate and abort here, at the cheap
+    # preflight stage, rather than silently continuing on a project.json we
+    # can't trust and only discovering the same failure after AreTomo3 has
+    # already run for hours (see the final save below).
+    project = load_or_create()
+    gc = project.get('gain_check', {})
 
     if args.gain is None:
         print('  Gain check      : skipped (no gain — cmd != 0)')
@@ -1487,20 +1530,37 @@ def run(args):
 
     print(f'AreTomo3 finished successfully.')
 
-    # ── Register cmd=0 output stacks and TLT dir for later runs ──────────
-    if args.cmd == 0:
-        register_input_stacks(out_dir, in_skips=args.in_skips, tlt_dir=out_dir)
+    # AreTomo3 has already finished successfully at this point -- if
+    # project.json bookkeeping fails (e.g. corrupted or working-dir-mismatched
+    # mid-run), don't let that surface as a bare, unexplained traceback that
+    # makes it look like the whole run failed. Print what would have been
+    # saved so nothing is lost, then exit non-zero so the failure still
+    # propagates to any calling script.
+    try:
+        # ── Register cmd=0 output stacks and TLT dir for later runs ──────
+        if args.cmd == 0:
+            register_input_stacks(out_dir, in_skips=args.in_skips, tlt_dir=out_dir)
 
-    # ── Save to project JSON ───────────────────────────────────────────────
-    update_section(
-        section='run_aretomo3',
-        values={
-            'command':    ' '.join(cmd),
-            'args':       args_to_dict(args),
-            'timestamp':  datetime.datetime.now().isoformat(timespec='seconds'),
-            'output_dir': str(out_dir.resolve()),
-            'log':        str(log_path.resolve()),
-            'returncode': returncode,
-        },
-        backup_dir=out_dir,
-    )
+        # ── Save to project JSON ──────────────────────────────────────────
+        update_section(
+            section='run_aretomo3',
+            values={
+                'command':    ' '.join(cmd),
+                'args':       args_to_dict(args),
+                'timestamp':  datetime.datetime.now().isoformat(timespec='seconds'),
+                'output_dir': str(out_dir.resolve()),
+                'log':        str(log_path.resolve()),
+                'returncode': returncode,
+            },
+            backup_dir=out_dir,
+        )
+    except SystemExit:
+        print()
+        print('ERROR: AreTomo3 finished successfully, but the run could not be '
+              'recorded in aretomo3_project.json (see error above).')
+        print(f'       output_dir: {out_dir.resolve()}')
+        print(f'       log:        {log_path.resolve()}')
+        print(f'       returncode: {returncode}')
+        print('       Fix project.json (see recovery steps above), then re-run '
+              'this exact command -- it will pick up the existing AreTomo3 output.')
+        raise
