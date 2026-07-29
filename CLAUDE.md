@@ -57,10 +57,46 @@ the recovery path if the file is ever hand-corrupted.
 **`alignment_data.json`** (written by `analyse` into its output dir) is the
 parsed, per-TS/per-frame ground truth — width/height, `alpha_offset`,
 `dark_frames`, per-frame `tilt`/`tx`/`ty`/CTF/dose/mdoc fields — that
-`trim-ts` and `select-ts` consume. Its `frames`/`dark_frames` tilt values are
-always the raw nominal `.aln` values (see alpha_offset convention below);
-don't add corrections when writing to this structure, `trim-ts` depends on it
-staying nominal to match IMOD's `order_list.csv`.
+`trim-ts`, `select-ts`, and `run-aretomo3 --filter-overlap` consume. Its
+`frames`/`dark_frames` tilt values are always the raw nominal `.aln` values
+(see alpha_offset convention below); don't add corrections when writing to
+this structure, `trim-ts` depends on it staying nominal to match IMOD's
+`order_list.csv`.
+
+It is fully rebuilt from source `.aln`/`_TLT.txt`/mdoc data on every
+`analyse` run (not merged/incremental — this is intentional, it's what lets
+`--reuse-plots`/`--refit-lamellae` re-target an existing `--output` dir), so
+re-running `analyse` can't destroy the underlying AreTomo3/IMOD output it
+was built from. What it *can* do is go stale under already-generated
+downstream output with no warning: re-running `analyse` with a different
+`--threshold` (or against re-processed `.aln` files) into the same
+`--output` dir silently changes which frames are dark/flagged, but any
+`trim-ts`/`select-ts` output already generated from the old version isn't
+invalidated or regenerated automatically. Re-run `trim-ts`/`select-ts` after
+any `analyse` re-run rather than assuming their output is still current.
+
+**Cross-referencing frames — use the identifiers already in the data,
+don't re-derive a match.** Every frame dict in `alignment_data.json` (and
+the `.aln`/`_TLT.txt`/mdoc files it's built from) carries AreTomo3's own
+exact, 1-indexed identifiers for cross-referencing across files:
+- `frames[].sec` and `dark_frames[].frame_b` — SEC number in the tilt-sorted
+  stack, straight from the `.aln` data rows / `# DarkFrame = frame_a
+  frame_b tilt` header lines. This is exactly the same tilt-sorted ordering
+  IMOD's `order_list.csv` reconstructs (see `trim_ts.py`'s
+  `tilt_sorted_sections`), so `sec`/`frame_b` map directly (1-indexed) onto
+  `newstack` section numbers — no angle comparison needed.
+- `acq_order` / `z_value` — acquisition-order position (`z_value = acq_order
+  - 1`), the key mdoc entries and `order_list.csv`'s `ImageNumber` column
+  are indexed by.
+
+Matching frames by nearest tilt angle (or any other approximate/
+tolerance-based comparison) instead of one of these exact keys is a bug,
+not a stylistic choice: `trim_ts.py`'s `find_sections_by_tilt` did exactly
+that, with no de-duplication, so two frames with close-but-different tilts
+could silently collapse onto one section — replaced 2026-07-29 with a
+direct `sec`/`frame_b` index lookup (`sections_from_sec_numbers`). Before
+writing new cross-file matching logic, check whether `sec`/`frame_b`/
+`acq_order`/`z_value` already gets you there exactly.
 
 **`shared/` modules** — parsing and cross-command utilities, not one-off
 helpers:

@@ -52,6 +52,13 @@ def parse_aln_file(filepath):
         dark_frames  : list of dicts         – {frame_a, frame_b, tilt}
         frames       : list of dicts         – {sec, rot, gmag, tx, ty,
                                                 smean, sfit, scale, base, tilt}
+
+    frame_b (dark_frames) and sec (frames) are AreTomo3's own 1-indexed SEC
+    numbers in the tilt-sorted stack — the exact, canonical key for
+    cross-referencing a frame against IMOD's order_list.csv/newstack section
+    numbers, _TLT.txt rows, etc. Use them directly; don't re-derive a match
+    by comparing tilt angles or anything else approximate (see CLAUDE.md,
+    "Cross-referencing frames").
     """
     width = height = total_frames = None
     alpha_offset = beta_offset = thickness = num_patches = None

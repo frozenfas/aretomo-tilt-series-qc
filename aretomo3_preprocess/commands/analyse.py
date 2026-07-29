@@ -30,6 +30,7 @@ from aretomo3_preprocess.shared.project_json import (
 from aretomo3_preprocess.shared.project_state import (
     get_angpix, get_tlt_dir, get_gain_check_dir,
 )
+from aretomo3_preprocess.shared.output_guard import check_output_dir
 from aretomo3_preprocess.shared.parsers import (
     parse_aln_file, parse_ctf_file, parse_tlt_file,
     _float_or_none,
@@ -1492,6 +1493,13 @@ def add_parser(subparsers):
                    help='Directory containing .aln files')
     p.add_argument('--output',    '-o', default='run001_analysis',
                    help='Output directory for plots, JSON, TSV, and HTML')
+    p.add_argument('--clean', action='store_true',
+                   help='Silently overwrite an existing --output directory '
+                        '(regenerates alignment_data.json from scratch). '
+                        'Not needed with --reuse-plots or --refit-lamellae, '
+                        'which already imply reusing --output in place; '
+                        'otherwise re-running against an existing --output '
+                        'prompts for confirmation.')
     p.add_argument('--threshold', '-t', type=float, default=80.0,
                    help='%% overlap below which a frame is flagged')
     p.add_argument('--angpix',    '-a', type=float, default=None,
@@ -1529,6 +1537,16 @@ def run(args):
 
     in_dir  = Path(args.input)
     out_dir = Path(args.output)
+
+    # alignment_data.json is fully rebuilt from source .aln/.tlt/mdoc data on
+    # every run (not merged), so re-running analyse can't corrupt the
+    # underlying AreTomo3/IMOD output -- but it CAN silently change which
+    # frames are dark/flagged out from under any trim-ts/select-ts output
+    # already generated from an older alignment_data.json in this same dir.
+    # --reuse-plots/--refit-lamellae already mean "regenerate in place", so
+    # only guard the plain re-run case.
+    if not (getattr(args, 'reuse_plots', False) or getattr(args, 'refit_lamellae', False)):
+        out_dir = check_output_dir(out_dir, clean=args.clean, dry_run=False)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     aln_files = sorted(in_dir.glob('*.aln'))
