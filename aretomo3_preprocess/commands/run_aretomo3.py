@@ -68,11 +68,13 @@ Typical usage
 
 import re
 import sys
+import csv
 import json
 import shutil
 import datetime
 import statistics
 import subprocess
+import threading
 from pathlib import Path
 import argparse
 
@@ -1047,6 +1049,94 @@ def _check_vol_completeness(ts_names: set, out_dir: Path) -> dict:
     return {'n_checked': len(ts_names), 'incomplete': sorted(incomplete)}
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Live progress (polls AreTomo3's own output files -- never its stdout/stderr,
+# which must stay a plain file redirect with nothing on our side reading it;
+# see the note above the subprocess.Popen call in run() for why)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _read_metrics_csv(path: Path) -> list:
+    """
+    Parse AreTomo3's TiltSeries_Metrics.csv (written by its own
+    AreTomo/CTsMetrics.cpp: one row appended per completed TS, fsync'd
+    after every write -- for --cmd 0/1 only, it isn't written for cmd=2).
+
+    AreTomo3 is actively appending to this file while we read it here;
+    only keep newline-terminated lines so a read landing mid-flush can't
+    hand csv.DictReader a torn last row.
+    """
+    try:
+        text = path.read_text(errors='replace')
+    except OSError:
+        return []
+    complete_lines = [l for l in text.splitlines(keepends=True) if l.endswith('\n')]
+    if len(complete_lines) < 2:   # header + at least one data row
+        return []
+    return list(csv.DictReader(complete_lines, skipinitialspace=True))
+
+
+def _format_metrics_postfix(row: dict) -> dict:
+    """Format the most-recently-completed TS's metrics row for a tqdm postfix."""
+    def _f(key, nd=1):
+        try:
+            return f'{float(row[key]):.{nd}f}'
+        except (KeyError, ValueError):
+            return '?'
+    ts_name = row.get('Tilt_Series', '?').strip()
+    if ts_name.endswith('.mrc'):
+        ts_name = ts_name[:-4]
+    return {
+        'last':    ts_name,
+        'defocus': f"{_f('Defocus(A)', 0)}Å",
+        'CTFres':  f"{_f('CTF_Res(A)', 1)}Å",
+        'axis':    f"{_f('Tilt_Axis', 1)}°",
+        'thick':   f"{_f('Thickness(Pix)', 0)}px",
+    }
+
+
+def _update_progress_bar(out_dir: Path, ts_names: set, cmd_num: int,
+                         bar, last_n: int) -> int:
+    """One progress-bar refresh pass. Returns n (for de-duping repeat calls)."""
+    if cmd_num in (0, 1):
+        rows = _read_metrics_csv(out_dir / 'TiltSeries_Metrics.csv')
+        n = len(rows)
+        if n != last_n:
+            bar.n = min(n, bar.total) if bar.total is not None else n
+            if rows:
+                bar.set_postfix(_format_metrics_postfix(rows[-1]), refresh=False)
+            bar.refresh()
+    else:
+        n = 0
+        for ts_name in ts_names:
+            vol_path = out_dir / f'{ts_name}_Vol.mrc'
+            if vol_path.exists() and vol_path.stat().st_size > 0:
+                n += 1
+        if n != last_n:
+            bar.n = min(n, bar.total) if bar.total is not None else n
+            bar.refresh()
+    return n
+
+
+def _poll_progress_loop(stop_event: threading.Event, out_dir: Path,
+                        ts_names: set, cmd_num: int, bar,
+                        interval: float = 5.0) -> None:
+    """
+    Background-thread progress updater. Runs alongside proc.wait() in the
+    main thread, polling AreTomo3's own output files on a timer -- this
+    must NEVER read AreTomo3's stdout/stderr (that pipe removal is load-
+    bearing, not just tidiness -- see the note above subprocess.Popen).
+    A failure here must never take down the actual run, hence the blanket
+    except: this is a display, not part of the pipeline.
+    """
+    last_n = -1
+    while not stop_event.is_set():
+        try:
+            last_n = _update_progress_bar(out_dir, ts_names, cmd_num, bar, last_n)
+        except Exception:
+            pass
+        stop_event.wait(interval)
+
+
 def _load_global_params(analysis_dir: Path) -> dict:
     """Load global_suggested TiltAxis and AlignZ from an analyse output dir.
 
@@ -1550,7 +1640,7 @@ def run(args):
 
     print(f'Output directory : {out_dir}')
     print(f'Log file         : {log_path}')
-    print('Running AreTomo3 (no live streaming — see note below)...\n')
+    print('Running AreTomo3...\n')
 
     # Redirect AreTomo3's stdout/stderr straight to the log file's underlying
     # fd — the same mechanism as `... > log_path 2>&1` from a shell — instead
@@ -1570,16 +1660,35 @@ def run(args):
     # (MaUtil/GGenRandoms.cu), and pipe-induced stalls are a plausible way to
     # perturb exactly when those reseeds land relative to real time.
     #
-    # The trade-off: no more live console output while AreTomo3 runs (that
-    # required a pipe). Progress is only visible by tailing the log file
-    # (`tail -f run_aretomo3.log`) while this runs, or reading it after.
-    with open(log_path, 'wb') as log_fh:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=log_fh,
-            stderr=subprocess.STDOUT,
-        )
-        returncode = proc.wait()
+    # Live progress below is a SEPARATE mechanism from that log redirect —
+    # a background thread polling AreTomo3's own output files (never its
+    # stdout/stderr) on a timer, so it carries none of the pipe-stall risk
+    # above. See _poll_progress_loop.
+    total_ts = len(input_ts_names) if input_ts_names else None
+    progress_bar = tqdm(total=total_ts, desc='AreTomo3', unit='TS')
+    stop_event = threading.Event()
+    poll_thread = threading.Thread(
+        target=_poll_progress_loop,
+        args=(stop_event, out_dir, input_ts_names, args.cmd, progress_bar),
+        daemon=True,
+    )
+    poll_thread.start()
+    try:
+        with open(log_path, 'wb') as log_fh:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=log_fh,
+                stderr=subprocess.STDOUT,
+            )
+            returncode = proc.wait()
+    finally:
+        stop_event.set()
+        poll_thread.join(timeout=2)
+        try:
+            _update_progress_bar(out_dir, input_ts_names, args.cmd, progress_bar, -1)
+        except Exception:
+            pass
+        progress_bar.close()
     log_lines = log_path.read_text(errors='replace').splitlines(keepends=True)
 
     # ── Surface warnings/errors from log ──────────────────────────────────
