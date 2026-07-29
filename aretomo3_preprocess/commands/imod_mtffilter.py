@@ -237,20 +237,24 @@ def run(args):
     summary.append(f'Volumes to process: {len(vol_files)}')
     summary.append(f'Output directory  : {out_dir}/')
 
-    # ── Resolve pixel size ────────────────────────────────────────────────────
-    header_apix = _read_one_voxel_size(vol_files[0])
-    if header_apix is not None:
-        if args.apix is not None and abs(args.apix - header_apix) > 0.01:
-            print(f'WARNING: --apix {args.apix} Å differs from MRC header '
-                  f'{header_apix} Å ({vol_files[0].name}); using MRC header value.')
-        apix = header_apix
-        summary.append(f'Pixel size        : {apix:.4f} Å  (from MRC header {vol_files[0].name})')
-    elif args.apix is not None:
-        apix = args.apix
-        summary.append(f'Pixel size        : {apix} Å  (from --apix)')
-    else:
+    # ── Resolve pixel-size strategy ───────────────────────────────────────────
+    # Pixel size is read from each volume's own MRC header inside the loop
+    # below (correct even when a batch mixes bin levels/pixel sizes);
+    # --apix is used only for volumes whose header can't be read. This
+    # upfront check just fails fast when neither source is available at all.
+    first_apix = _read_one_voxel_size(vol_files[0])
+    if first_apix is None and args.apix is None:
         print('ERROR: cannot determine pixel size — install mrcfile or supply --apix')
         sys.exit(1)
+    if first_apix is not None:
+        summary.append(f'Pixel size        : read per-volume from MRC header '
+                        f'(first: {first_apix:.4f} Å from {vol_files[0].name})')
+        if args.apix is not None and abs(args.apix - first_apix) > 0.01:
+            print(f'WARNING: --apix {args.apix} Å differs from MRC header '
+                  f'{first_apix} Å ({vol_files[0].name}); MRC header will be '
+                  f'used per volume where available.')
+    else:
+        summary.append(f'Pixel size        : {args.apix} Å  (from --apix; no MRC header available)')
 
     if not args.dry_run:
         for line in summary:
@@ -289,6 +293,16 @@ def run(args):
         ts_name  = _ts_name_from_vol(vol_path, sfx)
         out_path = out_dir / vol_path.name
 
+        # Pixel size: this volume's own MRC header > global --apix
+        apix = _read_one_voxel_size(vol_path)
+        if apix is None:
+            if args.apix is None:
+                print(f'  SKIP  {vol_path.name}: cannot determine pixel size '
+                      f'(no MRC header, no --apix)')
+                n_skip += 1
+                continue
+            apix = args.apix
+
         # Defocus: ts-select > project.json > global --defocus
         defocus = (defocus_map.get(ts_name)
                    or proj_defocus.get(ts_name)
@@ -300,6 +314,9 @@ def run(args):
             n_skip += 1
             continue
 
+        # mtffilter's -pixel expects nanometers, not Å (see IMOD's mtffilter.adoc).
+        apix_nm = apix / 10.0
+
         cmd = [
             args.mtffilter_bin,
             str(vol_path),
@@ -307,7 +324,7 @@ def run(args):
             '-deconv',  str(args.deconv),
             '-snr',     str(args.snr),
             '-defocus', str(round(defocus, 4)),
-            '-pixel',   str(round(apix,   4)),
+            '-pixel',   str(round(apix_nm, 5)),
         ]
 
         print(f'{prefix}{vol_path.name}  '
