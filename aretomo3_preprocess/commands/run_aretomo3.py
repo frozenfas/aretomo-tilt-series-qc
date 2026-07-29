@@ -1022,6 +1022,31 @@ def _check_completeness(expected_sections: dict, out_dir: Path) -> dict:
     }
 
 
+def _check_vol_completeness(ts_names: set, out_dir: Path) -> dict:
+    """
+    Post-run sanity check for cmd=1/2 (mrc mode): does each TS in
+    ts_names have a non-empty main reconstruction (ts-XXXX_Vol.mrc)?
+
+    Unlike _check_completeness (cmd=0/mdoc mode), there's no MdocDone.txt
+    equivalent here to cross-reference against -- confirmed empirically
+    against a real cmd=2 output directory that AreTomo3 writes MdocDone.txt
+    unconditionally but leaves it EMPTY outside mdoc mode, so it can't be
+    used as a "does AreTomo3 think this is done" signal for cmd=1/2. This
+    is a direct file check only: missing/empty _Vol.mrc means that TS
+    didn't finish reconstruction, full stop.
+
+    Run this regardless of whether AreTomo3 exited cleanly or crashed.
+
+    Returns {'n_checked': int, 'incomplete': [ts_name, ...]}.
+    """
+    incomplete = []
+    for ts_name in ts_names:
+        vol_path = out_dir / f'{ts_name}_Vol.mrc'
+        if not vol_path.exists() or vol_path.stat().st_size == 0:
+            incomplete.append(ts_name)
+    return {'n_checked': len(ts_names), 'incomplete': sorted(incomplete)}
+
+
 def _load_global_params(analysis_dir: Path) -> dict:
     """Load global_suggested TiltAxis and AlignZ from an analyse output dir.
 
@@ -1041,11 +1066,16 @@ def _load_global_params(analysis_dir: Path) -> dict:
 def _validate(args) -> tuple:
     """Run pre-flight checks.
 
-    Returns (errors, warnings, mdoc_stats) where:
-      errors     — fatal, always abort
-      warnings   — abort unless --force
-      mdoc_stats — dict from _check_mdocs (has 'expected_sections' for the
-                   post-run tilt-count check), or None outside mdoc mode
+    Returns (errors, warnings, mdoc_stats, input_ts_names) where:
+      errors          — fatal, always abort
+      warnings        — abort unless --force
+      mdoc_stats      — dict from _check_mdocs (has 'expected_sections' for
+                        the post-run tilt-count/completeness checks), or
+                        None outside mdoc mode
+      input_ts_names  — set of TS-name stems discovered for this run (from
+                        the same file listing used for the "Input files
+                        found" preflight line), for the post-run
+                        completeness check outside mdoc mode (cmd=1/2)
     """
     errors     = []
     warnings   = []
@@ -1226,7 +1256,9 @@ def _validate(args) -> tuple:
             else:
                 print(f'  Voltage         : OK  ({volt} kV matches --kv {args.kv})')
 
-    return errors, warnings, mdoc_stats
+    input_ts_names = {f.stem for f in mdoc_files} if mdoc_files else set()
+
+    return errors, warnings, mdoc_stats, input_ts_names
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1416,7 +1448,7 @@ def run(args):
 
     # ── Pre-flight validation ──────────────────────────────────────────────
     print('Pre-flight checks:')
-    errors, warnings, mdoc_stats = _validate(args)
+    errors, warnings, mdoc_stats, input_ts_names = _validate(args)
 
     if errors:
         print()
@@ -1609,6 +1641,24 @@ def run(args):
                 print(f'  {len(completeness["empty_not_done"])} TS have a missing/empty '
                       f'.mrc and are not marked done -- --resume will reprocess these '
                       f'normally, no action needed')
+
+    # ── Post-run completeness check (cmd=1/2 only; runs whether AreTomo3
+    # succeeded or crashed) -- no MdocDone.txt-equivalent ledger exists
+    # outside mdoc mode (confirmed empirically: AreTomo3 writes MdocDone.txt
+    # unconditionally but leaves it empty for cmd=1/2), so this is a direct
+    # "does the reconstructed volume exist and have data" check instead. ──
+    elif args.cmd in (1, 2) and input_ts_names:
+        vol_check = _check_vol_completeness(input_ts_names, out_dir)
+        n_total = vol_check['n_checked']
+        n_incomplete = len(vol_check['incomplete'])
+        print(f'\nCompleteness check: {n_total - n_incomplete}/{n_total} TS have a '
+              f'non-empty _Vol.mrc')
+        if vol_check['incomplete']:
+            print(f'  {n_incomplete} TS have a missing/empty _Vol.mrc:')
+            for ts in vol_check['incomplete'][:20]:
+                print(f'    {ts}')
+            if n_incomplete > 20:
+                print(f'    ... ({n_incomplete - 20} more)')
 
     print()
     if returncode != 0:
