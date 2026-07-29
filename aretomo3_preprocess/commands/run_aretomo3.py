@@ -1412,6 +1412,9 @@ def add_parser(subparsers):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run(args):
+    # Force line-buffered stdout so output appears immediately when piped (e.g. | tee)
+    sys.stdout.reconfigure(line_buffering=True)
+
     out_dir    = Path(args.output)
     src_in_dir = Path(args.in_prefix).parent  # original source (e.g. run003)
     staging_dir = None
