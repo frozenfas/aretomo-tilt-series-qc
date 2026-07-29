@@ -964,6 +964,64 @@ def _check_output_tilt_counts(expected_sections: dict, out_dir: Path) -> tuple:
     return mismatches, n_checked
 
 
+def _check_completeness(expected_sections: dict, out_dir: Path) -> dict:
+    """
+    Post-run sanity check: cross-reference AreTomo3's own MdocDone.txt
+    (the file its -Resume logic actually reads to decide what to skip --
+    see the module docstring for --resume) against whether each expected
+    TS actually has a non-empty primary output stack (ts-XXXX.mrc) on disk.
+
+    Catches failures earlier than _check_output_tilt_counts can -- a TS
+    that died during motion correction (before alignment ever ran) never
+    gets an .aln written at all, so the tilt-count check has no way to
+    see it. This only needs the main .mrc, which cmd=0 writes first, so
+    it can flag a TS as incomplete even when nothing else about it exists.
+
+    Also specifically flags the failure mode that has caused real data
+    loss once already: MdocDone.txt marking a TS done while its .mrc is
+    missing or 0 bytes -- AreTomo3 believing a TS finished when it didn't
+    means a plain --resume would silently skip ever reprocessing it.
+
+    Run this regardless of whether AreTomo3 exited cleanly or crashed --
+    a disk-full or killed run is exactly when this inconsistency shows up.
+
+    Returns {
+        'n_checked':       int,
+        'mdocdone_found':  bool,
+        'not_done':        [ts_name, ...]  -- absent from MdocDone.txt; --resume will (re)do these
+        'done_but_empty':  [ts_name, ...]  -- MdocDone.txt says done, but .mrc missing/0 bytes (serious)
+        'empty_not_done':  [ts_name, ...]  -- .mrc missing/0 bytes but not marked done (expected, harmless)
+    }
+    """
+    mdocdone_path = out_dir / 'MdocDone.txt'
+    mdocdone_found = mdocdone_path.exists()
+    done = set()
+    if mdocdone_found:
+        for line in mdocdone_path.read_text(errors='replace').splitlines():
+            line = line.strip()
+            if line.endswith('.mdoc'):
+                done.add(line[:-len('.mdoc')])
+
+    not_done, done_but_empty, empty_not_done = [], [], []
+    for ts_name in expected_sections:
+        mrc_path = out_dir / f'{ts_name}.mrc'
+        is_empty = not mrc_path.exists() or mrc_path.stat().st_size == 0
+        is_done  = ts_name in done
+
+        if not is_done:
+            not_done.append(ts_name)
+        if is_empty:
+            (done_but_empty if is_done else empty_not_done).append(ts_name)
+
+    return {
+        'n_checked':      len(expected_sections),
+        'mdocdone_found': mdocdone_found,
+        'not_done':       not_done,
+        'done_but_empty': done_but_empty,
+        'empty_not_done': empty_not_done,
+    }
+
+
 def _load_global_params(analysis_dir: Path) -> dict:
     """Load global_suggested TiltAxis and AlignZ from an analyse output dir.
 
@@ -1521,6 +1579,36 @@ def run(args):
                     print(f'    {line}')
                 if len(mismatches) > 20:
                     print(f'    ... ({len(mismatches) - 20} more)')
+
+    # ── Post-run completeness check (mdoc mode only; runs whether AreTomo3
+    # succeeded or crashed) -- the tilt-count check above only sees TS that
+    # got far enough to have an .aln; a TS that died during motion
+    # correction (before alignment ever ran) never gets one, so it's
+    # otherwise invisible. This also catches AreTomo3's own MdocDone.txt
+    # claiming a TS is done while its output is empty -- one exit code
+    # covers the whole batch, so it can't tell you which of potentially
+    # hundreds of TS actually finished; this can. ──
+    if mdoc_stats is not None:
+        completeness = _check_completeness(mdoc_stats['expected_sections'], out_dir)
+        if completeness['mdocdone_found']:
+            n_total, n_not_done = completeness['n_checked'], len(completeness['not_done'])
+            print(f'\nCompleteness check: {n_total - n_not_done}/{n_total} TS marked '
+                  f'done in MdocDone.txt'
+                  + (f'  ({n_not_done} not done -- --resume will (re)process these)'
+                     if n_not_done else ''))
+            if completeness['done_but_empty']:
+                print(f'  ** {len(completeness["done_but_empty"])} TS marked done in '
+                      f'MdocDone.txt but have a missing/empty .mrc -- AreTomo3 believes '
+                      f'these finished when they did not; a plain --resume will WRONGLY '
+                      f'skip reprocessing them: **')
+                for ts in completeness['done_but_empty'][:20]:
+                    print(f'    {ts}')
+                if len(completeness['done_but_empty']) > 20:
+                    print(f'    ... ({len(completeness["done_but_empty"]) - 20} more)')
+            if completeness['empty_not_done']:
+                print(f'  {len(completeness["empty_not_done"])} TS have a missing/empty '
+                      f'.mrc and are not marked done -- --resume will reprocess these '
+                      f'normally, no action needed')
 
     print()
     if returncode != 0:
