@@ -89,24 +89,28 @@ def tilt_sorted_sections(order_rows):
     return [(i, tilt, img_num) for i, (img_num, tilt) in enumerate(sorted_rows)]
 
 
-def find_sections_by_tilt(target_tilts, sorted_secs, tol=2.0):
+def sections_from_sec_numbers(sec_numbers, n_secs):
     """
-    Match each target tilt to the closest section in the sorted stack.
-    Returns (matched_set_of_0indexed_sections, list_of_unmatched_tilts).
+    Map AreTomo3's own 1-indexed SEC numbers to 0-indexed positions in
+    sorted_secs.
+
+    dark_frames' frame_b and frames' sec (both read straight from the .aln
+    header/data rows) are AreTomo3's own SEC numbering in the tilt-sorted
+    stack -- the exact same ordering sorted_secs reconstructs from
+    order_list.csv by sorting on tilt. So this is a direct index lookup
+    (sec_number - 1), not an approximate match: unlike matching by nearest
+    tilt angle, it can't collide two distinct frames onto the same section.
+
+    Returns (matched_set_of_0indexed_sections, list_of_out_of_range_sec_numbers).
     """
-    matched, unmatched = set(), []
-    for target in target_tilts:
-        best_sec, best_diff = None, float('inf')
-        for sec_idx, tilt, _ in sorted_secs:
-            diff = abs(tilt - target)
-            if diff < best_diff:
-                best_diff = diff
-                best_sec = sec_idx
-        if best_diff <= tol and best_sec is not None:
-            matched.add(best_sec)
+    matched, out_of_range = set(), []
+    for sec_num in sec_numbers:
+        idx = sec_num - 1
+        if 0 <= idx < n_secs:
+            matched.add(idx)
         else:
-            unmatched.append(target)
-    return matched, unmatched
+            out_of_range.append(sec_num)
+    return matched, out_of_range
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -325,18 +329,19 @@ def run(args):
         sorted_secs = tilt_sorted_sections(order_rows)
         all_sec_idx = {s[0] for s in sorted_secs}
 
-        # Identify sections to exclude
-        dark_tilts    = [df['tilt'] for df in data.get('dark_frames', [])]
-        flagged_tilts = [f['tilt']  for f  in data.get('frames', [])
-                         if f.get('is_flagged')]
+        # Identify sections to exclude — by AreTomo3's own SEC numbers
+        # (frame_b for dark frames, sec for flagged frames), not tilt angle.
+        dark_secnums    = [df['frame_b'] for df in data.get('dark_frames', [])]
+        flagged_secnums = [f['sec']      for f  in data.get('frames', [])
+                           if f.get('is_flagged')]
 
-        dark_secs,    dark_miss    = find_sections_by_tilt(dark_tilts,    sorted_secs, tol=1.0)
-        flagged_secs, flagged_miss = find_sections_by_tilt(flagged_tilts, sorted_secs, tol=2.0)
+        dark_secs,    dark_miss    = sections_from_sec_numbers(dark_secnums,    len(sorted_secs))
+        flagged_secs, flagged_miss = sections_from_sec_numbers(flagged_secnums, len(sorted_secs))
 
         for miss, label in ((dark_miss, 'dark'), (flagged_miss, 'flagged')):
             if miss:
-                _pwrite(f'  WARNING {ts_name}: {len(miss)} {label} tilt(s) unmatched: '
-                        f'{[f"{t:.1f}" for t in miss]}')
+                _pwrite(f'  WARNING {ts_name}: {len(miss)} {label} SEC number(s) '
+                        f'out of range 1..{len(sorted_secs)}: {miss}')
 
         nodark_keep = sorted(all_sec_idx - dark_secs)
         clean_keep  = sorted(all_sec_idx - dark_secs - flagged_secs)
