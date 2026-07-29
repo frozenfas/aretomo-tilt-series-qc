@@ -30,6 +30,41 @@ def get_frames_dir() -> Optional[Path]:
     return Path(value) if value else None
 
 
+def resolve_original_mdoc_path(rename_lookup: dict, ts_name: str) -> Optional[Path]:
+    """
+    Look up ts_name's original (pre-rename) mdoc Path in an already-loaded
+    rename_ts.lookup dict ({'ts-XXXX.mdoc': original_absolute_path}), or
+    None if not found. Pure lookup, no project.json I/O -- for callers
+    that already have `project`/`rename_ts.lookup` loaded (e.g. in a loop
+    over many TS) and want to avoid re-reading it per TS.
+    """
+    value = rename_lookup.get(f'{ts_name}.mdoc')
+    return Path(value) if value else None
+
+
+def get_ts_to_original_stem() -> dict:
+    """
+    {renamed ts-XXXX stem -> original (pre-rename) filename stem, e.g.
+    'Position_1'}, built from rename_ts.lookup (ts-XXXX.mdoc -> original
+    absolute path) in project.json. Empty dict if rename-ts hasn't been
+    run yet.
+
+    mdoc_data.per_ts is keyed by the ORIGINAL stem, not the renamed
+    ts-XXXX name (mdocs are validated before rename-ts in the documented
+    pipeline order, so that's the natural key; .aln/volumes are named
+    ts-XXXX). Use this to translate a ts-XXXX name into the mdoc_data key
+    to read -- or, when saving, to normalize a ts-XXXX.mdoc symlink's own
+    filename stem back to the same original key its source Position_N.mdoc
+    would use, so re-validating post-rename updates one entry instead of
+    creating a second one under the ts-XXXX name.
+    """
+    lookup = _load().get('rename_ts', {}).get('lookup', {})
+    return {
+        Path(ts_mdoc).stem: Path(orig_path).stem
+        for ts_mdoc, orig_path in lookup.items()
+    }
+
+
 def get_angpix() -> Optional[float]:
     """
     Return the most common pixel size from mdoc_data.per_ts,

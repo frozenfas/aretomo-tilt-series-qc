@@ -80,7 +80,9 @@ except ImportError:
 from aretomo3_preprocess.shared.parsers import (
     parse_aln_file, parse_ctf_file, parse_tlt_file, parse_mdoc_file,
 )
-from aretomo3_preprocess.shared.project_state import resolve_selected_ts
+from aretomo3_preprocess.shared.project_state import (
+    resolve_selected_ts, resolve_original_mdoc_path,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -180,15 +182,8 @@ def _load_mdoc_from_project(project: dict, ts_name: str) -> tuple:
 
     Returns ({}, None) if the TS is not found.
     """
-    # Build ts_name → original_mdoc_path from rename_ts lookup
-    rename_ts = project.get('rename_ts', {})
-    original_mdoc_path = None
-    for grid in rename_ts.get('grids', {}).values():
-        lookup = grid.get('lookup', {})
-        key = f'{ts_name}.mdoc'
-        if key in lookup:
-            original_mdoc_path = Path(lookup[key])
-            break
+    rename_lookup = project.get('rename_ts', {}).get('lookup', {})
+    original_mdoc_path = resolve_original_mdoc_path(rename_lookup, ts_name)
 
     if original_mdoc_path is None:
         return {}, None

@@ -28,7 +28,7 @@ from aretomo3_preprocess.shared.project_json import (
     update_section, update_section_once, args_to_dict,
 )
 from aretomo3_preprocess.shared.project_state import (
-    get_angpix, get_tlt_dir, get_gain_check_dir,
+    get_angpix, get_tlt_dir, get_gain_check_dir, get_ts_to_original_stem,
 )
 from aretomo3_preprocess.shared.output_guard import check_output_dir
 from aretomo3_preprocess.shared.parsers import (
@@ -1586,14 +1586,10 @@ def run(args):
     _stacks        = _proj.get('input_stacks', {}).get('stacks', {})
     _n_mdoc_cached = 0
 
-    # Build ts-name → original mdoc stem mapping from rename_ts lookup.
     # mdoc_data is keyed by original filename stems (e.g. 'Position_1') while
-    # .aln files are named ts-xxx, so a direct lookup would always miss.
-    _rename_lookup = _proj.get('rename_ts', {}).get('lookup', {})
-    _ts_to_mdoc_stem = {
-        Path(ts_mdoc).stem: Path(orig_path).stem
-        for ts_mdoc, orig_path in _rename_lookup.items()
-    }  # e.g. {'ts-001': 'Position_1', 'ts-002': 'Position_10', ...}
+    # .aln files are named ts-xxx, so a direct lookup would always miss --
+    # translate via rename_ts.lookup.
+    _ts_to_mdoc_stem = get_ts_to_original_stem()  # e.g. {'ts-001': 'Position_1', ...}
 
     angpix_str = f'{args.angpix} Å/px' if args.angpix else 'from mdoc_data'
     print(f'Found {len(aln_files)} .aln files  |  threshold = {args.threshold}%  '

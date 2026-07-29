@@ -1194,15 +1194,26 @@ def _save_mdoc_to_project(paths):
     project.json, merging with any previously saved entries so that
     running on a subset (e.g. to fix a few files) updates only those
     entries without wiping data for the rest of the dataset.
+
+    Entries are keyed by the ORIGINAL (pre-rename) filename stem, e.g.
+    'Position_1' -- matching what analyse.py/relion5_convert.py already
+    expect (they translate a ts-XXXX name back to this stem before
+    looking up). If `path` is a renamed ts-XXXX.mdoc symlink rather than
+    the original Position_N.mdoc, normalize its key back to that same
+    original stem via rename_ts.lookup, so validating the same TS both
+    before and after rename-ts updates one entry instead of silently
+    creating a second one under the ts-XXXX name.
     """
     try:
         from aretomo3_preprocess.shared.parsers import parse_mdoc_file
         from aretomo3_preprocess.shared.project_json import load as _load, update_section
+        from aretomo3_preprocess.shared.project_state import get_ts_to_original_stem
     except ImportError:
         return
 
     # Load existing entries so we can merge rather than replace
     existing = _load().get('mdoc_data', {}).get('per_ts', {})
+    ts_to_original = get_ts_to_original_stem()
 
     new_entries = {}
     for path in paths:
@@ -1212,7 +1223,8 @@ def _save_mdoc_to_project(paths):
         except Exception:
             continue
         if mdoc_data:
-            new_entries[p.stem] = {
+            key = ts_to_original.get(p.stem, p.stem)
+            new_entries[key] = {
                 'angpix':  angpix,
                 'frames':  {str(k): v for k, v in mdoc_data.items()},
             }
