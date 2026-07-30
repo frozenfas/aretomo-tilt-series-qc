@@ -12,15 +12,21 @@ Each mode expects different inputs and handles stacks / .aln files differently:
   cmd  --in-prefix          --in-suffix  --in-skips               Input stacks           .aln files
   ---  -------------------  -----------  -----------------------  ---------------------  ------------------
    0   frames/ts-           mdoc         (none — mdoc mode)       raw movies via mdoc    created in --output
-   1   <cmd0 output>/ts-    mrc          _CTF,_Vol,_EVN,_ODD      already in --in-prefix created in --output
+   1   <cmd0 output>/ts-    mrc          _CTF,_Vol,_EVN,_ODD      symlinked into         created in --output
+                                                                   --output/
    2   <prev run>/ts-       mrc          _CTF,_Vol,_EVN,_ODD      symlinked into         pre-exist in
                                                                    --output/              --in-prefix dir
 
-For cmd=2, AreTomo3 reads the existing .aln from the --in-prefix directory and
-writes new volumes (at the requested --at-bin / --split-sum) to --output.
-Symlinks to the .aln files (from --in-prefix) and .mrc/.TLT stacks (from
-project.json input_stacks) are created directly in --output/.  AreTomo3 is
-pointed at --output/ so the source run is never modified.
+cmd=1/2 both stage into --output/: symlinks to .mrc/_EVN/_ODD/_TLT.txt stacks
+(from project.json input_stacks) are created directly there, and AreTomo3 is
+pointed at --output/ so the source run (--in-prefix) is never modified. cmd=2
+additionally copies the existing .aln from --in-prefix (it's recon-only,
+reusing that alignment rather than computing a fresh one) and symlinks
+_CTF.txt alongside it; cmd=1 does neither, since it computes its own. This
+staging is also what makes --select-ts work for cmd=1/2 -- AreTomo3's own
+-InSkips can't exclude by TS name, so a curated symlink directory is the only
+way to make it process a subset. A staging pass also removes any symlinks
+left over from an earlier, broader-selection run into the same --output.
 
 TiltAxis and AlignZ (cmd=1/2)
 ------------------------------
@@ -405,24 +411,36 @@ def _find_input_files(in_prefix: str, in_suffix: str,
     return in_dir, pattern, files
 
 
-def _setup_cmd2_staging(out_dir: Path, src_in_dir: Path,
-                        in_skips: list = None,
-                        dry_run: bool = False, selected_ts: set = None,
-                        split_sum: int = 0) -> Path:
+def _setup_staging(out_dir: Path, src_in_dir: Path, cmd: int,
+                   in_skips: list = None,
+                   dry_run: bool = False, selected_ts: set = None,
+                   split_sum: int = 0) -> Path:
     """
-    Populate the output directory with symlinks for cmd=2 runs.
+    Populate the output directory with symlinks for cmd=1/2 runs, so
+    AreTomo3 can be pointed at --output/ and src_in_dir (e.g. a prior
+    alignment run) is NEVER modified — only read.
 
-    Copies .aln files and creates symlinks in out_dir for all other files:
-      - ts-xxx.aln      ←  src_in_dir/ts-xxx.aln         (copied — editable by overlap filter)
-      - ts-xxx.mrc      →  <source>/ts-xxx.mrc            (tilt-series stacks)
-      - ts-xxx_EVN.mrc  →  <source>/ts-xxx_EVN.mrc       (even frames, split_sum=1)
-      - ts-xxx_ODD.mrc  →  <source>/ts-xxx_ODD.mrc       (odd frames, split_sum=1)
-      - ts-xxx_TLT.txt  →  <source>/ts-xxx_TLT.txt       (frame ordering)
+    cmd=2 (recon-only, reads an existing alignment) additionally copies
+    .aln files and symlinks _CTF.txt from src_in_dir; cmd=1 (computes a
+    fresh alignment) does neither, since there's no pre-existing alignment
+    to reuse yet:
+      - ts-xxx.aln      ←  src_in_dir/ts-xxx.aln     (cmd=2 only; copied — editable by overlap filter)
+      - ts-xxx_CTF.txt  →  src_in_dir/ts-xxx_CTF.txt (cmd=2 only)
+      - ts-xxx.mrc      →  <source>/ts-xxx.mrc       (both — tilt-series stacks)
+      - ts-xxx_EVN.mrc  →  <source>/ts-xxx_EVN.mrc   (both, split_sum=1 — even frames)
+      - ts-xxx_ODD.mrc  →  <source>/ts-xxx_ODD.mrc   (both, split_sum=1 — odd frames)
+      - ts-xxx_TLT.txt  →  <source>/ts-xxx_TLT.txt   (both — frame ordering)
 
     The MRC/TLT source is project.json input_stacks (from a prior cmd=0 run).
     If not present, exits with an actionable error.
 
-    src_in_dir (e.g. run003) is NEVER modified — only read.
+    Symlinks left over from a PRIOR staging pass into this same --output
+    with a wider (or no) --select-ts are removed, since this function only
+    ever adds symlinks otherwise — AreTomo3 processes whatever it finds via
+    -InPrefix regardless of what the current selection says, so a stale
+    symlink would silently still get processed. The copied .aln (cmd=2) is
+    never auto-deleted as part of that cleanup (user-editable) — with its
+    .mrc symlink gone, AreTomo3 has nothing left to reconstruct for that TS.
 
     Returns out_dir (the directory AreTomo3 should be pointed at).
     """
@@ -441,8 +459,8 @@ def _setup_cmd2_staging(out_dir: Path, src_in_dir: Path,
         mrc_sources  = {ts: Path(stacks[ts]['path']) for ts in all_ts}
 
     else:
-        print('ERROR: input_stacks not found in project.json.')
-        print('       MRC stacks must be registered before running cmd=2.')
+        print(f'ERROR: input_stacks not found in project.json.')
+        print(f'       MRC stacks must be registered before running cmd={cmd}.')
         print('       Register the cmd=0 output directory:')
         print('         aretomo3-preprocess enrich --mrc-data <run001/>')
         sys.exit(1)
@@ -456,28 +474,24 @@ def _setup_cmd2_staging(out_dir: Path, src_in_dir: Path,
         if n_excl:
             print(f'  TS selection: {n_excl} excluded, {len(all_ts)} remaining')
 
-    # ── Drop TS with no .aln to reconstruct from ────────────────────────────
+    # ── cmd=2 only: drop TS with no .aln to reconstruct from ────────────────
     # cmd=2 is recon-only: a TS staged without its .aln can never actually be
     # reconstructed (AreTomo3 reads the existing alignment; it doesn't
     # recompute one). Staging its .mrc anyway just leaves it sitting there
     # forever, and the post-run completeness check would flag it as
     # "incomplete" for a TS that was never eligible in the first place.
-    orig_n      = len(all_ts)
-    all_ts      = [ts for ts in all_ts if (src_in_dir / f'{ts}.aln').exists()]
-    mrc_sources = {ts: mrc_sources[ts] for ts in all_ts}
-    n_no_aln    = orig_n - len(all_ts)
-    if n_no_aln:
-        print(f'  No .aln in {src_in_dir}/: {n_no_aln} TS excluded, '
-              f'{len(all_ts)} remaining')
+    # Not applicable to cmd=1: it computes the alignment itself, so no
+    # pre-existing .aln is expected.
+    if cmd == 2:
+        orig_n      = len(all_ts)
+        all_ts      = [ts for ts in all_ts if (src_in_dir / f'{ts}.aln').exists()]
+        mrc_sources = {ts: mrc_sources[ts] for ts in all_ts}
+        n_no_aln    = orig_n - len(all_ts)
+        if n_no_aln:
+            print(f'  No .aln in {src_in_dir}/: {n_no_aln} TS excluded, '
+                  f'{len(all_ts)} remaining')
 
     # ── Identify stale symlinks from a prior, broader staging pass ─────────
-    # This function only ever ADDS symlinks; a previous run into this same
-    # --output with a wider (or no) --select-ts can leave symlinks for TS
-    # that are no longer in the current selection. AreTomo3 processes
-    # whatever it finds via -InPrefix regardless of what this wrapper thinks
-    # is selected, so those stale TS would otherwise still get reconstructed
-    # -- and the post-run completeness check, which only checks the CURRENT
-    # selection, would never notice either way.
     stale_ts = []
     if staging_dir.is_dir():
         staged_mrc = {
@@ -488,11 +502,20 @@ def _setup_cmd2_staging(out_dir: Path, src_in_dir: Path,
 
     # ── Build lists of links to create ────────────────────────────────────
     to_link_aln = []
-    for ts_name in all_ts:
-        aln_src = src_in_dir / f'{ts_name}.aln'
-        aln_dst = staging_dir / f'{ts_name}.aln'
-        if aln_src.exists() and not aln_dst.exists() and not aln_dst.is_symlink():
-            to_link_aln.append((ts_name, aln_src.resolve()))
+    to_link_ctf = []
+    if cmd == 2:
+        for ts_name in all_ts:
+            aln_src = src_in_dir / f'{ts_name}.aln'
+            aln_dst = staging_dir / f'{ts_name}.aln'
+            if aln_src.exists() and not aln_dst.exists() and not aln_dst.is_symlink():
+                to_link_aln.append((ts_name, aln_src.resolve()))
+
+        # _CTF.txt comes from the alignment run (src_in_dir), not from the cmd=0 root
+        for ts_name in all_ts:
+            ctf_src = src_in_dir / f'{ts_name}_CTF.txt'
+            ctf_dst = staging_dir / f'{ts_name}_CTF.txt'
+            if ctf_src.exists() and not ctf_dst.exists() and not ctf_dst.is_symlink():
+                to_link_ctf.append((ts_name, ctf_src.resolve()))
 
     to_link_mrc = []
     for ts_name, src in mrc_sources.items():
@@ -507,14 +530,6 @@ def _setup_cmd2_staging(out_dir: Path, src_in_dir: Path,
             tlt_dst = staging_dir / f'{ts_name}_TLT.txt'
             if tlt_src.exists() and not tlt_dst.exists() and not tlt_dst.is_symlink():
                 to_link_tlt.append((ts_name, tlt_src.resolve()))
-
-    # _CTF.txt comes from the alignment run (src_in_dir), not from the cmd=0 root
-    to_link_ctf = []
-    for ts_name in all_ts:
-        ctf_src = src_in_dir / f'{ts_name}_CTF.txt'
-        ctf_dst = staging_dir / f'{ts_name}_CTF.txt'
-        if ctf_src.exists() and not ctf_dst.exists() and not ctf_dst.is_symlink():
-            to_link_ctf.append((ts_name, ctf_src.resolve()))
 
     to_link_evn = []
     to_link_odd = []
@@ -538,8 +553,9 @@ def _setup_cmd2_staging(out_dir: Path, src_in_dir: Path,
 
     prefix = '[DRY RUN] ' if dry_run else ''
     print(sep)
-    print(f'  {prefix}CMD=2 OUTPUT DIRECTORY  →  {staging_dir}/')
-    print(f'  {prefix}.aln source    : {src_in_dir}/')
+    print(f'  {prefix}CMD={cmd} OUTPUT DIRECTORY  →  {staging_dir}/')
+    if cmd == 2:
+        print(f'  {prefix}.aln source    : {src_in_dir}/')
     if src_root is not None:
         print(f'  {prefix}MRC/TLT source : {source_label}')
     copy_parts = []
@@ -590,9 +606,8 @@ def _setup_cmd2_staging(out_dir: Path, src_in_dir: Path,
         return staging_dir
 
     # Remove stale symlinks left by a prior, broader staging pass. Never
-    # touch the copied .aln (user-editable, per this function's docstring)
-    # -- with its .mrc symlink gone, AreTomo3 simply has nothing to
-    # reconstruct for that TS, which is all that's needed.
+    # touch a copied .aln (user-editable, cmd=2 only) -- with its .mrc
+    # symlink gone, AreTomo3 simply has nothing to reconstruct for that TS.
     for ts_name in stale_ts:
         for suffix in ('.mrc', '_EVN.mrc', '_ODD.mrc', '_TLT.txt', '_CTF.txt'):
             p = staging_dir / f'{ts_name}{suffix}'
@@ -1245,10 +1260,11 @@ def _validate(args) -> tuple:
                          if s and s.startswith('ts-')]
     if _dropped_ts_skips:
         # True for every --cmd today: only file-type patterns (_CTF/_Vol)
-        # are passed to AreTomo3's -InSkips. cmd=0/1 have no other exclusion
-        # mechanism at all; cmd=2 staging accepts an in_skips parameter but
-        # doesn't currently act on it either (_setup_cmd2_staging filters
-        # only by --select-ts) -- so this is not cmd-specific.
+        # are passed to AreTomo3's -InSkips. cmd=0 has no other exclusion
+        # mechanism at all; cmd=1/2 staging (_setup_staging) accepts an
+        # in_skips parameter but doesn't currently act on it either -- only
+        # --select-ts actually filters which TS get staged -- so this is
+        # not cmd-specific.
         warnings.append(
             f'--in-skips {_dropped_ts_skips} — TS-name patterns have no '
             f'effect for --cmd {args.cmd} (only file-type patterns like '
@@ -1257,11 +1273,11 @@ def _validate(args) -> tuple:
         )
     in_dir, pattern, mdoc_files = _find_input_files(
         args.in_prefix, args.in_suffix, _effective_skips)
-    if not in_dir.is_dir() and not (args.in_suffix == 'mrc' and args.cmd == 2):
+    if not in_dir.is_dir() and not (args.in_suffix == 'mrc' and args.cmd in (1, 2)):
         errors.append(f'Input directory not found: {in_dir}/')
     elif not mdoc_files:
-        if args.in_suffix == 'mrc' and args.cmd == 2:
-            # cmd=2 dry-run: symlinks not yet created — check project.json
+        if args.in_suffix == 'mrc' and args.cmd in (1, 2):
+            # cmd=1/2 dry-run: symlinks not yet created — check project.json
             proj_stacks = load_or_create().get('input_stacks', {}).get('stacks', {})
             if proj_stacks:
                 print(f'  Input files     : {len(proj_stacks)} stacks in '
@@ -1448,7 +1464,7 @@ def add_parser(subparsers):
                           'Pass an empty string to disable.')
     inp.add_argument('--select-ts', default=None, metavar='CSV',
                      help='Path to ts_selection.csv from select-ts; only the '
-                          'selected TS are staged for cmd=2 runs. '
+                          'selected TS are staged for cmd=1/2 runs. '
                           'Auto-loaded from project.json if omitted.')
     inp.add_argument('--serial', type=int, default=1,
                      help='Seconds to wait for the next tilt series; '
@@ -1572,19 +1588,22 @@ def run(args):
         print('       Run validate-mdoc first, or supply --apix explicitly.')
         sys.exit(1)
 
-    # ── Staging directory (cmd=2 only) ────────────────────────────────────
-    # cmd=1: --in-prefix points at the cmd=0 output dir which has the stacks;
-    #        no staging needed, fresh .aln is written to OutDir.
-    # cmd=2: symlinks to the .aln files (from src_in_dir) and .mrc/.TLT stacks
-    #        (from project.json input_stacks) are created directly in --output/.
-    #        AreTomo3 is pointed at --output/.  src_in_dir (e.g. run003) is
-    #        NEVER modified.
+    # ── Staging directory (cmd=1/2) ─────────────────────────────────────────
+    # Symlinks to .mrc/_TLT.txt stacks (from project.json input_stacks) are
+    # created directly in --output/, and AreTomo3 is pointed at --output/ --
+    # src_in_dir (e.g. run003) is NEVER modified. cmd=2 additionally copies
+    # .aln files (it's recon-only, reusing an existing alignment); cmd=1
+    # doesn't, since it computes a fresh one. This is what makes --select-ts
+    # possible for both: AreTomo3's own -InSkips can't exclude by TS name
+    # (buffer overflow), so a curated symlink directory is the only way to
+    # make it process a subset.
     selected_ts = None
-    if args.in_suffix == 'mrc' and args.cmd == 2:
+    if args.in_suffix == 'mrc' and args.cmd in (1, 2):
         selected_ts = resolve_selected_ts(getattr(args, 'select_ts', None))
-        staging_dir = _setup_cmd2_staging(
+        staging_dir = _setup_staging(
             out_dir     = out_dir,
             src_in_dir  = src_in_dir,
+            cmd         = args.cmd,
             in_skips    = args.in_skips,
             dry_run     = args.dry_run,
             selected_ts = selected_ts,
@@ -1593,18 +1612,20 @@ def run(args):
         stem = Path(args.in_prefix).name      # e.g. 'ts-'
         args.in_prefix = str(staging_dir / stem)
 
-    in_dir = Path(args.in_prefix).parent  # staging_dir for cmd=2, src_in_dir otherwise
+    in_dir = Path(args.in_prefix).parent  # staging_dir for cmd=1/2, src_in_dir otherwise
 
     # ── Pre-flight validation ──────────────────────────────────────────────
     print('Pre-flight checks:')
     errors, warnings, mdoc_stats, input_ts_names = _validate(args)
 
-    # _setup_cmd2_staging only ever ADDS symlinks, never removes ones left
-    # over from a prior run into the same --output with a broader (or no)
-    # --select-ts -- so input_ts_names (globbed from the staging dir) can
-    # include stale, no-longer-selected TS. Filter against the CURRENT
-    # selection so the progress bar / completeness check "expected" count
-    # reflects what's actually being run, not stale staging leftovers.
+    # _setup_staging (cmd=1/2) removes stale symlinks left over from a prior,
+    # broader-selection staging pass for a real run, so input_ts_names
+    # (globbed from the staging dir) should already match the current
+    # selection by this point -- but --dry-run never touches the filesystem
+    # (skips both linking and stale-removal), so a dry-run preview into an
+    # already-staged --output can still see stale entries. Filter against
+    # the CURRENT selection either way, as a defensive backstop for the
+    # real-run case and the only fix for the dry-run preview case.
     if selected_ts is not None:
         input_ts_names = input_ts_names & selected_ts
 
