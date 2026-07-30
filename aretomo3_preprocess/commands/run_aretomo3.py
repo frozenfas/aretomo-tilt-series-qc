@@ -92,6 +92,7 @@ from aretomo3_preprocess.shared.project_json import (
 from aretomo3_preprocess.shared.project_state import (
     get_angpix, register_input_stacks, resolve_selected_ts,
 )
+from aretomo3_preprocess.shared.output_guard import check_disk_space
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -965,29 +966,6 @@ def _check_gpus(requested_gpus: list) -> list:
     return []
 
 
-def _check_disk_space(out_dir: Path) -> list:
-    """
-    Warn if free space on --output's filesystem is low.
-
-    A precise "enough space for this run" estimate depends on VolZ/AtBin/
-    dtype/split-sum and is easy to get wrong; this only flags an absolute
-    low-water mark as a sanity check, not a prediction. (A batch tomogram
-    run genuinely crashed the project.json write from exactly this cause
-    -- see project_json.py's atomic-write fix -- so even a rough warning
-    here is worth having.)
-    """
-    check_dir = out_dir if out_dir.exists() else out_dir.parent
-    try:
-        usage = shutil.disk_usage(check_dir)
-    except OSError:
-        return []
-    free_gb = usage.free / 1e9
-    if free_gb < 20:
-        return [f'Low disk space on {check_dir} filesystem: {free_gb:.1f} GB free '
-                f'-- a batch tomogram run can consume far more than this']
-    return []
-
-
 def _check_output_tilt_counts(expected_sections: dict, out_dir: Path) -> tuple:
     """
     Post-run sanity check: for every TS whose .aln now exists in out_dir,
@@ -1239,7 +1217,7 @@ def _validate(args) -> tuple:
     print(f'  AreTomo3 binary : {_detect_aretomo3_version(args.aretomo3_bin)}')
 
     warnings.extend(_check_gpus(args.gpu))
-    warnings.extend(_check_disk_space(Path(args.output)))
+    warnings.extend(check_disk_space(Path(args.output)))
 
     # ── 1. Gain / fm-dose (only needed for cmd 0 = full pipeline) ─────────
     if args.gain is not None:

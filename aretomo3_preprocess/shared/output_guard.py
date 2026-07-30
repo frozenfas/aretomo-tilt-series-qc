@@ -85,3 +85,31 @@ def check_output_dir(out_dir: Path, clean: bool = False, dry_run: bool = False) 
         # Treat as a new path — recurse to check it too
         new_dir = Path(answer).resolve()
         return check_output_dir(new_dir, clean=False, dry_run=False)
+
+
+def check_disk_space(out_dir: Path, min_free_gb: float = 20.0) -> list:
+    """
+    Warn if free space on out_dir's filesystem is low.
+
+    A precise "enough space for this run" estimate depends on the specific
+    job (VolZ/AtBin/dtype/split-sum for AreTomo3; volume count/dtype for a
+    segmentation batch) and is easy to get wrong; this only flags an
+    absolute low-water mark as a sanity check, not a prediction. (A batch
+    tomogram run genuinely crashed from exactly this cause -- see
+    project_json.py's atomic-write fix and run_aretomo3.py's post-run
+    completeness check -- so even a rough warning here is worth having.)
+
+    Returns a list of warning strings (empty if space looks fine or the
+    check itself fails, e.g. the path doesn't exist yet).
+    """
+    out_dir = Path(out_dir)
+    check_dir = out_dir if out_dir.exists() else out_dir.parent
+    try:
+        usage = shutil.disk_usage(check_dir)
+    except OSError:
+        return []
+    free_gb = usage.free / 1e9
+    if free_gb < min_free_gb:
+        return [f'Low disk space on {check_dir} filesystem: {free_gb:.1f} GB free '
+                f'-- a batch run can consume far more than this']
+    return []
