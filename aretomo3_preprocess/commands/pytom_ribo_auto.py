@@ -11,22 +11,16 @@ What it automates that `pytom-match` normally requires by hand
 --------------------------------------------------------------
   1. Picks whichever existing `run-aretomo3 --cmd 2` reconstruction (plain
      `_Vol.mrc` or a multi-bin `_bN_Vol.mrc` variant) has a voxel size
-     closest to the target 10.0 A/px (fixed, not a CLI option -- matches
-     this codebase's other validated ribosome runs, and map-70S.mrc's own
-     native 9.06 A/px means finer targets can't be reached anyway --
-     pytom_create_template.py refuses to upsample past a reference's
-     native resolution). Resamples via IMOD binvol if no existing bin is
-     close enough (see step 1b in the code).
-  2. Rescales the bundled reference density to that tomogram's *actual*
-     measured voxel size (via `pytom_create_template.py`), not to a
-     rounded target -- template and tomogram must match pytom-match-pick's
-     own voxel size exactly, it does not resample internally the way
-     easymode's segmentation models do.
-  3. Generates a matching spherical mask (`pytom_create_mask.py`) sized
-     from the particle's known diameter.
-  4. Symlinks the resolved reference, rescaled template, mask, and the
-     tomograms actually used into <output>/staged/ for provenance.
-  5. Runs `pytom-match`'s own template-matching + extraction + QC-report
+     closest to the target 10.0 A/px (fixed, not a CLI option). Resamples
+     via IMOD binvol if no existing bin is close enough (see step 1b in
+     the code).
+  2. Uses the particle registry's pre-made reference + mask directly
+     (symlinked into <output>/staged/, no per-run pytom_create_template.py/
+     pytom_create_mask.py generation) -- both are required to already
+     exist, already be inverted (dark-particle convention) and already be
+     at the 10.0 A/px target; see _PARTICLES' docstring. The only
+     processing ever run here is --mirror, which can't be done by symlink.
+  3. Runs `pytom-match`'s own template-matching + extraction + QC-report
      pipeline (reused directly, not reimplemented) with the flag set
      already validated on this system's real ribosome production runs
      (see `external_pytom2.py` on the BI38262-12-RsmA-cryoET project):
@@ -34,19 +28,20 @@ What it automates that `pytom-match` normally requires by hand
      --random-phase-correction --half-precision --angular-search 10
      --high-pass 400 --relion5-compat --imod --analyse.
 
-Only 70S has a bundled reference on this system right now
------------------------------------------------------------
-  /opt/data/pytom/map-70S.mrc  (copied from BI38262-12-RsmA-cryoET)
-Add map-50S.mrc / map-30S.mrc / map-80S.mrc to the same directory to
-activate --particle 50S/30S/80S; until then those choices fail with a
-clear "reference not found" error rather than silently using the wrong
-particle.
+Only 70S has a bundled reference/mask pair on this system right now
+---------------------------------------------------------------------
+  /opt/data/pytom/SC_job035_run_it120_class001_10.00A.mrc (reference)
+  /opt/data/pytom/SC_job035_run_it120_class001_10.00A_MASK.mrc (mask)
+Add a 'map'/'mask' pair for 50S/30S/80S to _PARTICLES to activate those
+choices; until then they fail with a clear "no pre-made reference/mask"
+error rather than silently using the wrong particle.
 
 Particle diameters (--particle-diameter) are documented estimates, not
 independently verified per-particle -- override them if you have a better
-number; they drive both the Crowther-criterion box/mask sizing and the
-extraction peak-spacing (pytom_extract_candidates.py's own spacing
-behaviour).
+number; they drive the extraction peak-spacing (pytom_extract_candidates.py's
+own spacing behaviour) and the matching command's Crowther-criterion
+angular-search fallback (currently overridden by the fixed --angular-search
+10 in _matching_defaults(), so this mostly matters for extraction).
 
 Typical usage
 -------------
@@ -80,10 +75,6 @@ from aretomo3_preprocess.shared.discovery import (
     filter_by_include_exclude,
 )
 
-_PYTOM_BIN_DIR          = '/opt/miniconda3/envs/pytom_tm/bin'
-_PYTOM_CREATE_TEMPLATE  = f'{_PYTOM_BIN_DIR}/pytom_create_template.py'
-_PYTOM_CREATE_MASK      = f'{_PYTOM_BIN_DIR}/pytom_create_mask.py'
-
 _IMOD_DIR   = '/opt/IMOD'
 _BINVOL_BIN = f'{_IMOD_DIR}/bin/binvol'
 
@@ -101,13 +92,31 @@ _RESAMPLE_TOL_PCT = 5.0
 _REF_DIR = Path('/opt/data/pytom')
 
 # diameter_a: envelope diameter in Angstrom, used for Crowther-criterion
-# sizing and extraction peak spacing -- see module docstring re: these
-# being estimates. 70S is the only one with a reference file right now.
+# sizing and extraction peak spacing (--particle-diameter, passed straight
+# to pytom_match_template.py/pytom_extract_candidates.py) -- see module
+# docstring re: these being estimates.
+#
+# 'map'/'mask' are both REQUIRED to already exist, already inverted
+# (dark-particle convention), and already at the 10.0 A/px target -- they
+# are used directly as pytom_match_template.py's input, with NO processing
+# (rescale/invert/mirror/recenter) ever applied here; this "auto" tool
+# assumes fully precreated reference/mask pairs.
+#
+# 'map_mirror'/'mask_mirror' (optional, absent for every particle right
+# now): a SEPARATE, independently precreated pair for --mirror/
+# --check-handedness -- there is no runtime mirror transform (see
+# _prepare_template_and_mask for why: mirroring one file without the other
+# risks misaligning them, worse than doing nothing).
 _PARTICLES = {
-    '70S': {'map': _REF_DIR / 'map-70S.mrc', 'diameter_a': 290.0},
-    '50S': {'map': _REF_DIR / 'map-50S.mrc', 'diameter_a': 220.0},
-    '30S': {'map': _REF_DIR / 'map-30S.mrc', 'diameter_a': 200.0},
-    '80S': {'map': _REF_DIR / 'map-80S.mrc', 'diameter_a': 300.0},
+    '70S': {'map': _REF_DIR / 'SC_job035_run_it120_class001_10.00A.mrc',
+            'mask': _REF_DIR / 'SC_job035_run_it120_class001_10.00A_MASK.mrc',
+            'diameter_a': 290.0},
+    '50S': {'map': _REF_DIR / 'map-50S.mrc', 'mask': _REF_DIR / 'mask-50S.mrc',
+            'diameter_a': 220.0},
+    '30S': {'map': _REF_DIR / 'map-30S.mrc', 'mask': _REF_DIR / 'mask-30S.mrc',
+            'diameter_a': 200.0},
+    '80S': {'map': _REF_DIR / 'map-80S.mrc', 'mask': _REF_DIR / 'mask-80S.mrc',
+            'diameter_a': 300.0},
 }
 
 
@@ -115,26 +124,10 @@ _PARTICLES = {
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _find_bin(name, default, pytom_dir=None):
-    if pytom_dir:
-        c = Path(pytom_dir) / name
-        if c.exists():
-            return str(c)
-    if Path(default).exists():
-        return default
-    return shutil.which(name) or default
-
-
 def _read_voxel_size(mrc_path):
     import mrcfile
     with mrcfile.open(mrc_path, permissive=True) as m:
         return float(m.voxel_size.x)
-
-
-def _read_box_shape(mrc_path):
-    import mrcfile
-    with mrcfile.open(mrc_path, permissive=True) as m:
-        return m.data.shape  # (nz, ny, nx)
 
 
 def _detect_gpus():
@@ -306,77 +299,94 @@ def _stage_symlink(dst_dir, src_path):
     return dst
 
 
-def _run_or_print(cmd, dry_run, log_label):
-    _print_cmd(cmd)
-    if dry_run:
-        print('  [dry-run: skipping execution]')
-        return True
-    ret = subprocess.run(cmd)
-    if ret.returncode != 0:
-        print(f'  ERROR: {log_label} exited with code {ret.returncode}')
+_APIX_MATCH_TOL = 0.01  # A/px; treat as "the same voxel size" within this
+
+
+def _voxel_size_matches(mrc_path, target_apix):
+    try:
+        return abs(_read_voxel_size(mrc_path) - target_apix) < _APIX_MATCH_TOL
+    except Exception:
         return False
-    return True
 
 
-def _prepare_template_and_mask(ref_map, particle, diameter_a, actual_apix,
-                               staged_dir, sigma, mirror, pytom_dir, dry_run):
+def _use_prescaled_directly(src_path, dst_path, dry_run):
+    """Symlink an already-correctly-scaled/processed file straight into
+    staged_dir as-is, no pytom_create_template.py/pytom_create_mask.py
+    round-trip needed."""
+    dst_path.parent.mkdir(parents=True, exist_ok=True)
+    if dry_run:
+        print(f'  [dry-run: would symlink {src_path} -> {dst_path}]')
+        return
+    if dst_path.exists() or dst_path.is_symlink():
+        dst_path.unlink()
+    dst_path.symlink_to(Path(src_path).resolve())
+
+
+def _check_prescaled(path, label, particle, target_apix):
+    """Assumed-precreated reference/mask: must exist and already be at
+    target_apix -- errors out rather than silently regenerating, since
+    this "auto" tool no longer carries a from-scratch fallback."""
+    path = Path(path)
+    if not path.exists():
+        print(f'ERROR: no pre-made {label} for --particle {particle} (expected {path}).')
+        sys.exit(1)
+    if not _voxel_size_matches(path, target_apix):
+        try:
+            have = _read_voxel_size(path)
+            have_s = f'{have:.2f} A/px'
+        except Exception:
+            have_s = 'unreadable'
+        print(f'ERROR: {label} {path} is not at the {target_apix:.2f} A/px target '
+              f'(has {have_s}). Re-generate it at the target resolution first.')
+        sys.exit(1)
+
+
+def _prepare_template_and_mask(reg, particle, actual_apix, staged_dir, mirror, dry_run):
     """
-    Rescale ref_map to actual_apix (inverted, optionally mirrored) and
-    generate a matching spherical mask.  Shared by the main run and
-    --check-handedness so the two never drift apart.
+    Use the pre-created, pre-scaled, pre-inverted reference and mask
+    directly (symlinked into staged_dir) as pytom_match_template.py's
+    input -- see _PARTICLES' docstring. NO processing (rescale, invert,
+    mirror, re-center, ...) is ever applied to either file here; they are
+    assumed fully prepared already.
 
-    Returns (template_path, mask_path), or exits on a subprocess failure.
+    --mirror requires a SEPARATE pre-made 'map_mirror'/'mask_mirror' pair
+    in the registry (built with whatever pipeline made the originals, e.g.
+    RELION) rather than a runtime mirror transform -- independently
+    mirroring/re-centering just the template (or the mask) via
+    pytom_create_template.py risks misaligning the two relative to each
+    other (its --center recomputes center of mass from scratch, not
+    guaranteed to land at the same position the other file is anchored
+    to), which would be worse than doing nothing.
+
+    Shared by the main run and --check-handedness so the two never drift
+    apart. Returns (template_path, mask_path), or exits with a clear error
+    if the required registry entry is missing/not prepared correctly.
     """
-    create_template_bin = _find_bin('pytom_create_template.py', _PYTOM_CREATE_TEMPLATE, pytom_dir)
-    create_mask_bin      = _find_bin('pytom_create_mask.py',     _PYTOM_CREATE_MASK,     pytom_dir)
+    map_key, mask_key = ('map_mirror', 'mask_mirror') if mirror else ('map', 'mask')
+    ref_map  = reg.get(map_key)
+    pre_mask = reg.get(mask_key)
+    if ref_map is None or pre_mask is None:
+        print(f'ERROR: --mirror requested but --particle {particle} has no pre-made '
+              f'mirrored reference/mask (_PARTICLES[{particle!r}][{map_key!r}/{mask_key!r}] '
+              f'not set). There is no runtime mirror transform -- prepare a properly '
+              f'co-registered mirrored pair first (same pipeline used for the originals).')
+        sys.exit(1)
 
-    # --invert: the raw reference is a standard positive-density map (bright
-    # protein in ChimeraX' default convention), but this codebase's
-    # AreTomo3/SART reconstructions have DARK particles on a bright
-    # background (verified empirically against real picked ribosome
-    # coordinates in BI38262-12-RsmA-cryoET: particle sites average ~0.37
-    # std below the tomogram's global mean) -- so the template must be
-    # sign-flipped to match. --mirror is the separate chirality/handedness
-    # axis (see --check-handedness).
-    mirror_tag = '_mirror' if mirror else ''
-    print(f'Rescaling reference {ref_map.name} -> {actual_apix:.2f} A/px'
-          f'{" (mirrored)" if mirror else ""}...')
-    template_path = staged_dir / f'template_{particle}_{actual_apix:.2f}A{mirror_tag}.mrc'
-    tmpl_cmd = [
-        create_template_bin,
-        '-i', str(ref_map),
-        '--output-voxel-size-angstrom', str(actual_apix),
-        '--invert',
-        '--center',
-        '-o', str(template_path),
-    ]
-    if mirror:
-        tmpl_cmd.append('--mirror')
+    _check_prescaled(ref_map, 'reference', particle, actual_apix)
+    _check_prescaled(pre_mask, 'mask', particle, actual_apix)
+
     staged_dir.mkdir(parents=True, exist_ok=True)
-    if not _run_or_print(tmpl_cmd, dry_run, 'pytom_create_template.py'):
-        sys.exit(1)
+    mirror_tag = '_mirror' if mirror else ''
+    template_path = staged_dir / f'template_{particle}_{actual_apix:.2f}A{mirror_tag}.mrc'
+    mask_path = staged_dir / f'mask_{particle}_{actual_apix:.2f}A{mirror_tag}.mrc'
 
-    if dry_run and not template_path.exists():
-        # Can't read the not-yet-generated template's box size; fall back to
-        # the raw reference's own box (rescale changes it, but this is only
-        # for printing a representative dry-run command).
-        box_size = _read_box_shape(ref_map)[0]
-    else:
-        box_size = _read_box_shape(template_path)[0]
-    radius_px = max(1, round((diameter_a / 2.0) / actual_apix))
+    print(f'Using reference {Path(ref_map).name} directly '
+          f'(pre-made at {actual_apix:.2f} A/px)')
+    _use_prescaled_directly(ref_map, template_path, dry_run)
 
-    print(f'Generating mask (box {box_size}px, radius {radius_px}px, sigma {sigma})...')
-    mask_path = staged_dir / f'mask_{particle}_{actual_apix:.2f}A.mrc'
-    mask_cmd = [
-        create_mask_bin,
-        '-b', str(box_size),
-        '-r', str(radius_px),
-        '-s', str(sigma),
-        '--voxel-size', str(actual_apix),
-        '-o', str(mask_path),
-    ]
-    if not _run_or_print(mask_cmd, dry_run, 'pytom_create_mask.py'):
-        sys.exit(1)
+    print(f'Using mask {Path(pre_mask).name} directly '
+          f'(pre-made at {actual_apix:.2f} A/px)')
+    _use_prescaled_directly(pre_mask, mask_path, dry_run)
 
     return template_path, mask_path
 
@@ -435,7 +445,7 @@ def _particle_count(star_path):
     return len(df)
 
 
-def _check_handedness(args, in_dir, out_dir, ref_map, diameter_a, gpus, sep):
+def _check_handedness(args, in_dir, out_dir, reg, diameter_a, gpus, sep):
     """
     TomoGuide's handedness workflow (github.com/TomoGuide -- same idea as
     pytom-match-pick's own FAQ, different comparison metric): run matching
@@ -476,8 +486,7 @@ def _check_handedness(args, in_dir, out_dir, ref_map, diameter_a, gpus, sep):
         print(f'-- {label} template --')
         sub_out = check_dir / label
         template_path, mask_path = _prepare_template_and_mask(
-            ref_map, args.particle, diameter_a, actual_apix, sub_out / 'staged',
-            args.sigma, mirror, args.pytom_dir, args.dry_run,
+            reg, args.particle, actual_apix, sub_out / 'staged', mirror, args.dry_run,
         )
 
         pm_ns = argparse.Namespace(
@@ -607,10 +616,6 @@ def add_parser(subparsers):
     filt.add_argument('--include', nargs='+', help='Process only these TS prefixes')
     filt.add_argument('--exclude', nargs='+', help='Exclude these TS prefixes')
 
-    tgt = p.add_argument_group('target resolution')
-    tgt.add_argument('--sigma', type=float, default=1.0,
-                     help='Mask edge fall-off (px); 0.5-1.0 recommended for 10-20 A/px')
-
     hand = p.add_argument_group('handedness check')
     hand.add_argument('--check-handedness', action='store_true',
                       help='Run matching+extraction with BOTH the normal and '
@@ -680,14 +685,31 @@ def run(args):
         sys.exit(1)
 
     reg = _PARTICLES[args.particle]
+
+    # Fail fast (before disk-space/output-dir/bin-selection/resample) if the
+    # registry entries this specific invocation needs aren't there --
+    # --mirror/--check-handedness need the separate 'map_mirror'/
+    # 'mask_mirror' pair (see _prepare_template_and_mask), not the normal one.
+    needed_pairs = [('map', 'mask')]
+    if args.mirror or args.check_handedness:
+        needed_pairs.append(('map_mirror', 'mask_mirror'))
+
+    def _has_pair(v, map_key, mask_key):
+        return v.get(map_key) is not None and Path(v[map_key]).exists() \
+           and v.get(mask_key) is not None and Path(v[mask_key]).exists()
+
+    for map_key, mask_key in needed_pairs:
+        if not _has_pair(reg, map_key, mask_key):
+            available = [k for k, v in _PARTICLES.items()
+                         if all(_has_pair(v, mk, sk) for mk, sk in needed_pairs)]
+            print(f'ERROR: --particle {args.particle} has no pre-made '
+                  f'{map_key}/{mask_key} (needed for '
+                  f'{"--check-handedness" if args.check_handedness else "--mirror" if map_key == "map_mirror" else "this run"}).')
+            print(f'       Available on this system: {", ".join(available) or "(none)"}')
+            print(f'       Add both files to {_REF_DIR}/ to activate this particle.')
+            sys.exit(1)
+
     ref_map = Path(reg['map'])
-    if not ref_map.exists():
-        available = [k for k, v in _PARTICLES.items() if Path(v['map']).exists()]
-        print(f'ERROR: no reference map for --particle {args.particle} '
-              f'(expected {ref_map}).')
-        print(f'       Available on this system: {", ".join(available) or "(none)"}')
-        print(f'       Add the map to {_REF_DIR}/ to activate this particle.')
-        sys.exit(1)
 
     diameter_a = args.particle_diameter or reg['diameter_a']
 
@@ -707,7 +729,7 @@ def run(args):
     print(sep)
 
     if args.check_handedness:
-        _check_handedness(args, in_dir, out_dir, ref_map, diameter_a, gpus, sep)
+        _check_handedness(args, in_dir, out_dir, reg, diameter_a, gpus, sep)
         return
 
     for warn_msg in check_disk_space(out_dir):
@@ -748,30 +770,31 @@ def run(args):
         sample_vol  = staged_dir / f'{prefixes[0]}{_RESAMPLED_SUFFIX}_Vol.mrc'
         print(sep)
 
-    # ── 2-4. Rescale reference + generate matching mask ─────────────────────
+    # ── 2. Stage reference + mask (pre-made, symlinked -- see _PARTICLES) ───
     template_path, mask_path = _prepare_template_and_mask(
-        ref_map, args.particle, diameter_a, actual_apix, staged_dir,
-        args.sigma, args.mirror, args.pytom_dir, args.dry_run,
+        reg, args.particle, actual_apix, staged_dir, args.mirror, args.dry_run,
     )
     print(sep)
 
-    # ── 5. Stage provenance symlinks ────────────────────────────────────────
-    # Keeps the raw reference, the rescaled/inverted template actually
-    # searched with, the mask, and one representative tomogram at the
-    # selected bin all together -- open these side by side in ChimeraX to
-    # sanity-check contrast/handedness before trusting a full batch run.
+    # ── 3. Stage provenance symlinks ────────────────────────────────────────
+    # Keeps the registry reference (identical to template_path unless
+    # --mirror, in which case this is the pre-mirror original), the mask,
+    # and one representative tomogram at the selected bin all together --
+    # open these side by side in ChimeraX to sanity-check contrast/
+    # handedness before trusting a full batch run.
     if not args.dry_run:
         _stage_symlink(staged_dir, ref_map)
         if sample_vol.parent != staged_dir:
             _stage_symlink(staged_dir, sample_vol)
         print(f'Staged (provenance): {staged_dir}/')
-        print(f'  {ref_map.name}  (raw reference, as-is)')
-        print(f'  {template_path.name}  (rescaled + inverted template actually used)')
+        print(f'  {ref_map.name}  (registry reference)')
+        print(f'  {template_path.name}  (template actually used for matching'
+              f'{" -- mirrored" if args.mirror else ", same file as the reference above"})')
         print(f'  {mask_path.name}  (mask)')
         print(f'  {sample_vol.name}  (sample tomogram at this bin)')
         print(sep)
 
-    # ── 6. Delegate to pytom-match's own run() ──────────────────────────────
+    # ── 4. Delegate to pytom-match's own run() ──────────────────────────────
     # Reuses pytom-match's matching + extraction + QC-report pipeline
     # directly rather than reimplementing it -- see module docstring.
     pm_ns = argparse.Namespace(
