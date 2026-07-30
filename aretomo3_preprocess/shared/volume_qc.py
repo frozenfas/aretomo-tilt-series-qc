@@ -273,6 +273,7 @@ def slab_with_picks_b64(
     """
     try:
         import numpy as np
+        import pandas as pd
         import mrcfile
         from matplotlib.figure import Figure
         from matplotlib.patches import Circle
@@ -300,7 +301,11 @@ def slab_with_picks_b64(
                'rlnCenteredCoordinateZAngst', 'rlnTomoTiltSeriesPixelSize'}
     r4_cols = {'rlnCoordinateX', 'rlnCoordinateY', 'rlnCoordinateZ'}
 
-    if r5_cols.issubset(df.columns):
+    if len(df) == 0:
+        # No particles extracted for this tomogram -- still render the plain
+        # slab (n_total/n_shown=0) rather than crashing on .iloc[0] below.
+        x_px = y_px = z_px = pd.Series([], dtype=float)
+    elif r5_cols.issubset(df.columns):
         px_size = float(df['rlnTomoTiltSeriesPixelSize'].iloc[0])
         x_px = df['rlnCenteredCoordinateXAngst'] / px_size + nx / 2
         y_px = df['rlnCenteredCoordinateYAngst'] / px_size + ny / 2
@@ -617,7 +622,11 @@ def slab_picks_data(
                'rlnCenteredCoordinateZAngst', 'rlnTomoTiltSeriesPixelSize'}
     r4_cols = {'rlnCoordinateX', 'rlnCoordinateY', 'rlnCoordinateZ'}
 
-    if r5_cols.issubset(df.columns):
+    if len(df) == 0:
+        # No particles extracted for this tomogram -- still return the
+        # background slab (empty picks) rather than crashing on .iloc[0].
+        x_mrc = y_mrc = z_mrc = np.array([], dtype=float)
+    elif r5_cols.issubset(df.columns):
         px_size = float(df['rlnTomoTiltSeriesPixelSize'].iloc[0])
         x_mrc = (df['rlnCenteredCoordinateXAngst'] / px_size + nx / 2).values
         y_mrc = (df['rlnCenteredCoordinateYAngst'] / px_size + ny / 2).values
@@ -656,8 +665,8 @@ def slab_picks_data(
         'img_nx':     img_nx,
         'img_ny':     img_ny,
         'score_col':  score_col or 'score',
-        'score_min':  float(scores.min()),
-        'score_max':  float(scores.max()),
+        'score_min':  float(scores.min()) if len(scores) else 0.0,
+        'score_max':  float(scores.max()) if len(scores) else 0.0,
         'n_total':    len(scores),
         'has_scores': score_col is not None,
     }

@@ -149,6 +149,10 @@ def _star_to_mod(star_path, job_json_path, mod_dir, sphere_diameter=None):
         data = starfile.read(str(star_path))
     df = data[next(iter(data))] if isinstance(data, dict) else data
 
+    if len(df) == 0:
+        print(f'  {star_path.name}: 0 particles extracted — skipping IMOD conversion')
+        return False
+
     required = {'rlnCenteredCoordinateXAngst', 'rlnCenteredCoordinateYAngst',
                  'rlnCenteredCoordinateZAngst', 'rlnTomoTiltSeriesPixelSize'}
     missing = required - set(df.columns)
