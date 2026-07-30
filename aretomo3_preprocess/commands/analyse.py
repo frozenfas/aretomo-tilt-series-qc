@@ -889,14 +889,14 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
       <button class="nav-btn" id="btn-reload-sel"
               style="font-size:0.82em;background:#37474f;"
               title="Re-fetch ts-select.csv from the same directory as this HTML (requires HTTP server)">
-        &#8635; Reload selection
+        &#8635; Reload ts-select.csv
       </button>
       <input type="file" id="file-sel-input" accept=".csv"
              style="display:none">
       <button class="nav-btn" id="btn-load-csv"
               style="font-size:0.82em;background:#37474f;"
               title="Load any ts-select.csv from your computer (works with file://)">
-        &#128193; Load CSV&#8230;
+        &#128193; Load ts-select.csv&#8230;
       </button>
     </div>
 
@@ -912,7 +912,19 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
         <span class="star" data-val="5">&#9733;</span>
       </span>
       <span id="rating-label">&#8212;</span>
-      <button class="nav-btn" id="btn-export">Export ratings CSV</button>
+      <button class="nav-btn" id="btn-reload-ratings"
+              style="font-size:0.82em;background:#37474f;"
+              title="Re-fetch ts_ratings.csv from the same directory as this HTML (requires HTTP server)">
+        &#8635; Reload ts_ratings.csv
+      </button>
+      <input type="file" id="file-ratings-input" accept=".csv"
+             style="display:none">
+      <button class="nav-btn" id="btn-load-ratings"
+              style="font-size:0.82em;background:#37474f;"
+              title="Load any ts_ratings.csv from your computer (works with file://)">
+        &#128193; Load ts_ratings.csv&#8230;
+      </button>
+      <button class="nav-btn" id="btn-export">&#128190; Export ts_ratings.csv</button>
     </div>
 
     <div id="img-wrap">
@@ -1146,6 +1158,27 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
       if (!file) return;
       const reader = new FileReader();
       reader.onload = e => {{ _applySelectionCSV(e.target.result); }};
+      reader.readAsText(file);
+    }});
+
+    document.getElementById('btn-reload-ratings').addEventListener('click', () => {{
+      fetch('./ts_ratings.csv?_=' + Date.now())
+        .then(r => r.ok ? r.text() : Promise.reject())
+        .then(text => {{ _applyRatingsCSV(text); }})
+        .catch(() => {{ alert('ts_ratings.csv not found in this directory.\\nUse the Load ts_ratings.csv button to browse for the file instead.'); }});
+    }});
+
+    // ── File-picker for ts_ratings.csv (works on file:// protocol) ────────
+    const fileRatingsInput = document.getElementById('file-ratings-input');
+    document.getElementById('btn-load-ratings').addEventListener('click', () => {{
+      fileRatingsInput.value = '';   // allow re-selecting same file
+      fileRatingsInput.click();
+    }});
+    fileRatingsInput.addEventListener('change', () => {{
+      const file = fileRatingsInput.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = e => {{ _applyRatingsCSV(e.target.result); }};
       reader.readAsText(file);
     }});
 
