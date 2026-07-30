@@ -456,6 +456,36 @@ def _setup_cmd2_staging(out_dir: Path, src_in_dir: Path,
         if n_excl:
             print(f'  TS selection: {n_excl} excluded, {len(all_ts)} remaining')
 
+    # ── Drop TS with no .aln to reconstruct from ────────────────────────────
+    # cmd=2 is recon-only: a TS staged without its .aln can never actually be
+    # reconstructed (AreTomo3 reads the existing alignment; it doesn't
+    # recompute one). Staging its .mrc anyway just leaves it sitting there
+    # forever, and the post-run completeness check would flag it as
+    # "incomplete" for a TS that was never eligible in the first place.
+    orig_n      = len(all_ts)
+    all_ts      = [ts for ts in all_ts if (src_in_dir / f'{ts}.aln').exists()]
+    mrc_sources = {ts: mrc_sources[ts] for ts in all_ts}
+    n_no_aln    = orig_n - len(all_ts)
+    if n_no_aln:
+        print(f'  No .aln in {src_in_dir}/: {n_no_aln} TS excluded, '
+              f'{len(all_ts)} remaining')
+
+    # ── Identify stale symlinks from a prior, broader staging pass ─────────
+    # This function only ever ADDS symlinks; a previous run into this same
+    # --output with a wider (or no) --select-ts can leave symlinks for TS
+    # that are no longer in the current selection. AreTomo3 processes
+    # whatever it finds via -InPrefix regardless of what this wrapper thinks
+    # is selected, so those stale TS would otherwise still get reconstructed
+    # -- and the post-run completeness check, which only checks the CURRENT
+    # selection, would never notice either way.
+    stale_ts = []
+    if staging_dir.is_dir():
+        staged_mrc = {
+            p.stem for p in staging_dir.glob('ts-*.mrc')
+            if not (p.stem.endswith('_EVN') or p.stem.endswith('_ODD'))
+        }
+        stale_ts = sorted(staged_mrc - set(all_ts))
+
     # ── Build lists of links to create ────────────────────────────────────
     to_link_aln = []
     for ts_name in all_ts:
@@ -501,7 +531,7 @@ def _setup_cmd2_staging(out_dir: Path, src_in_dir: Path,
                 to_link_odd.append((ts_name, odd_src.resolve()))
 
     nothing_to_do = not any([to_link_aln, to_link_mrc, to_link_tlt, to_link_ctf,
-                              to_link_evn, to_link_odd])
+                              to_link_evn, to_link_odd, stale_ts])
     if nothing_to_do:
         print(f'  Output dir {staging_dir}/ already populated — skipping symlink creation.')
         return staging_dir
@@ -548,11 +578,31 @@ def _setup_cmd2_staging(out_dir: Path, src_in_dir: Path,
         print(f'    {to_link_ctf[0][0]}_CTF.txt  →  {to_link_ctf[0][1]}')
         if len(to_link_ctf) > 1:
             print(f'    ... ({len(to_link_ctf) - 1} more _CTF.txt)')
+    if stale_ts:
+        print(f'  {prefix}Removing stale : {len(stale_ts)} TS no longer selected')
+        print(f'    {stale_ts[0]}')
+        if len(stale_ts) > 1:
+            print(f'    ... ({len(stale_ts) - 1} more)')
     print(sep)
     print()
 
     if dry_run:
         return staging_dir
+
+    # Remove stale symlinks left by a prior, broader staging pass. Never
+    # touch the copied .aln (user-editable, per this function's docstring)
+    # -- with its .mrc symlink gone, AreTomo3 simply has nothing to
+    # reconstruct for that TS, which is all that's needed.
+    for ts_name in stale_ts:
+        for suffix in ('.mrc', '_EVN.mrc', '_ODD.mrc', '_TLT.txt', '_CTF.txt'):
+            p = staging_dir / f'{ts_name}{suffix}'
+            if p.is_symlink():
+                p.unlink()
+        stale_aln = staging_dir / f'{ts_name}.aln'
+        if stale_aln.exists():
+            print(f'    NOTE: {stale_aln} left in place (copied file, not '
+                  f'auto-deleted) — {ts_name} will not be reprocessed since '
+                  f'its .mrc symlink was removed.')
 
     all_ops = (
         [(ts, src, f'{ts}.aln',     'copy') for ts, src in to_link_aln] +
@@ -1193,12 +1243,17 @@ def _validate(args) -> tuple:
     _effective_skips = _effective_in_skips(args.in_skips)
     _dropped_ts_skips = [s for s in (args.in_skips or [])
                          if s and s.startswith('ts-')]
-    if _dropped_ts_skips and args.cmd != 2:
+    if _dropped_ts_skips:
+        # True for every --cmd today: only file-type patterns (_CTF/_Vol)
+        # are passed to AreTomo3's -InSkips. cmd=0/1 have no other exclusion
+        # mechanism at all; cmd=2 staging accepts an in_skips parameter but
+        # doesn't currently act on it either (_setup_cmd2_staging filters
+        # only by --select-ts) -- so this is not cmd-specific.
         warnings.append(
             f'--in-skips {_dropped_ts_skips} — TS-name patterns have no '
-            f'effect for --cmd {args.cmd} (no exclusion mechanism exists '
-            f'for direct/mdoc-mode input; only file-type patterns like '
-            f'_CTF/_Vol are passed to -InSkips). These TS will be processed.'
+            f'effect for --cmd {args.cmd} (only file-type patterns like '
+            f'_CTF/_Vol are passed to -InSkips; use --select-ts to exclude '
+            f'specific TS for --cmd 2). These TS will be processed.'
         )
     in_dir, pattern, mdoc_files = _find_input_files(
         args.in_prefix, args.in_suffix, _effective_skips)
