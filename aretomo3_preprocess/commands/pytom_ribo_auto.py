@@ -28,19 +28,22 @@ What it automates that `pytom-match` normally requires by hand
      --random-phase-correction --half-precision --angular-search 10
      --high-pass 400 --relion5-compat --imod --analyse.
 
-Only 70S has a bundled reference/mask pair on this system right now
+Only 70S has bundled reference/mask pairs on this system right now
 ---------------------------------------------------------------------
-  /opt/data/pytom/SC_job035_run_it120_class001_10.00A.mrc (reference)
-  /opt/data/pytom/SC_job035_run_it120_class001_10.00A_MASK.mrc (mask)
-  /opt/data/pytom/SC_job035_run_it120_class001_10.00A_mirror.mrc (map_mirror)
-  /opt/data/pytom/SC_job035_run_it120_class001_10.00A_mirror_MASK.mrc (mask_mirror)
-The mirror pair was built with pytom_create_template.py --mirror (same
-tool as the originals) from the same source density, and the mirror mask
-was built independently in RELION from the resulting mirrored,
-non-inverted volume -- so mask and template are co-registered with each
-other, not just each mirrored separately (see _prepare_template_and_mask
-for why that distinction matters). Add a 'map'/'mask' pair for 50S/30S/80S
-to _PARTICLES to activate those choices; until then they fail with a
+Two candidate 70S references, at two different fixed target_apix, for
+comparing against each other (e.g. in a parameter screen):
+  '70S'  -- SC_job035_run_it120_class001, a subtomogram average, 10.0 A/px
+  '8b0x' -- PDB 8B0X via ChimeraX molmap (native 4.0 A/px), 7.5 A/px
+
+Each has a full mirror pair too (map_mirror/mask_mirror), built with
+pytom_create_template.py --mirror (same tool as the originals) from the
+same source density, with the mirror mask built independently in RELION
+from the resulting mirrored, non-inverted volume -- so mask and template
+are co-registered with each other, not just each mirrored separately
+(see _prepare_template_and_mask for why that distinction matters).
+
+Add a 'map'/'mask' pair (with a 'target_apix') for 50S/30S/80S to
+_PARTICLES to activate those choices; until then they fail with a
 clear "no pre-made reference/mask" error rather than silently using the
 wrong particle.
 
@@ -87,14 +90,17 @@ _IMOD_DIR   = '/opt/IMOD'
 _BINVOL_BIN = f'{_IMOD_DIR}/bin/binvol'
 
 # Target tomogram voxel size -- not exposed as a CLI flag (minimize options
-# for this "auto" tool): 10.0 A/px matches this codebase's other validated
-# ribosome runs. Coarser than map-70S.mrc's native 9.06 A/px is required --
-# pytom_create_template.py (>=0.13.2) refuses to upsample past a
-# reference's native resolution.
-_TARGET_APIX = 10.0
+# for this "auto" tool). Per-particle (_PARTICLES[x]['target_apix']), not
+# global: different registry entries can be prepared at different fixed
+# resolutions (e.g. while screening 10.0 A/px against a finer 7.5 A/px
+# reference), each still a single hardcoded value with no from-scratch
+# regeneration -- see the 'map'/'mask' comment below for why that's safe.
+# Bounded below by whatever the source density's own native resolution
+# is -- pytom_create_template.py (>=0.13.2) refuses to upsample past it.
+_DEFAULT_TARGET_APIX = 10.0
 
-# How far an existing --at-bin reconstruction is allowed to sit from
-# _TARGET_APIX before we resample instead of just using it as-is.
+# How far an existing --at-bin reconstruction is allowed to sit from a
+# particle's target_apix before we resample instead of just using it as-is.
 _RESAMPLE_TOL_PCT = 5.0
 
 _REF_DIR = Path('/opt/data/pytom')
@@ -104,42 +110,57 @@ _REF_DIR = Path('/opt/data/pytom')
 # to pytom_match_template.py/pytom_extract_candidates.py) -- see module
 # docstring re: these being estimates.
 #
-# WHY 'map'/'mask' are precreated, not generated per run: _TARGET_APIX is
-# a single hardcoded value (10.0 A/px), not a per-tomogram parameter --
-# every run for a given particle needs the reference/mask at that exact
-# same voxel size, so regenerating them via pytom_create_template.py/
+# target_apix: fixed voxel size this entry's map/mask were built at --
+# NOT a per-tomogram parameter, one value per registry entry. Every run
+# for a given particle needs the reference/mask at that exact same voxel
+# size, so regenerating them via pytom_create_template.py/
 # pytom_create_mask.py on every invocation would recompute the identical
 # output every time. Precreating them once and reusing directly (symlink,
 # no processing) is strictly equivalent output for less work; there is no
 # case where "regenerate every run" would produce a different result,
-# since the target never varies. This only breaks if _TARGET_APIX itself
-# is ever changed -- then map/mask (and any map_mirror/mask_mirror) need
-# rebuilding at the new value before use.
+# since the target never varies for a given entry. This only breaks if an
+# entry's target_apix is ever changed after the fact -- then its map/mask
+# (and any map_mirror/mask_mirror) need rebuilding at the new value first.
 #
 # 'map'/'mask' are both REQUIRED to already exist, already inverted
-# (dark-particle convention), and already at the 10.0 A/px target -- they
-# are used directly as pytom_match_template.py's input, with NO processing
+# (dark-particle convention), and already at target_apix -- they are used
+# directly as pytom_match_template.py's input, with NO processing
 # (rescale/invert/mirror/recenter) ever applied here.
 #
-# 'map_mirror'/'mask_mirror' (optional, absent for every particle right
-# now): a SEPARATE, independently precreated pair for --mirror/
-# --check-handedness -- same reasoning (one target voxel size, so one
-# precreated pair covers every future mirror run for this particle), plus
-# there is no runtime mirror transform at all (see
-# _prepare_template_and_mask for why: mirroring one file without the other
-# risks misaligning them, worse than doing nothing).
+# 'map_mirror'/'mask_mirror' (optional, absent unless noted): a SEPARATE,
+# independently precreated pair for --mirror/--check-handedness -- same
+# reasoning (one target voxel size, so one precreated pair covers every
+# future mirror run for this particle), plus there is no runtime mirror
+# transform at all (see _prepare_template_and_mask for why: mirroring one
+# file without the other risks misaligning them, worse than doing nothing).
+#
+# Multiple entries can point at the same physical particle (e.g. '70S' vs
+# '8b0x' are both full 70S ribosome references, from different sources/at
+# different resolutions) -- this is deliberate, not a naming accident: it's
+# how a parameter screen compares two candidate references/resolutions
+# without either one overwriting the other's registry slot.
 _PARTICLES = {
     '70S': {'map': _REF_DIR / 'SC_job035_run_it120_class001_10.00A.mrc',
             'mask': _REF_DIR / 'SC_job035_run_it120_class001_10.00A_MASK.mrc',
             'map_mirror': _REF_DIR / 'SC_job035_run_it120_class001_10.00A_mirror.mrc',
             'mask_mirror': _REF_DIR / 'SC_job035_run_it120_class001_10.00A_mirror_MASK.mrc',
-            'diameter_a': 290.0},
+            'diameter_a': 290.0, 'target_apix': 10.0},
+    # Same physical particle (70S ribosome) as '70S' above, but from PDB
+    # 8B0X via ChimeraX molmap (native 4.0 A/px) rather than the
+    # SC_job035 subtomogram average, and at a finer target resolution --
+    # a second candidate reference/resolution for the parameter screen,
+    # not a replacement for '70S'.
+    '8b0x': {'map': _REF_DIR / '8b0x_7.50A_b96.mrc',
+             'mask': _REF_DIR / '8b0x_7.50A_b96_noninvert_MASK.mrc',
+             'map_mirror': _REF_DIR / '8b0x_7.50A_b96_mirror.mrc',
+             'mask_mirror': _REF_DIR / '8b0x_7.50A_b96_mirror_noninvert_MASK.mrc',
+             'diameter_a': 290.0, 'target_apix': 7.5},
     '50S': {'map': _REF_DIR / 'map-50S.mrc', 'mask': _REF_DIR / 'mask-50S.mrc',
-            'diameter_a': 220.0},
+            'diameter_a': 220.0, 'target_apix': _DEFAULT_TARGET_APIX},
     '30S': {'map': _REF_DIR / 'map-30S.mrc', 'mask': _REF_DIR / 'mask-30S.mrc',
-            'diameter_a': 200.0},
+            'diameter_a': 200.0, 'target_apix': _DEFAULT_TARGET_APIX},
     '80S': {'map': _REF_DIR / 'map-80S.mrc', 'mask': _REF_DIR / 'mask-80S.mrc',
-            'diameter_a': 300.0},
+            'diameter_a': 300.0, 'target_apix': _DEFAULT_TARGET_APIX},
 }
 
 
@@ -477,11 +498,13 @@ def _check_handedness(args, in_dir, out_dir, reg, diameter_a, gpus, sep):
     use, and compare the resulting particle *counts* -- "one will output
     way more particles than the other" for the correct handedness.
     """
+    target_apix = reg['target_apix']
+
     print('Handedness check: normal vs. mirrored template on one tomogram')
     print(sep)
 
     print('Selecting reconstruction bin...')
-    vol_suffix, actual_apix, _sample_vol = _pick_bin_variant(in_dir, _TARGET_APIX)
+    vol_suffix, actual_apix, _sample_vol = _pick_bin_variant(in_dir, target_apix)
     print(sep)
 
     check_dir = out_dir / 'handedness_check'
@@ -493,14 +516,14 @@ def _check_handedness(args, in_dir, out_dir, reg, diameter_a, gpus, sep):
     print(f'Using tomogram: {ts_name}')
     print(sep)
 
-    gap_pct = 100.0 * abs(actual_apix - _TARGET_APIX) / _TARGET_APIX
+    gap_pct = 100.0 * abs(actual_apix - target_apix) / target_apix
     if gap_pct > _RESAMPLE_TOL_PCT:
         vol_suffix = _stage_resampled_tomograms(
             in_dir, check_dir / 'staged_tomo', vol_suffix, [ts_name],
-            _TARGET_APIX, args.dry_run, args.imod_bin_dir,
+            target_apix, args.dry_run, args.imod_bin_dir,
         )
         in_dir      = check_dir / 'staged_tomo'
-        actual_apix = _TARGET_APIX
+        actual_apix = target_apix
         print(sep)
 
     results = {}
@@ -733,6 +756,7 @@ def run(args):
             sys.exit(1)
 
     ref_map = Path(reg['map'])
+    target_apix = reg['target_apix']
 
     diameter_a = args.particle_diameter or reg['diameter_a']
 
@@ -763,7 +787,7 @@ def run(args):
 
     # ── 1. Pick the tomogram bin closest to the target voxel size ──────────
     print('Selecting reconstruction bin...')
-    vol_suffix, actual_apix, sample_vol = _pick_bin_variant(in_dir, _TARGET_APIX)
+    vol_suffix, actual_apix, sample_vol = _pick_bin_variant(in_dir, target_apix)
     print(sep)
 
     # ── 1b. Resample to the target voxel size if no close-enough bin exists ─
@@ -773,7 +797,7 @@ def run(args):
     # the closest bin is more than _RESAMPLE_TOL_PCT off, resample every
     # selected tomogram to the target ourselves rather than searching at a
     # mismatched or merely-close voxel size.
-    gap_pct = 100.0 * abs(actual_apix - _TARGET_APIX) / _TARGET_APIX
+    gap_pct = 100.0 * abs(actual_apix - target_apix) / target_apix
     if gap_pct > _RESAMPLE_TOL_PCT:
         prefixes = [p for p, _ in _find_volumes(in_dir, vol_suffix)]
         prefixes = filter_by_include_exclude(prefixes, args.include, args.exclude)
@@ -785,11 +809,11 @@ def run(args):
             sys.exit(1)
 
         vol_suffix = _stage_resampled_tomograms(
-            in_dir, staged_dir, vol_suffix, prefixes, _TARGET_APIX, args.dry_run,
+            in_dir, staged_dir, vol_suffix, prefixes, target_apix, args.dry_run,
             args.imod_bin_dir,
         )
         in_dir      = staged_dir
-        actual_apix = _TARGET_APIX
+        actual_apix = target_apix
         sample_vol  = staged_dir / f'{prefixes[0]}{_RESAMPLED_SUFFIX}_Vol.mrc'
         print(sep)
 
@@ -866,7 +890,7 @@ def run(args):
             'args':         args_to_dict(args),
             'particle':     args.particle,
             'diameter_a':   diameter_a,
-            'target_apix':  _TARGET_APIX,
+            'target_apix':  target_apix,
             'actual_apix':  actual_apix,
             'vol_suffix':   vol_suffix,
             'template':     str(template_path),
