@@ -7,6 +7,13 @@ template-matching -> extraction -> QC-report chain for a bundled ribosome
 reference (70S/50S/30S/80S), with no template/mask/voxel-size bookkeeping
 left to the user.
 
+Every fixed value in this file (the _PARTICLES registry's reference/mask
+paths and target_apix, the matching flags in _matching_defaults()) is
+hardcoded for THIS lab's (Connell Lab) production conventions and
+reference maps -- not a universal default. Adapt _PARTICLES and
+_matching_defaults() before reusing this command against a different
+lab's references, microscope, or matching conventions.
+
 What it automates that `pytom-match` normally requires by hand
 --------------------------------------------------------------
   1. Picks whichever existing `run-aretomo3 --cmd 2` reconstruction (plain
@@ -79,7 +86,9 @@ from pathlib import Path
 from aretomo3_preprocess.commands import pytom_match as _pm
 from aretomo3_preprocess.shared.output_guard import check_output_dir, check_disk_space
 from aretomo3_preprocess.shared.project_json import update_section, args_to_dict
-from aretomo3_preprocess.shared.project_state import resolve_selected_ts
+from aretomo3_preprocess.shared.project_state import (
+    resolve_selected_ts, record_handedness,
+)
 from aretomo3_preprocess.shared.discovery import (
     print_cmd as _print_cmd,
     find_volumes as _find_volumes,
@@ -441,10 +450,22 @@ def _matching_defaults():
     production ribosome runs -- see external_pytom2.py on the
     BI38262-12-RsmA-cryoET project (a RELION5 External job, not this
     codebase, but the same pytom-match-pick install/convention).
+
+    volume_split=[1,1,1] (no split) measured ~28% faster than [2,2,1] for
+    the '70S' registry entry (10.0 A/px, 666x938x293 box): 68m45s vs
+    95m44s search time, well within the 16 GB card's memory (12107 MiB
+    used unsplit, confirmed stable). volume-split exists purely to keep
+    the search volume within GPU memory -- splitting when it isn't needed
+    just repeats the full angular search once per sub-volume for no
+    benefit. BUT this is resolution-dependent: the '8b0x' entry (7.5 A/px,
+    ~2.4x the voxel count) is projected at ~28 GB unsplit -- would NOT fit
+    on this card. volume_split isn't yet a per-particle registry field
+    (like target_apix is), so if/when 8b0x is actually used for a real
+    run, this needs revisiting before assuming [1,1,1] is safe there too.
     """
     return dict(
         angular_search='10', non_spherical_mask=True, z_axis_rotational_symmetry=1,
-        volume_split=[2, 2, 1], search_x=None, search_y=None, search_z=None,
+        volume_split=[1, 1, 1], search_x=None, search_y=None, search_z=None,
         tomogram_ctf_model='phase-flip', random_phase_correction=True,
         rng_seed=69, half_precision=True, per_tilt_weighting=True,
         low_pass=10.0, high_pass=400.0, spectral_whitening=False,
@@ -453,26 +474,53 @@ def _matching_defaults():
     )
 
 
-def _resolve_default_ts(in_dir, vol_suffix, select_ts, include, exclude, handedness_ts):
-    """Pick the tomogram to use for --check-handedness."""
+_HANDEDNESS_SEED = 42  # fixed, for a reproducible TS sample across re-runs
+
+
+def _resolve_handedness_ts_list(in_dir, vol_suffix, select_ts, include, exclude,
+                                handedness_ts, n_ts):
+    """
+    Pick the tomogram(s) to use for --check-handedness -- from the same
+    "good ones" (selected_ts) pool pytom_param_screen.py's pick_ts() draws
+    from, not just whatever sorts first. TomoGuide recommends 3-4
+    tomograms (a single one risks a fluke result), so the default is a
+    seeded random sample of n_ts (default 4) from that pool; --handedness-ts
+    pins it to one or more specific TS instead (manual override -- these
+    are trusted as given and NOT restricted to the selected_ts pool, since
+    the whole point is picking exactly what the user wants).
+    """
     pairs = _find_volumes(in_dir, vol_suffix)
-    prefixes = [p for p, _ in pairs]
-    prefixes = filter_by_include_exclude(prefixes, include, exclude)
+    all_prefixes = filter_by_include_exclude([p for p, _ in pairs], include, exclude)
+
+    if handedness_ts:
+        missing = [ts for ts in handedness_ts if ts not in all_prefixes]
+        if missing:
+            print(f'ERROR: --handedness-ts {missing} not found in {in_dir} '
+                  f'(after --include/--exclude filtering)')
+            sys.exit(1)
+        print(f'Using {len(handedness_ts)} manually-specified TS: {list(handedness_ts)}')
+        return list(handedness_ts)
+
+    prefixes = all_prefixes
     selected_ts = resolve_selected_ts(select_ts)
     if selected_ts is not None:
         prefixes = [p for p in prefixes if p in selected_ts]
-
-    if handedness_ts:
-        if handedness_ts not in prefixes:
-            print(f'ERROR: --handedness-ts {handedness_ts} not found in {in_dir} '
-                  f'(after --select-ts/--include/--exclude filtering)')
-            sys.exit(1)
-        return handedness_ts
+    else:
+        print('WARNING: --select-ts not given -- sampling from ALL discovered '
+              'tomograms, not just the ones marked selected=1 in ts_select.csv. '
+              'Pass --select-ts <path to ts_select.csv> to restrict the sample '
+              'to vetted TS (recommended).')
 
     if not prefixes:
         print(f'ERROR: no tomograms found in {in_dir} to check')
         sys.exit(1)
-    return prefixes[0]
+
+    import random
+    n = min(n_ts, len(prefixes))
+    chosen = random.Random(_HANDEDNESS_SEED).sample(prefixes, n)
+    print(f'Selected {n} TS from {len(prefixes)} candidates '
+          f'(seed={_HANDEDNESS_SEED}): {chosen}')
+    return chosen
 
 
 def _particle_count(star_path):
@@ -493,14 +541,17 @@ def _check_handedness(args, in_dir, out_dir, reg, diameter_a, gpus, sep):
     """
     TomoGuide's handedness workflow (github.com/TomoGuide -- same idea as
     pytom-match-pick's own FAQ, different comparison metric): run matching
-    + extraction with both a normal and a mirrored template on one
-    tomogram, using the SAME automatic cutoff estimation a real run would
-    use, and compare the resulting particle *counts* -- "one will output
-    way more particles than the other" for the correct handedness.
+    + extraction with both a normal and a mirrored template on several
+    tomograms (TomoGuide: "3-4 tomograms that contain ribosomes"; a single
+    one risks a fluke result), using the SAME automatic cutoff estimation
+    a real run would use, and compare the resulting particle *counts* --
+    "one will output way more particles than the other" for the correct
+    handedness. Jobs (one per TS x mirror-state) are spread across all
+    GPUs in `gpus`, one worker thread per GPU.
     """
     target_apix = reg['target_apix']
 
-    print('Handedness check: normal vs. mirrored template on one tomogram')
+    print('Handedness check: normal vs. mirrored template')
     print(sep)
 
     print('Selecting reconstruction bin...')
@@ -509,38 +560,40 @@ def _check_handedness(args, in_dir, out_dir, reg, diameter_a, gpus, sep):
 
     check_dir = out_dir / 'handedness_check'
 
-    ts_name = _resolve_default_ts(
+    ts_list = _resolve_handedness_ts_list(
         in_dir, vol_suffix, args.select_ts, args.include, args.exclude,
-        args.handedness_ts,
+        args.handedness_ts, args.handedness_n_ts,
     )
-    print(f'Using tomogram: {ts_name}')
     print(sep)
 
     gap_pct = 100.0 * abs(actual_apix - target_apix) / target_apix
     if gap_pct > _RESAMPLE_TOL_PCT:
         vol_suffix = _stage_resampled_tomograms(
-            in_dir, check_dir / 'staged_tomo', vol_suffix, [ts_name],
+            in_dir, check_dir / 'staged_tomo', vol_suffix, ts_list,
             target_apix, args.dry_run, args.imod_bin_dir,
         )
         in_dir      = check_dir / 'staged_tomo'
         actual_apix = target_apix
         print(sep)
 
-    results = {}
-
+    # Template/mask depend only on mirror-state, not on which TS -- prepare
+    # each pair once and reuse it for every TS job at that mirror-state.
+    staged = {}
     for mirror, label in ((False, 'normal'), (True, 'mirrored')):
-        print(f'-- {label} template --')
-        sub_out = check_dir / label
-        template_path, mask_path = _prepare_template_and_mask(
-            reg, args.particle, actual_apix, sub_out / 'staged', mirror, args.dry_run,
+        staged[label] = _prepare_template_and_mask(
+            reg, args.particle, actual_apix, check_dir / label / 'staged',
+            mirror, args.dry_run,
         )
+    print(sep)
 
+    def _run_one(ts_name, label, template_path, mask_path, gpu):
+        sub_out = check_dir / label / ts_name
         pm_ns = argparse.Namespace(
             input=str(in_dir), vol_suffix=vol_suffix,
             select_ts=None, include=[ts_name], exclude=None,
             bmask_dir=None, bmask_suffix='', dose=None,
             template=str(template_path), mask=str(mask_path),
-            voxel_size=actual_apix, gpu=gpus, particle_diameter=diameter_a,
+            voxel_size=actual_apix, gpu=[gpu], particle_diameter=diameter_a,
             **_matching_defaults(),
             analyse=False, analyse_thickness=300.0, analyse_output=None,
             extract=True, n_particles=args.handedness_particles,
@@ -551,33 +604,109 @@ def _check_handedness(args, in_dir, out_dir, reg, diameter_a, gpus, sep):
             pytom_dir=args.pytom_dir, dry_run=args.dry_run,
         )
         _pm.run(pm_ns)
+        if args.dry_run:
+            return None
+        star_files = sorted((sub_out / ts_name).glob('*_particles.star'))
+        return _particle_count(star_files[0]) if star_files else None
 
-        if not args.dry_run:
-            star_files = sorted((sub_out / ts_name).glob('*_particles.star'))
-            if star_files:
-                results[label] = _particle_count(star_files[0])
+    jobs = [(ts_name, label) for ts_name in ts_list for label in ('normal', 'mirrored')]
+    print(f'Running {len(jobs)} matching jobs ({len(ts_list)} TS x 2 mirror-states) '
+          f'across {len(gpus)} GPU(s): {gpus}')
+    print(sep)
+
+    results = {ts_name: {} for ts_name in ts_list}
+    if len(gpus) <= 1 or args.dry_run:
+        # No point threading a single GPU (or a dry-run, which does no real
+        # GPU work) -- run sequentially, same result, simpler to read.
+        gpu = gpus[0]
+        for ts_name, label in jobs:
+            template_path, mask_path = staged[label]
+            n = _run_one(ts_name, label, template_path, mask_path, gpu)
+            results[ts_name][label] = n
+            print(sep)
+    else:
+        import queue
+        import threading
+
+        job_q = queue.Queue()
+        for job in jobs:
+            job_q.put(job)
+        results_lock = threading.Lock()
+
+        def _worker(gpu):
+            while True:
+                try:
+                    ts_name, label = job_q.get_nowait()
+                except queue.Empty:
+                    return
+                template_path, mask_path = staged[label]
+                print(f'[gpu{gpu}] starting {ts_name} / {label}')
+                n = _run_one(ts_name, label, template_path, mask_path, gpu)
+                with results_lock:
+                    results[ts_name][label] = n
+                print(f'[gpu{gpu}] done {ts_name} / {label}: {n} particles')
+                job_q.task_done()
+
+        threads = [threading.Thread(target=_worker, args=(gpu,)) for gpu in gpus]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
         print(sep)
 
     if args.dry_run:
         print('[dry-run: skipping particle-count comparison]')
         return
 
-    normal_n, mirror_n = results.get('normal'), results.get('mirrored')
-    if normal_n is not None and mirror_n is not None:
-        print(f'Particles extracted (auto cutoff, capped at {args.handedness_particles}): '
-              f'normal={normal_n}  mirrored={mirror_n}')
-        if mirror_n > normal_n:
-            print('-> mirrored template extracted more particles: '
-                  're-run the full batch with --mirror')
-        elif normal_n > mirror_n:
-            print('-> normal template extracted more particles: no --mirror needed')
-        else:
-            print('-> tied -- inconclusive, inspect both QC/star files by hand')
+    print(f'Particles extracted (auto cutoff, capped at {args.handedness_particles}):')
+    votes = []
+    for ts_name in ts_list:
+        normal_n, mirror_n = results[ts_name].get('normal'), results[ts_name].get('mirrored')
+        if normal_n is None or mirror_n is None:
+            print(f'  {ts_name:12s}  normal=?  mirrored=?  '
+                  f'(could not read one or both star files)')
+            continue
+        winner = 'mirrored' if mirror_n > normal_n else 'normal' if normal_n > mirror_n else 'tie'
+        votes.append(winner)
+        print(f'  {ts_name:12s}  normal={normal_n:5d}  mirrored={mirror_n:5d}  -> {winner}')
+
+    if not votes:
+        print('WARNING: no usable results from any TS (starfile not installed? '
+              'inspect the star files by hand under '
+              f'{check_dir}/{{normal,mirrored}}/<ts>/)')
+        return
+
+    n_mirror = votes.count('mirrored')
+    n_normal = votes.count('normal')
+    n_tie    = votes.count('tie')
+    print(sep)
+    print(f'Votes: mirrored={n_mirror}  normal={n_normal}  tie={n_tie}  '
+          f'(of {len(votes)} usable TS)')
+
+    mirror_recommended = None
+    if n_mirror > n_normal:
+        mirror_recommended = True
+        print('-> majority: mirrored template wins -- re-run the full batch with --mirror')
+        print('   Note: this only mirrors the picking TEMPLATE -- the raw '
+              'reconstructed tomograms themselves are untouched, and their '
+              'physical handedness is opposite to the reference map\'s '
+              'true/canonical handedness. You can visually sanity-check this '
+              'determination later: the raw tomogram density and a '
+              'correctly-handed subtomogram average should look like mirror '
+              'images of each other, not the same handedness.')
+    elif n_normal > n_mirror:
+        mirror_recommended = False
+        print('-> majority: normal template wins -- no --mirror needed')
     else:
-        print('WARNING: could not read particle counts from one or both results '
-              '(starfile not installed?) -- inspect the star files by hand:')
-        print(f'  {check_dir}/normal/{ts_name}/*_particles.star')
-        print(f'  {check_dir}/mirrored/{ts_name}/*_particles.star')
+        print('-> tied vote -- inconclusive, inspect QC/star files by hand before deciding')
+
+    if mirror_recommended is not None:
+        record_handedness(
+            mirror=mirror_recommended, particle=args.particle,
+            per_ts={ts_name: results[ts_name] for ts_name in ts_list},
+            source='pytom-ribo-auto --check-handedness',
+        )
+        print('Recorded in project.json [handedness] for future reference.')
 
 
 def _reextract(args, out_dir, diameter_a, sep):
@@ -665,15 +794,23 @@ def add_parser(subparsers):
     hand = p.add_argument_group('handedness check')
     hand.add_argument('--check-handedness', action='store_true',
                       help='Run matching+extraction with BOTH the normal and '
-                           'mirrored template on a single tomogram, report which '
-                           'extracts more particles under the same auto-estimated '
-                           'cutoff a real run would use, and exit -- does not run '
-                           'the full batch. Follows TomoGuide\'s handedness workflow '
-                           '("one will output way more particles than the other"). '
-                           'Re-run with --mirror if the mirrored version wins.')
-    hand.add_argument('--handedness-ts', default=None, metavar='TS_NAME',
-                      help='Which tomogram to use for --check-handedness '
-                           '(default: first one found/selected)')
+                           'mirrored template on --handedness-n-ts tomograms, '
+                           'report which wins the majority vote of particles '
+                           'extracted under the same auto-estimated cutoff a real '
+                           'run would use, and exit -- does not run the full '
+                           'batch. Follows TomoGuide\'s handedness workflow '
+                           '("one will output way more particles than the other"), '
+                           'including its "3-4 tomograms" sample-size recommendation '
+                           '(a single TS risks a fluke result). '
+                           'Re-run with --mirror if mirrored wins.')
+    hand.add_argument('--handedness-ts', nargs='+', default=None, metavar='TS_NAME',
+                      help='Pin --check-handedness to one or more specific '
+                           'tomograms instead of a --handedness-n-ts sample '
+                           '(manual override -- trusted as given, not restricted '
+                           'to the selected_ts pool)')
+    hand.add_argument('--handedness-n-ts', type=int, default=4, metavar='N',
+                      help='Number of tomograms to check (seeded random sample '
+                           'from the selected-TS pool). TomoGuide recommends 3-4.')
     hand.add_argument('--handedness-particles', type=int, default=1000,
                       help='Cap on particles extracted per template for the '
                            'comparison (auto-estimated cutoff still applies, same '

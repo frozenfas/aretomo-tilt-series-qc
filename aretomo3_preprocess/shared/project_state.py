@@ -130,6 +130,34 @@ def resolve_reference_apix() -> tuple:
     return None, None
 
 
+def get_handedness() -> Optional[dict]:
+    """
+    Return the recorded physical (volume) handedness determination, if
+    `pytom-ribo-auto --check-handedness` has confirmed one for this
+    project -- {'mirror': bool, 'particle', 'per_ts', 'timestamp',
+    'source'} -- or None if it hasn't been run yet.
+
+    This is the *physical/volume* handedness (whether the reconstructed
+    tomogram is a mirror-image of reality, corrected via --mirror on the
+    picking template) -- unrelated to RELION's separate "defocus
+    handedness" concept (whether defocus increases/decreases with Z).
+    """
+    return _load().get('handedness') or None
+
+
+def record_handedness(mirror: bool, particle: str, per_ts: dict, source: str) -> None:
+    """Record a --check-handedness determination so later pytom-ribo-auto
+    runs (or a human) don't need to re-derive it from scratch. See
+    get_handedness()."""
+    update_section('handedness', {
+        'timestamp': datetime.datetime.now().isoformat(timespec='seconds'),
+        'mirror':    mirror,
+        'particle':  particle,
+        'per_ts':    per_ts,
+        'source':    source,
+    })
+
+
 def get_voltage() -> Optional[float]:
     """
     Return the most common accelerating voltage (kV) from mdoc_data.per_ts,

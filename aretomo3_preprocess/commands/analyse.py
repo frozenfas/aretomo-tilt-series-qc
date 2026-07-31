@@ -48,7 +48,7 @@ from aretomo3_preprocess.shared.colours import (
 # ─────────────────────────────────────────────────────────────────────────────
 
 def plot_tilt_series(ts_name, data, threshold, out_path, global_ranges,
-                     prev_data=None, vol_path=None):
+                     prev_data=None, vol_path=None, position_name=None):
     frames      = data['frames']
     W, H        = data['width'], data['height']
     dark_frames = data['dark_frames']
@@ -117,8 +117,9 @@ def plot_tilt_series(ts_name, data, threshold, out_path, global_ranges,
         ax4 = fig.add_subplot(gs[1, 0])   # defocus      (lower-left)
         ax3 = fig.add_subplot(gs[1, 1])   # tilt coverage (lower-right)
 
+    _pos_part = f'   |   {position_name}' if position_name else ''
     fig.suptitle(
-        f'{ts_name}   |   {len(frames)} aligned frames   |   '
+        f'{ts_name}{_pos_part}   |   {len(frames)} aligned frames   |   '
         f'{len(dark_frames)} dark frames   |   '
         f'{n_bad} frame(s) below {threshold}% overlap threshold',
         fontsize=12, fontweight='bold',
@@ -640,8 +641,27 @@ def plot_global_summary(all_ts, threshold, global_ranges, out_path, prev_ts=None
 # HTML viewer
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _range_slider_html(key, label, unit, lo, hi, step, decimals):
+    """One dual-thumb (min/max) filter slider block for the analyse HTML
+    report -- two overlaid native <input type=range> elements (the
+    standard dependency-free two-thumb-slider trick), clamped against
+    each other in JS so min can never cross max."""
+    fmt = f'{{:.{decimals}f}}'
+    lo_s, hi_s = fmt.format(lo), fmt.format(hi)
+    return f'''
+      <div class="filt">
+        <label>{label}: <span id="fv-{key}-min">{lo_s}</span>&#8211;<span id="fv-{key}-max">{hi_s}</span>{unit}</label>
+        <div class="range-slider">
+          <input type="range" class="range-min" id="sl-{key}-min"
+                 min="{lo_s}" max="{hi_s}" step="{step}" value="{lo_s}">
+          <input type="range" class="range-max" id="sl-{key}-max"
+                 min="{lo_s}" max="{hi_s}" step="{step}" value="{hi_s}">
+        </div>
+      </div>'''
+
+
 def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
-              ratings=None):
+              ratings=None, run_label=None):
     """
     Generate the HTML report.
 
@@ -682,12 +702,52 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
     )
     images_js      = json.dumps([e['png'] for e in ts_entries])
     titles_js      = json.dumps([
-        f'{e["name"]}  —  {e["n_frames"]} aligned frames  |  '
+        f'{e["name"]}'
+        f'{"  (" + e["position_name"] + ")" if e.get("position_name") else ""}'
+        f'  —  {e["n_frames"]} aligned frames  |  '
         f'{e["n_dark"]} dark frames  |  {e["n_bad"]} below {threshold}% threshold'
         for e in ts_entries
     ])
     selected_js    = json.dumps(selected_flags)
+    overlap_vals   = [e.get('mean_overlap') for e in ts_entries]
+    coverage_vals  = [e.get('n_frames_retained') for e in ts_entries]
+    defocus_vals   = [e.get('avg_defocus') for e in ts_entries]
+    thickness_vals = [e.get('thickness_nm') for e in ts_entries]
+    tilt_axis_vals = [e.get('tilt_axis_deg') for e in ts_entries]
+    overlap_js     = json.dumps(overlap_vals)
+    coverage_js    = json.dumps(coverage_vals)
+    defocus_js     = json.dumps(defocus_vals)
+    thickness_js   = json.dumps(thickness_vals)
+    tilt_axis_js   = json.dumps(tilt_axis_vals)
+    run_label_js   = json.dumps(run_label or 'analyse')
     n              = len(ts_entries)
+
+    # ── Filter-slider bounds (from real, non-None per-TS values only --
+    #    synthetic [Summary]/[Lamella]/stage entries contribute None and
+    #    are excluded from range computation, but always stay visible in
+    #    the filtered list -- see rebuildVis()). 2nd/98th percentile, not
+    #    raw min/max (same convention as the global defocus axis range
+    #    above): a single corrupted outlier TS (e.g. a bad thickness_px
+    #    from a degenerate alignment) shouldn't compress the whole
+    #    slider's usable range down to a sliver -- the outlier TS is just
+    #    excluded once the slider's max sits below it, which is
+    #    informative rather than making the control useless. ──────────────
+    def _bounds(vals, lo_default, hi_default, pad=0.0, clip_zero=True):
+        real = [v for v in vals if v is not None]
+        if not real:
+            return lo_default, hi_default
+        if len(real) < 5:
+            lo, hi = min(real) - pad, max(real) + pad
+        else:
+            lo = float(np.percentile(real, 2)) - pad
+            hi = float(np.percentile(real, 98)) + pad
+        return (max(lo, 0.0) if clip_zero else lo), hi
+
+    ovl_lo,  ovl_hi  = _bounds(overlap_vals,   0.0,  100.0)
+    cov_lo,  cov_hi  = _bounds(coverage_vals,  0.0,   60.0)
+    def_lo,  def_hi  = _bounds(defocus_vals,   0.0,   10.0, pad=0.1)
+    thk_lo,  thk_hi  = _bounds(thickness_vals, 0.0, 1000.0, pad=5.0)
+    axis_lo, axis_hi = _bounds(tilt_axis_vals, -180.0, 180.0, pad=0.5, clip_zero=False)
 
     # ── Gain-check tab content (only when gain_check is provided) ─────────────
     has_gain = gain_check is not None
@@ -868,6 +928,41 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
     .star.on {{ color: #ffc107; }}
     #rating-label {{ font-size: 0.84em; color: #78909c; min-width: 82px; }}
     #btn-export {{ margin-left: auto; padding: 6px 18px; font-size: 0.84em; }}
+
+    /* ── Filter sliders ── */
+    #filter-bar {{
+      display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+      margin-bottom: 10px; width: 100%; max-width: 1380px;
+      background: #1a2733; border-radius: 6px; padding: 8px 14px;
+    }}
+    .filt {{ display: flex; align-items: center; gap: 8px; }}
+    .filt label {{ font-size: 0.82em; color: #b0bec5; white-space: nowrap; }}
+    #filter-count {{ margin-left: auto; font-size: 0.82em; color: #78909c; }}
+
+    /* ── Dual-thumb range slider: two overlaid native <input type=range>,
+       clamped against each other in JS ── */
+    .range-slider {{ position: relative; width: 110px; height: 18px; }}
+    .range-slider input[type=range] {{
+      position: absolute; top: 0; left: 0; width: 100%; margin: 0;
+      -webkit-appearance: none; appearance: none;
+      background: transparent; pointer-events: none;
+    }}
+    .range-slider input[type=range]::-webkit-slider-runnable-track {{
+      height: 3px; background: #37474f; border-radius: 2px;
+    }}
+    .range-slider input[type=range]::-moz-range-track {{
+      height: 3px; background: #37474f; border-radius: 2px;
+    }}
+    .range-slider input[type=range]::-webkit-slider-thumb {{
+      -webkit-appearance: none; pointer-events: auto;
+      width: 13px; height: 13px; border-radius: 50%;
+      background: #29b6f6; cursor: pointer; margin-top: -5px;
+    }}
+    .range-slider input[type=range]::-moz-range-thumb {{
+      pointer-events: auto; border: none;
+      width: 13px; height: 13px; border-radius: 50%;
+      background: #29b6f6; cursor: pointer;
+    }}
   </style>
 </head>
 <body>
@@ -899,6 +994,11 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
               title="Load any ts-select.csv from your computer (works with file://)">
         &#128193; Load ts-select.csv&#8230;
       </button>
+      <button class="nav-btn" id="btn-clear-selection"
+              style="font-size:0.82em;background:#37474f;"
+              title="Mark every TS as selected again, discarding the loaded ts-select.csv exclusions">
+        &#10060; Clear ts-selection
+      </button>
     </div>
 
     <div id="progress"><div id="progress-bar"></div></div>
@@ -926,6 +1026,28 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
         &#128193; Load ts_ratings.csv&#8230;
       </button>
       <button class="nav-btn" id="btn-export">&#128190; Export ts_ratings.csv</button>
+      <button class="nav-btn" id="btn-clear-ratings"
+              style="font-size:0.82em;background:#37474f;"
+              title="Remove every star rating (in-page and saved localStorage)">
+        &#10060; Clear ratings
+      </button>
+    </div>
+
+    <div id="filter-bar">
+      {_range_slider_html('overlap',   'Overlap',   '%',      ovl_lo, ovl_hi, 0.5,  0)}
+      {_range_slider_html('coverage',  'Coverage (frames)', '', cov_lo, cov_hi, 1,  0)}
+      {_range_slider_html('defocus',   'Defocus',   '&micro;m', def_lo, def_hi, 0.05, 2)}
+      {_range_slider_html('thickness', 'Thickness', 'nm',     thk_lo, thk_hi, 1,    0)}
+      {_range_slider_html('rating',    'Rating',    '',       0,      5,      1,    0)}
+      {_range_slider_html('tiltaxis',  'Tilt axis', '&#176;', axis_lo, axis_hi, 0.5, 1)}
+      <button class="nav-btn" id="btn-reset-filters"
+              style="font-size:0.82em;background:#37474f;">Reset filters</button>
+      <button class="nav-btn" id="btn-export-filtered"
+              style="font-size:0.82em;background:#37474f;"
+              title="Save the TS currently passing all filters as a ts-select.csv">
+        &#128190; Export filtered selection
+      </button>
+      <span id="filter-count"></span>
     </div>
 
     <div id="img-wrap">
@@ -942,10 +1064,28 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
     const images        = {images_js};
     const titles        = {titles_js};
     const selectedFlags = {selected_js};
+    const overlapVals   = {overlap_js};
+    const coverageVals  = {coverage_js};
+    const defocusVals   = {defocus_js};
+    const thicknessVals = {thickness_js};
+    const tiltAxisVals  = {tilt_axis_js};
+    const runLabel      = {run_label_js};
     const n             = images.length;
     let   idx           = 0;
     let   showSelOnly   = false;
     let   visIndices    = Array.from({{length: n}}, (_, i) => i);
+
+    // ── Star ratings (declared here, before rebuildVis(), since the rating
+    //    slider filter needs to read `ratings` -- a `let` declared later in
+    //    this same script would throw "before initialization" the moment
+    //    rebuildVis() is first called below) ────────────────────────────────
+    const tsNames        = {ts_names_js};
+    const storageKey     = 'aretomo_ratings_{session_key}';
+    const embeddedRatings = {embedded_ratings_js};
+    // Merge: embedded CSV ratings are the baseline; localStorage overrides
+    // any TS the user has re-rated in this browser session.
+    let   ratings    = Object.assign({{}}, embeddedRatings,
+                           JSON.parse(localStorage.getItem(storageKey) || '{{}}'));
 
     const img     = document.getElementById('main-img');
     const sel     = document.getElementById('ts-select');
@@ -954,17 +1094,64 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
     const pbar    = document.getElementById('progress-bar');
     const btnFilt = document.getElementById('btn-filter');
 
+    // ── Filter sliders (dual-thumb min/max range, per metric) ─────────────
+    const FILTER_KEYS  = ['overlap', 'coverage', 'defocus', 'thickness', 'tiltaxis', 'rating'];
+    const FILTER_DECIMALS = {{overlap: 0, coverage: 0, defocus: 2, thickness: 0, tiltaxis: 1, rating: 0}};
+    const filterValArrays = {{
+      overlap: overlapVals, coverage: coverageVals, defocus: defocusVals,
+      thickness: thicknessVals, tiltaxis: tiltAxisVals,
+    }};
+    const filterCount = document.getElementById('filter-count');
+    const filterEls = {{}};
+    FILTER_KEYS.forEach(key => {{
+      filterEls[key] = {{
+        min:   document.getElementById('sl-' + key + '-min'),
+        max:   document.getElementById('sl-' + key + '-max'),
+        fvMin: document.getElementById('fv-' + key + '-min'),
+        fvMax: document.getElementById('fv-' + key + '-max'),
+      }};
+    }});
+    const defaultFilterVals = {{}};
+    FILTER_KEYS.forEach(key => {{
+      defaultFilterVals[key] = {{
+        min: parseFloat(filterEls[key].min.min),
+        max: parseFloat(filterEls[key].min.max),
+      }};
+    }});
+
+    function passesFilters(i) {{
+      // Synthetic [Summary]/[Lamella]/stage entries carry null for these --
+      // always pass (nothing to filter on), never hidden by a slider.
+      for (const key of ['overlap', 'coverage', 'defocus', 'thickness', 'tiltaxis']) {{
+        const v = filterValArrays[key][i];
+        if (v === null) continue;
+        const e = filterEls[key];
+        if (v < parseFloat(e.min.value) || v > parseFloat(e.max.value)) return false;
+      }}
+      if (tsNames[i]) {{
+        const rv    = ratings[tsNames[i]] || 0;
+        const rMin  = parseInt(filterEls.rating.min.value);
+        const rMax  = parseInt(filterEls.rating.max.value);
+        if (rv < rMin || rv > rMax) return false;
+      }}
+      return true;
+    }}
+
     function rebuildVis() {{
       visIndices = [];
       for (let i = 0; i < n; i++) {{
-        const opt = sel.options[i];
-        if (showSelOnly && selectedFlags[i] === 0) {{
-          opt.style.display = 'none';
-        }} else {{
+        const opt  = sel.options[i];
+        const pass = (!showSelOnly || selectedFlags[i] !== 0) && passesFilters(i);
+        if (pass) {{
           opt.style.display = '';
           visIndices.push(i);
+        }} else {{
+          opt.style.display = 'none';
         }}
         opt.style.color = (selectedFlags[i] === 0) ? '#546e7a' : '';
+      }}
+      if (filterCount) {{
+        filterCount.textContent = visIndices.length + ' / ' + n + ' shown';
       }}
     }}
 
@@ -994,6 +1181,75 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
       }});
     }}
 
+    function onFilterChange() {{
+      FILTER_KEYS.forEach(key => {{
+        const e   = filterEls[key];
+        const dec = FILTER_DECIMALS[key];
+        e.fvMin.textContent = parseFloat(e.min.value).toFixed(dec);
+        e.fvMax.textContent = parseFloat(e.max.value).toFixed(dec);
+      }});
+      rebuildVis();
+      if (!visIndices.includes(idx)) show(visIndices[0] || 0);
+      else show(idx);
+    }}
+    FILTER_KEYS.forEach(key => {{
+      const e = filterEls[key];
+      e.min.addEventListener('input', () => {{
+        if (parseFloat(e.min.value) > parseFloat(e.max.value)) e.min.value = e.max.value;
+        onFilterChange();
+      }});
+      e.max.addEventListener('input', () => {{
+        if (parseFloat(e.max.value) < parseFloat(e.min.value)) e.max.value = e.min.value;
+        onFilterChange();
+      }});
+    }});
+
+    document.getElementById('btn-reset-filters').addEventListener('click', () => {{
+      FILTER_KEYS.forEach(key => {{
+        filterEls[key].min.value = defaultFilterVals[key].min;
+        filterEls[key].max.value = defaultFilterVals[key].max;
+      }});
+      onFilterChange();
+    }});
+
+    function _activeFilterTags() {{
+      const tags = [];
+      FILTER_KEYS.forEach(key => {{
+        const e = filterEls[key], d = defaultFilterVals[key];
+        const vMin = parseFloat(e.min.value), vMax = parseFloat(e.max.value);
+        if (vMin > d.min || vMax < d.max) {{
+          tags.push(key.slice(0, 3) + vMin + '-' + vMax);
+        }}
+      }});
+      if (showSelOnly) tags.push('selOnly');
+      return tags;
+    }}
+
+    document.getElementById('btn-export-filtered').addEventListener('click', () => {{
+      const lines = ['ts_name,selected'];
+      let nSel = 0, nTotalReal = 0;
+      for (let i = 0; i < n; i++) {{
+        if (!tsNames[i]) continue;   // skip [Summary]/[Lamella]/stage entries
+        nTotalReal++;
+        const pass = passesFilters(i) && (!showSelOnly || selectedFlags[i] !== 0);
+        lines.push(tsNames[i] + ',' + (pass ? '1' : '0'));
+        if (pass) nSel++;
+      }}
+      const now = new Date();
+      const pad = v => String(v).padStart(2, '0');
+      const dateStr = now.getFullYear() + pad(now.getMonth() + 1) + pad(now.getDate())
+                    + '_' + pad(now.getHours()) + pad(now.getMinutes());
+      const tags = _activeFilterTags();
+      const tagStr = tags.length ? '_' + tags.join('_') : '_nofilter';
+      const fname = 'ts-select_' + runLabel + '_' + dateStr + tagStr + '.csv';
+      const blob = new Blob([lines.join('\\n')], {{type: 'text/csv'}});
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = fname;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      alert('Exported ' + nSel + ' / ' + nTotalReal + ' TS as ' + fname);
+    }});
+
     document.getElementById('btn-prev').onclick = () => showStep(-1);
     document.getElementById('btn-next').onclick = () => showStep(1);
     sel.onchange = () => show(parseInt(sel.value));
@@ -1002,15 +1258,6 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
       if (e.key === 'ArrowRight') showStep(1);
     }});
     rebuildVis();
-
-    // ── Star ratings ──────────────────────────────────────────────────────
-    const tsNames        = {ts_names_js};
-    const storageKey     = 'aretomo_ratings_{session_key}';
-    const embeddedRatings = {embedded_ratings_js};
-    // Merge: embedded CSV ratings are the baseline; localStorage overrides
-    // any TS the user has re-rated in this browser session.
-    let   ratings    = Object.assign({{}}, embeddedRatings,
-                           JSON.parse(localStorage.getItem(storageKey) || '{{}}'));
 
     const stars     = document.querySelectorAll('.star');
     const ratingLbl = document.getElementById('rating-label');
@@ -1037,6 +1284,7 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
       showRating(i);
       const r = ratings[name] || 0;
       sel.options[i].textContent = origOpts[i] + (r > 0 ? '  ' + starChars[r] : '');
+      rebuildVis();   // re-rating can change filter membership
     }}
 
     stars.forEach(s => {{
@@ -1072,6 +1320,19 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
       a.click();
     }});
 
+    document.getElementById('btn-clear-ratings').addEventListener('click', () => {{
+      if (Object.keys(ratings).length === 0) return;
+      if (!confirm('Clear all ' + Object.keys(ratings).length + ' star rating(s)? '
+                  + 'This also removes them from this browser\\'s saved storage.')) return;
+      ratings = {{}};
+      localStorage.removeItem(storageKey);
+      for (let i = 0; i < n; i++) {{
+        sel.options[i].textContent = origOpts[i];
+      }}
+      showRating(idx);
+      rebuildVis();
+    }});
+
     // ── Dynamic CSV loading ────────────────────────────────────────────────
     // Load ts_ratings.csv and ts-select.csv from the same directory as
     // this HTML file at page-load time.  Falls back silently to embedded
@@ -1101,6 +1362,7 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
         sel.options[i].textContent = origOpts[i] + (r > 0 ? '  ' + starChars[r] : '');
       }}
       showRating(idx);
+      rebuildVis();   // loaded ratings can change filter membership
     }}
 
     function _applySelectionCSV(text) {{
@@ -1160,6 +1422,21 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
       const reader = new FileReader();
       reader.onload = e => {{ _applySelectionCSV(e.target.result); }};
       reader.readAsText(file);
+    }});
+
+    document.getElementById('btn-clear-selection').addEventListener('click', () => {{
+      if (!confirm('Mark every TS as selected again, discarding the loaded '
+                  + 'ts-select.csv exclusions?')) return;
+      for (let i = 0; i < n; i++) {{
+        selectedFlags[i] = 1;
+        sel.options[i].setAttribute('data-selected', '1');
+      }}
+      showSelOnly = false;
+      if (btnFilt) {{ btnFilt.style.background = '#37474f'; }}
+      const btnF = document.getElementById('btn-filter');
+      if (btnF) {{ btnF.textContent = 'Selected only (' + n + ')'; }}
+      rebuildVis();
+      if (!visIndices.includes(idx)) show(visIndices[0] || 0); else show(idx);
     }});
 
     document.getElementById('btn-reload-ratings').addEventListener('click', () => {{
@@ -1902,6 +2179,8 @@ def run(args):
             'frames':       data['frames'],
         }
 
+        position_name = _ts_to_mdoc_stem.get(ts_name, '')
+
         png_name = f'{ts_name}.png'
         vol_path = in_dir / f'{ts_name}_Vol.mrc'
         _tp = time.perf_counter()
@@ -1911,15 +2190,34 @@ def run(args):
             plot_tilt_series(ts_name, data, args.threshold,
                              str(out_dir / png_name), global_ranges,
                              prev_data=prev_all_ts.get(ts_name),
-                             vol_path=vol_path if vol_path.exists() else None)
+                             vol_path=vol_path if vol_path.exists() else None,
+                             position_name=position_name)
         _t2_plot += time.perf_counter() - _tp
 
+        _overlaps_ts = [f['overlap_pct'] for f in data['frames']
+                        if f.get('overlap_pct') is not None]
+        mean_overlap = float(np.mean(_overlaps_ts)) if _overlaps_ts else None
+        # "Coverage" = frames retained after dark-frame removal (not the
+        # angular range of the survivors -- that understates the true
+        # attempted range whenever a dark frame sits at a tilt extreme).
+        n_frames_retained = len(data['frames'])
+        _defoci_ts   = [f['mean_defocus_um'] for f in data['frames']
+                        if f.get('mean_defocus_um') is not None]
+        avg_defocus  = float(np.mean(_defoci_ts)) if _defoci_ts else None
+        tilt_axis_deg = data['frames'][0]['rot'] if data['frames'] else None
+
         ts_entries.append({
-            'name':     ts_name,
-            'png':      png_name,
-            'n_bad':    n_bad,
-            'n_frames': len(data['frames']),
-            'n_dark':   len(data['dark_frames']),
+            'name':              ts_name,
+            'png':               png_name,
+            'n_bad':             n_bad,
+            'n_frames':          len(data['frames']),
+            'n_dark':            len(data['dark_frames']),
+            'position_name':     position_name,
+            'mean_overlap':      mean_overlap,
+            'n_frames_retained': n_frames_retained,
+            'avg_defocus':       avg_defocus,
+            'thickness_nm':      data.get('thickness_nm'),
+            'tilt_axis_deg':  tilt_axis_deg,
         })
 
     print(sep)
@@ -2085,7 +2383,8 @@ def run(args):
     _tp = time.perf_counter()
     html_path = out_dir / 'index.html'
     make_html(ts_entries, str(html_path), args.threshold, gain_check, selection,
-              ratings=saved_ratings or None)
+              ratings=saved_ratings or None,
+              run_label=f'{out_dir.parent.name}_{out_dir.name}')
     _t2_html = time.perf_counter() - _tp
 
     # ── Project JSON ──────────────────────────────────────────────────────────
