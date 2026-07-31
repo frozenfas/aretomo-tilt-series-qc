@@ -979,23 +979,23 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
       <button class="nav-btn" id="btn-next">Next &#8594;</button>
       <span id="counter">1&nbsp;/&nbsp;{n}</span>
       <button class="nav-btn" id="btn-filter"
-              style="font-size:0.82em;background:#37474f;{'display:none' if not has_selection else ''}">
+              style="font-size:0.82em;background:#546e7a;border:1px solid #78909c;{'display:none' if not has_selection else ''}">
         Selected only ({n_sel})
       </button>
       <button class="nav-btn" id="btn-reload-sel"
-              style="font-size:0.82em;background:#37474f;"
+              style="font-size:0.82em;background:#546e7a;border:1px solid #78909c;"
               title="Re-fetch ts-select.csv from the same directory as this HTML (requires HTTP server)">
         &#8635; Reload ts-select.csv
       </button>
       <input type="file" id="file-sel-input" accept=".csv"
              style="display:none">
       <button class="nav-btn" id="btn-load-csv"
-              style="font-size:0.82em;background:#37474f;"
+              style="font-size:0.82em;background:#546e7a;border:1px solid #78909c;"
               title="Load any ts-select.csv from your computer (works with file://)">
         &#128193; Load ts-select.csv&#8230;
       </button>
       <button class="nav-btn" id="btn-clear-selection"
-              style="font-size:0.82em;background:#37474f;"
+              style="font-size:0.82em;background:#546e7a;border:1px solid #78909c;"
               title="Mark every TS as selected again, discarding the loaded ts-select.csv exclusions">
         &#10060; Clear ts-selection
       </button>
@@ -1014,20 +1014,20 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
       </span>
       <span id="rating-label">&#8212;</span>
       <button class="nav-btn" id="btn-reload-ratings"
-              style="font-size:0.82em;background:#37474f;"
+              style="font-size:0.82em;background:#546e7a;border:1px solid #78909c;"
               title="Re-fetch ts_ratings.csv from the same directory as this HTML (requires HTTP server)">
         &#8635; Reload ts_ratings.csv
       </button>
       <input type="file" id="file-ratings-input" accept=".csv"
              style="display:none">
       <button class="nav-btn" id="btn-load-ratings"
-              style="font-size:0.82em;background:#37474f;"
+              style="font-size:0.82em;background:#546e7a;border:1px solid #78909c;"
               title="Load any ts_ratings.csv from your computer (works with file://)">
         &#128193; Load ts_ratings.csv&#8230;
       </button>
       <button class="nav-btn" id="btn-export">&#128190; Export ts_ratings.csv</button>
       <button class="nav-btn" id="btn-clear-ratings"
-              style="font-size:0.82em;background:#37474f;"
+              style="font-size:0.82em;background:#546e7a;border:1px solid #78909c;"
               title="Remove every star rating (in-page and saved localStorage)">
         &#10060; Clear ratings
       </button>
@@ -1041,9 +1041,14 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
       {_range_slider_html('rating',    'Rating',    '',       0,      5,      1,    0)}
       {_range_slider_html('tiltaxis',  'Tilt axis', '&#176;', axis_lo, axis_hi, 0.5, 1)}
       <button class="nav-btn" id="btn-reset-filters"
-              style="font-size:0.82em;background:#37474f;">Reset filters</button>
+              style="font-size:0.82em;background:#546e7a;border:1px solid #78909c;">Reset filters</button>
+      <button class="nav-btn" id="btn-invert-filters"
+              style="font-size:0.82em;background:#546e7a;border:1px solid #78909c;"
+              title="Show TS that FAIL at least one active filter, instead of ones that pass all of them">
+        &#8646; Invert filters
+      </button>
       <button class="nav-btn" id="btn-export-filtered"
-              style="font-size:0.82em;background:#37474f;"
+              style="font-size:0.82em;background:#546e7a;border:1px solid #78909c;"
               title="Save the TS currently passing all filters as a ts-select.csv">
         &#128190; Export filtered selection
       </button>
@@ -1073,6 +1078,7 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
     const n             = images.length;
     let   idx           = 0;
     let   showSelOnly   = false;
+    let   invertFilters = false;
     let   visIndices    = Array.from({{length: n}}, (_, i) => i);
 
     // ── Star ratings (declared here, before rebuildVis(), since the rating
@@ -1137,11 +1143,18 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
       return true;
     }}
 
+    // Invert only applies to real TS -- [Summary]/[Lamella]/stage panels
+    // aren't "bad" or "good", so they stay visible either way.
+    function effectivePass(i) {{
+      const p = passesFilters(i);
+      return tsNames[i] ? (invertFilters ? !p : p) : true;
+    }}
+
     function rebuildVis() {{
       visIndices = [];
       for (let i = 0; i < n; i++) {{
         const opt  = sel.options[i];
-        const pass = (!showSelOnly || selectedFlags[i] !== 0) && passesFilters(i);
+        const pass = (!showSelOnly || selectedFlags[i] !== 0) && effectivePass(i);
         if (pass) {{
           opt.style.display = '';
           visIndices.push(i);
@@ -1174,7 +1187,7 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
     if (btnFilt) {{
       btnFilt.addEventListener('click', () => {{
         showSelOnly = !showSelOnly;
-        btnFilt.style.background = showSelOnly ? '#2e7d32' : '#37474f';
+        btnFilt.style.background = showSelOnly ? '#2e7d32' : '#546e7a';
         rebuildVis();
         if (!visIndices.includes(idx)) show(visIndices[0] || 0);
         else show(idx);
@@ -1209,6 +1222,15 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
         filterEls[key].min.value = defaultFilterVals[key].min;
         filterEls[key].max.value = defaultFilterVals[key].max;
       }});
+      invertFilters = false;
+      const btnInv = document.getElementById('btn-invert-filters');
+      if (btnInv) btnInv.style.background = '#546e7a';
+      onFilterChange();
+    }});
+
+    document.getElementById('btn-invert-filters').addEventListener('click', function() {{
+      invertFilters = !invertFilters;
+      this.style.background = invertFilters ? '#b71c1c' : '#546e7a';
       onFilterChange();
     }});
 
@@ -1222,6 +1244,7 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
         }}
       }});
       if (showSelOnly) tags.push('selOnly');
+      if (invertFilters) tags.push('inverted');
       return tags;
     }}
 
@@ -1231,7 +1254,7 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
       for (let i = 0; i < n; i++) {{
         if (!tsNames[i]) continue;   // skip [Summary]/[Lamella]/stage entries
         nTotalReal++;
-        const pass = passesFilters(i) && (!showSelOnly || selectedFlags[i] !== 0);
+        const pass = effectivePass(i) && (!showSelOnly || selectedFlags[i] !== 0);
         lines.push(tsNames[i] + ',' + (pass ? '1' : '0'));
         if (pass) nSel++;
       }}
@@ -1432,7 +1455,7 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
         sel.options[i].setAttribute('data-selected', '1');
       }}
       showSelOnly = false;
-      if (btnFilt) {{ btnFilt.style.background = '#37474f'; }}
+      if (btnFilt) {{ btnFilt.style.background = '#546e7a'; }}
       const btnF = document.getElementById('btn-filter');
       if (btnF) {{ btnF.textContent = 'Selected only (' + n + ')'; }}
       rebuildVis();
