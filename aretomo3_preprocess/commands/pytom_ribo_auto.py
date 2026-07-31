@@ -659,16 +659,30 @@ def _check_handedness(args, in_dir, out_dir, reg, diameter_a, gpus, sep):
         return
 
     print(f'Particles extracted (auto cutoff, capped at {args.handedness_particles}):')
+    print()
     votes = []
+    rows  = []
     for ts_name in ts_list:
         normal_n, mirror_n = results[ts_name].get('normal'), results[ts_name].get('mirrored')
         if normal_n is None or mirror_n is None:
-            print(f'  {ts_name:12s}  normal=?  mirrored=?  '
-                  f'(could not read one or both star files)')
+            rows.append((ts_name, '?', '?', 'error (missing star file)'))
             continue
         winner = 'mirrored' if mirror_n > normal_n else 'normal' if normal_n > mirror_n else 'tie'
         votes.append(winner)
-        print(f'  {ts_name:12s}  normal={normal_n:5d}  mirrored={mirror_n:5d}  -> {winner}')
+        rows.append((ts_name, str(normal_n), str(mirror_n), winner))
+
+    if rows:
+        ts_w = max(len('TS'),       *(len(r[0]) for r in rows))
+        n_w  = max(len('Normal'),   *(len(r[1]) for r in rows))
+        m_w  = max(len('Mirrored'), *(len(r[2]) for r in rows))
+        w_w  = max(len('Winner'),   *(len(r[3]) for r in rows))
+        rule = f'  {"-"*ts_w}  {"-"*n_w}  {"-"*m_w}  {"-"*w_w}'
+        print(f'  {"TS":<{ts_w}}  {"Normal":>{n_w}}  {"Mirrored":>{m_w}}  {"Winner":<{w_w}}')
+        print(rule)
+        for ts_name, n_s, m_s, winner in rows:
+            print(f'  {ts_name:<{ts_w}}  {n_s:>{n_w}}  {m_s:>{m_w}}  {winner:<{w_w}}')
+        print(rule)
+        print()
 
     if not votes:
         print('WARNING: no usable results from any TS (starfile not installed? '
