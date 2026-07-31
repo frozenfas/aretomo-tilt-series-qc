@@ -32,9 +32,17 @@ Only 70S has a bundled reference/mask pair on this system right now
 ---------------------------------------------------------------------
   /opt/data/pytom/SC_job035_run_it120_class001_10.00A.mrc (reference)
   /opt/data/pytom/SC_job035_run_it120_class001_10.00A_MASK.mrc (mask)
-Add a 'map'/'mask' pair for 50S/30S/80S to _PARTICLES to activate those
-choices; until then they fail with a clear "no pre-made reference/mask"
-error rather than silently using the wrong particle.
+  /opt/data/pytom/SC_job035_run_it120_class001_10.00A_mirror.mrc (map_mirror)
+  /opt/data/pytom/SC_job035_run_it120_class001_10.00A_mirror_MASK.mrc (mask_mirror)
+The mirror pair was built with pytom_create_template.py --mirror (same
+tool as the originals) from the same source density, and the mirror mask
+was built independently in RELION from the resulting mirrored,
+non-inverted volume -- so mask and template are co-registered with each
+other, not just each mirrored separately (see _prepare_template_and_mask
+for why that distinction matters). Add a 'map'/'mask' pair for 50S/30S/80S
+to _PARTICLES to activate those choices; until then they fail with a
+clear "no pre-made reference/mask" error rather than silently using the
+wrong particle.
 
 Particle diameters (--particle-diameter) are documented estimates, not
 independently verified per-particle -- override them if you have a better
@@ -96,20 +104,35 @@ _REF_DIR = Path('/opt/data/pytom')
 # to pytom_match_template.py/pytom_extract_candidates.py) -- see module
 # docstring re: these being estimates.
 #
+# WHY 'map'/'mask' are precreated, not generated per run: _TARGET_APIX is
+# a single hardcoded value (10.0 A/px), not a per-tomogram parameter --
+# every run for a given particle needs the reference/mask at that exact
+# same voxel size, so regenerating them via pytom_create_template.py/
+# pytom_create_mask.py on every invocation would recompute the identical
+# output every time. Precreating them once and reusing directly (symlink,
+# no processing) is strictly equivalent output for less work; there is no
+# case where "regenerate every run" would produce a different result,
+# since the target never varies. This only breaks if _TARGET_APIX itself
+# is ever changed -- then map/mask (and any map_mirror/mask_mirror) need
+# rebuilding at the new value before use.
+#
 # 'map'/'mask' are both REQUIRED to already exist, already inverted
 # (dark-particle convention), and already at the 10.0 A/px target -- they
 # are used directly as pytom_match_template.py's input, with NO processing
-# (rescale/invert/mirror/recenter) ever applied here; this "auto" tool
-# assumes fully precreated reference/mask pairs.
+# (rescale/invert/mirror/recenter) ever applied here.
 #
 # 'map_mirror'/'mask_mirror' (optional, absent for every particle right
 # now): a SEPARATE, independently precreated pair for --mirror/
-# --check-handedness -- there is no runtime mirror transform (see
+# --check-handedness -- same reasoning (one target voxel size, so one
+# precreated pair covers every future mirror run for this particle), plus
+# there is no runtime mirror transform at all (see
 # _prepare_template_and_mask for why: mirroring one file without the other
 # risks misaligning them, worse than doing nothing).
 _PARTICLES = {
     '70S': {'map': _REF_DIR / 'SC_job035_run_it120_class001_10.00A.mrc',
             'mask': _REF_DIR / 'SC_job035_run_it120_class001_10.00A_MASK.mrc',
+            'map_mirror': _REF_DIR / 'SC_job035_run_it120_class001_10.00A_mirror.mrc',
+            'mask_mirror': _REF_DIR / 'SC_job035_run_it120_class001_10.00A_mirror_MASK.mrc',
             'diameter_a': 290.0},
     '50S': {'map': _REF_DIR / 'map-50S.mrc', 'mask': _REF_DIR / 'mask-50S.mrc',
             'diameter_a': 220.0},
