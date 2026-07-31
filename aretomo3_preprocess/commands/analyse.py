@@ -837,15 +837,15 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
     * {{ box-sizing: border-box; margin: 0; padding: 0; }}
     body {{
       font-family: 'Segoe UI', sans-serif;
-      background: #16213e;
-      color: #e0e0e0;
+      background: #ffffff;
+      color: #263238;
       display: flex;
       flex-direction: column;
       align-items: center;
       padding: 24px 16px;
       min-height: 100vh;
     }}
-    h1 {{ margin-bottom: 14px; font-size: 1.25em; color: #90caf9; letter-spacing: 0.03em; }}
+    h1 {{ margin-bottom: 14px; font-size: 1.25em; color: #0d47a1; letter-spacing: 0.03em; }}
 
     /* ── Tab bar ── */
     #tab-bar {{
@@ -853,18 +853,18 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
     }}
     .tab-btn {{
       padding: 8px 22px; font-size: 0.95em; border: none; border-radius: 6px;
-      background: #1e2a45; color: #90a4ae; cursor: pointer; transition: all 0.2s;
+      background: #eceff1; color: #546e7a; cursor: pointer; transition: all 0.2s;
     }}
     .tab-btn.active {{ background: #1565c0; color: white; }}
-    .tab-btn:hover:not(.active) {{ background: #2a3f60; color: #e0e0e0; }}
+    .tab-btn:hover:not(.active) {{ background: #cfd8dc; color: #263238; }}
 
     /* ── Gain check tab ── */
     .tab-section {{ width: 100%; max-width: 1380px; }}
     .gc-card {{
-      background: #1e2a45; border-radius: 10px; padding: 20px 24px;
+      background: #f5f7fa; border: 1px solid #e0e6ea; border-radius: 10px; padding: 20px 24px;
       margin-bottom: 20px; max-width: 680px;
     }}
-    .gc-best {{ color: #66bb6a; font-size: 1.2em; font-weight: bold; }}
+    .gc-best {{ color: #2e7d32; font-size: 1.2em; font-weight: bold; }}
     .gc-flags {{
       font-family: monospace; font-size: 1em; color: #ffcc80;
       background: #0d1b2a; padding: 5px 12px; border-radius: 6px;
@@ -872,13 +872,13 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
     }}
     .gc-table {{ border-collapse: collapse; width: 100%; margin-top: 14px; }}
     .gc-table th, .gc-table td {{
-      padding: 7px 14px; text-align: left; border-bottom: 1px solid #2e3f5c;
+      padding: 7px 14px; text-align: left; border-bottom: 1px solid #dde3e8;
     }}
-    .gc-table th {{ color: #90caf9; font-weight: normal; }}
-    .gc-meta {{ color: #78909c; font-size: 0.82em; margin-top: 12px; }}
+    .gc-table th {{ color: #1565c0; font-weight: normal; }}
+    .gc-meta {{ color: #546e7a; font-size: 0.82em; margin-top: 12px; }}
     .gc-imgs {{ display: flex; gap: 20px; flex-wrap: wrap; }}
     .gc-imgs img {{
-      max-width: 720px; width: 100%; border-radius: 8px; border: 1px solid #2e3f5c;
+      max-width: 720px; width: 100%; border-radius: 8px; border: 1px solid #dde3e8;
     }}
 
     /* ── TS viewer tab ── */
@@ -893,24 +893,25 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
     button.nav-btn:hover {{ background: #0d47a1; }}
     select {{
       padding: 7px 10px; font-size: 0.88em; border-radius: 6px;
-      background: #1e2a45; color: #e0e0e0; border: 1px solid #445;
+      background: #ffffff; color: #263238; border: 1px solid #b0bec5;
       max-width: 380px; cursor: pointer;
     }}
-    #counter {{ font-size: 0.88em; color: #90a4ae; min-width: 60px; text-align: center; }}
+    #counter {{ font-size: 0.88em; color: #546e7a; min-width: 60px; text-align: center; }}
     #title {{
-      font-size: 0.92em; color: #ffcc80; text-align: center;
+      font-size: 0.92em; color: #e65100; text-align: center;
       margin-bottom: 10px; min-height: 1.4em;
     }}
     #img-wrap {{
-      width: 100%; max-width: 1380px; background: #0d1b2a;
+      width: 100%; max-width: 1380px; background: #ffffff;
+      border: 1px solid #e0e6ea;
       border-radius: 10px; padding: 12px;
       display: flex; align-items: center; justify-content: center;
     }}
     #main-img {{ max-width: 100%; height: auto; border-radius: 4px; }}
-    #hint {{ font-size: 0.75em; color: #546e7a; margin-top: 12px; }}
+    #hint {{ font-size: 0.75em; color: #78909c; margin-top: 12px; }}
     #progress {{
       width: 100%; max-width: 1380px; height: 4px;
-      background: #1e2a45; border-radius: 2px; margin-bottom: 10px;
+      background: #eceff1; border-radius: 2px; margin-bottom: 10px;
     }}
     #progress-bar {{
       height: 100%; background: #1565c0; border-radius: 2px; transition: width 0.2s;
@@ -922,22 +923,22 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
       margin-bottom: 8px; width: 100%; max-width: 1380px;
     }}
     .star {{
-      font-size: 1.9em; cursor: pointer; color: #37474f;
+      font-size: 1.9em; cursor: pointer; color: #cfd8dc;
       transition: color 0.10s; user-select: none; line-height: 1;
     }}
     .star.on {{ color: #ffc107; }}
-    #rating-label {{ font-size: 0.84em; color: #78909c; min-width: 82px; }}
+    #rating-label {{ font-size: 0.84em; color: #546e7a; min-width: 82px; }}
     #btn-export {{ margin-left: auto; padding: 6px 18px; font-size: 0.84em; }}
 
     /* ── Filter sliders ── */
     #filter-bar {{
       display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
       margin-bottom: 10px; width: 100%; max-width: 1380px;
-      background: #1a2733; border-radius: 6px; padding: 8px 14px;
+      background: #f5f7fa; border: 1px solid #e0e6ea; border-radius: 6px; padding: 8px 14px;
     }}
     .filt {{ display: flex; align-items: center; gap: 8px; }}
-    .filt label {{ font-size: 0.82em; color: #b0bec5; white-space: nowrap; }}
-    #filter-count {{ margin-left: auto; font-size: 0.82em; color: #78909c; }}
+    .filt label {{ font-size: 0.82em; color: #37474f; white-space: nowrap; }}
+    #filter-count {{ margin-left: auto; font-size: 0.82em; color: #546e7a; }}
 
     /* ── Dual-thumb range slider: two overlaid native <input type=range>,
        clamped against each other in JS ── */
@@ -948,20 +949,20 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
       background: transparent; pointer-events: none;
     }}
     .range-slider input[type=range]::-webkit-slider-runnable-track {{
-      height: 3px; background: #37474f; border-radius: 2px;
+      height: 3px; background: #b0bec5; border-radius: 2px;
     }}
     .range-slider input[type=range]::-moz-range-track {{
-      height: 3px; background: #37474f; border-radius: 2px;
+      height: 3px; background: #b0bec5; border-radius: 2px;
     }}
     .range-slider input[type=range]::-webkit-slider-thumb {{
       -webkit-appearance: none; pointer-events: auto;
       width: 13px; height: 13px; border-radius: 50%;
-      background: #29b6f6; cursor: pointer; margin-top: -5px;
+      background: #1565c0; cursor: pointer; margin-top: -5px;
     }}
     .range-slider input[type=range]::-moz-range-thumb {{
       pointer-events: auto; border: none;
       width: 13px; height: 13px; border-radius: 50%;
-      background: #29b6f6; cursor: pointer;
+      background: #1565c0; cursor: pointer;
     }}
   </style>
 </head>
