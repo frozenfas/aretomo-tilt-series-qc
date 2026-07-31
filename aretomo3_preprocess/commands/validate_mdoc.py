@@ -1067,6 +1067,15 @@ def add_parser(subparsers):
              'AreTomo3 itself uses when the total is zero). Default: 1.0. '
              'Used by --fix-exptime.',
     )
+    p.add_argument(
+        '--calibrated-apix', type=float, default=None, metavar='ANGPIX',
+        help='Record the real, calibrated pixel size (Å/px) up front, at '
+             'the start of the pipeline. The mdoc\'s own PixelSpacing is '
+             'uncalibrated and routinely wrong; every later --apix/--angpix '
+             'preflight check (run-aretomo3, run-aretomo3-per-ts, analyse) '
+             'compares against this value instead once it is set, instead '
+             'of nagging against the raw mdoc value on every run.',
+    )
     p.set_defaults(func=run)
     return p
 
@@ -1187,6 +1196,12 @@ def run(args):
     if passing_paths:
         _save_mdoc_to_project(passing_paths)
 
+    if args.calibrated_apix is not None:
+        from aretomo3_preprocess.shared.project_state import record_calibrated_apix
+        record_calibrated_apix(args.calibrated_apix, source='validate-mdoc (user-supplied)')
+        print(f'  calibrated_apix : {args.calibrated_apix} Å/px -- later --apix/--angpix '
+              f'preflight checks will compare against this instead of the raw mdoc value')
+
 
 def _save_mdoc_to_project(paths):
     """
@@ -1219,14 +1234,15 @@ def _save_mdoc_to_project(paths):
     for path in paths:
         p = Path(path)
         try:
-            mdoc_data, angpix = parse_mdoc_file(p)
+            mdoc_data, angpix, acquisition = parse_mdoc_file(p)
         except Exception:
             continue
         if mdoc_data:
             key = ts_to_original.get(p.stem, p.stem)
             new_entries[key] = {
-                'angpix':  angpix,
-                'frames':  {str(k): v for k, v in mdoc_data.items()},
+                'angpix':      angpix,
+                'acquisition': acquisition,
+                'frames':      {str(k): v for k, v in mdoc_data.items()},
             }
 
     if new_entries:

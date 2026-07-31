@@ -300,7 +300,7 @@ def _process_ts(ts_name: str, input_dir: Path, cmd0_dir: Path, imod_dir: Path,
     if not mdoc_frames and mdoc_dir is not None:
         mdoc_path = mdoc_dir / f'{ts_name}.mdoc'
         if mdoc_path.exists():
-            mdoc_frames, _ = parse_mdoc_file(mdoc_path)
+            mdoc_frames, _, _ = parse_mdoc_file(mdoc_path)
             frames_dir = mdoc_dir
         else:
             print(f'  WARNING: {ts_name}: {mdoc_path} not found — movie paths will be unknown')

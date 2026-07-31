@@ -171,11 +171,23 @@ class TestParseMdoc:
     @pytest.fixture(scope='class')
     def mdoc(self):
         pytest.importorskip('mdocfile')
-        frames, _ = parse_mdoc_file(FRAMES / f'{TS}.mdoc')
+        frames, _, _ = parse_mdoc_file(FRAMES / f'{TS}.mdoc')
         return frames
+
+    @pytest.fixture(scope='class')
+    def acquisition(self):
+        pytest.importorskip('mdocfile')
+        _, _, acq = parse_mdoc_file(FRAMES / f'{TS}.mdoc')
+        return acq
 
     def test_frame_count(self, mdoc):
         assert len(mdoc) == 29
+
+    def test_acquisition(self, acquisition):
+        assert acquisition['width']  == 5760
+        assert acquisition['height'] == 4092
+        assert acquisition['file_type'] == 'tiff'
+        assert acquisition['voltage'] == pytest.approx(300.0)
 
     def test_keys_are_0indexed_zvalues(self, mdoc):
         assert min(mdoc.keys()) == 0
@@ -205,7 +217,7 @@ class TestCrossValidation:
         pytest.importorskip('mdocfile')
         aln       = parse_aln_file(RUN001 / f'{TS}.aln')
         tlt       = parse_tlt_file(RUN001 / f'{TS}_TLT.txt')
-        mdoc, _   = parse_mdoc_file(FRAMES / f'{TS}.mdoc')
+        mdoc, _, _ = parse_mdoc_file(FRAMES / f'{TS}.mdoc')
         return aln, tlt, mdoc
 
     def test_sec_row_corrected_tilt_matches_aln(self, all_data):

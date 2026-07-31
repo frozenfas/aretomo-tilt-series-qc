@@ -41,7 +41,8 @@ except ImportError:
 from aretomo3_preprocess.commands.run_aretomo3 import _fmt_command, _num
 from aretomo3_preprocess.shared.project_json import update_section, args_to_dict
 from aretomo3_preprocess.shared.project_state import (
-    get_angpix, get_frames_dir, get_latest_analysis_dir,
+    get_frames_dir, get_latest_analysis_dir,
+    resolve_reference_apix, record_calibrated_apix,
     register_input_stacks, load_input_stacks, resolve_selected_ts,
 )
 
@@ -203,8 +204,11 @@ def add_parser(subparsers):
                      metavar='ID',
                      help='GPU ID(s) to use (-Gpu)')
     req.add_argument('--apix',     '-a', type=float, default=None,
-                     help='Pixel size in Å/px (-PixSize). '
-                          'Auto-read from project.json (mdoc_data) if omitted.')
+                     help='Pixel size in Å/px (-PixSize). Required -- no '
+                          'auto-fill. Checked against project.json '
+                          'calibrated_apix if set (see validate-mdoc '
+                          '--calibrated-apix), else mdoc_data PixelSpacing; '
+                          'mismatch aborts unless --force.')
 
     inp = p.add_argument_group('input')
     inp.add_argument('--mdocdir', default=None,
@@ -274,6 +278,8 @@ def add_parser(subparsers):
                      help='Re-run even if output .aln already exists')
     ctl.add_argument('--dry-run',   action='store_true',
                      help='Print per-TS commands without executing')
+    ctl.add_argument('--force',     action='store_true',
+                     help='Run despite a --apix vs project.json PixelSpacing mismatch')
 
     p.set_defaults(func=run)
     return p
@@ -298,11 +304,28 @@ def run(args):
         sys.exit(1)
 
     if args.apix is None:
-        args.apix = get_angpix()
-    if args.apix is None:
-        print('ERROR: --apix not provided and no pixel size found in project.json.')
-        print('       Run validate-mdoc first, or supply --apix explicitly.')
+        print('ERROR: --apix is required (no default).')
+        print('       Pixel size of the input movies, in Å/px. Propagates into '
+              'every downstream geometry calculation (alignment, reconstruction '
+              'voxel size) -- a silently wrong value here corrupts everything '
+              'after it.')
         sys.exit(1)
+
+    _ps_ref, _ps_ref_label = resolve_reference_apix()
+    if _ps_ref is not None and abs(_ps_ref - args.apix) > 0.02:
+        msg = (f'Pixel spacing mismatch:\n'
+               f'       recorded PixelSpacing = {_ps_ref} Å/px  ({_ps_ref_label})\n'
+               f'       --apix                = {args.apix} Å/px')
+        if args.force or args.dry_run:
+            tag = '(dry-run, continuing)' if args.dry_run else '(--force, continuing)'
+            print(f'WARNING: {msg}\n         {tag}\n')
+        else:
+            print(f'ERROR: {msg}')
+            print('       Use --force to run anyway, or fix --apix.')
+            sys.exit(1)
+
+    if not args.dry_run:
+        record_calibrated_apix(args.apix, source='run-aretomo3-per-ts')
 
     if args.mdocdir is None:
         _fd = get_frames_dir()

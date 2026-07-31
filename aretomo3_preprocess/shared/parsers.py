@@ -222,23 +222,47 @@ def parse_mdoc_file(filepath):
     """
     Parse a SerialEM .mdoc file using the mdocfile library.
 
-    Returns a tuple (frames, pixel_spacing) where:
+    Returns a tuple (frames, pixel_spacing, acquisition) where:
       frames        — dict keyed by ZValue (0-indexed acquisition order):
                         {'tilt_angle', 'sub_frame_path', 'mdoc_defocus',
                          'target_defocus', 'datetime', 'stage_x/y/z',
                          'exposure_time', 'num_subframes'}
       pixel_spacing — float (Å/px) from the first row's PixelSpacing field,
                         or None if not present.
-    Returns ({}, None) if mdocfile is not installed.
+      acquisition   — {'width', 'height', 'file_type', 'voltage'} from the
+                        first row's ImageSize/SubFramePath/Voltage fields
+                        (each None if not present). 'file_type' is the raw
+                        movie extension (e.g. 'tiff', 'eer'), lowercased,
+                        without the dot.
+    Returns ({}, None, {'width': None, 'height': None, 'file_type': None,
+    'voltage': None}) if mdocfile is not installed.
     """
+    _empty_acq = {'width': None, 'height': None, 'file_type': None, 'voltage': None}
     if not _HAS_MDOCFILE:
-        return {}, None
+        return {}, None, dict(_empty_acq)
     df = _mdocfile.read(filepath)
     # Extract global PixelSpacing from first row (same value repeated in all rows)
     try:
         pixel_spacing = _float_or_none(df['PixelSpacing'].iloc[0])
     except Exception:
         pixel_spacing = None
+    acquisition = dict(_empty_acq)
+    try:
+        size = df['ImageSize'].iloc[0]
+        acquisition['width']  = _int_or_none(size[0])
+        acquisition['height'] = _int_or_none(size[1])
+    except Exception:
+        pass
+    try:
+        sub0 = df['SubFramePath'].iloc[0]
+        if sub0 and not isinstance(sub0, float):
+            acquisition['file_type'] = Path(sub0).suffix.lstrip('.').lower() or None
+    except Exception:
+        pass
+    try:
+        acquisition['voltage'] = _float_or_none(df['Voltage'].iloc[0])
+    except Exception:
+        pass
     result = {}
     for _, row in df.iterrows():
         z = _int_or_none(row.get('ZValue'))
@@ -258,4 +282,4 @@ def parse_mdoc_file(filepath):
             'exposure_time':  _float_or_none(row.get('ExposureTime')),
             'num_subframes':  _int_or_none(row.get('NumSubFrames')),
         }
-    return result, pixel_spacing
+    return result, pixel_spacing, acquisition

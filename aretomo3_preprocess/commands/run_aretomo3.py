@@ -90,7 +90,9 @@ from aretomo3_preprocess.shared.project_json import (
     load_or_create, update_section, args_to_dict,
 )
 from aretomo3_preprocess.shared.project_state import (
-    get_angpix, register_input_stacks, resolve_selected_ts,
+    get_angpix, get_voltage, get_run_params, record_run_params,
+    get_calibrated_apix, record_calibrated_apix,
+    register_input_stacks, resolve_selected_ts,
 )
 from aretomo3_preprocess.shared.output_guard import check_disk_space
 
@@ -122,6 +124,7 @@ _FLAG_COMMENTS = {
     '-EerSampling':  'EER super-resolution sampling factor',
     '-SplitSum':     'write odd/even half-sets for dose weighting',
     '-VolZ':         'reconstruction Z thickness in pixels (0=auto-estimate)',
+    '-ExtZ':         'padding added to auto-estimated thickness (only used when -VolZ 0)',
     '-AtBin':        'tomogram binning factor(s); up to 3 for multi-resolution',
     '-AtPatch':      'local alignment patches (0 0=global only)',
     '-Wbp':          'reconstruction method: 1=WBP 0=SART',
@@ -162,6 +165,7 @@ _FLAG_SHORT = {
     '-EerSampling':  'EER supersampling',
     '-SplitSum':     'odd/even halves',
     '-VolZ':         'reconstruction thickness',
+    '-ExtZ':         'auto-thickness padding',
     '-AtBin':        'tomogram binning',
     '-AtPatch':      'local align patches',
     '-Wbp':          'reconstruction method',
@@ -191,7 +195,7 @@ _FLAG_GROUP = {
     '-FmDose': 'motion', '-McBin': 'motion', '-McPatch': 'motion',
     '-FmInt': 'motion', '-EerSampling': 'motion', '-SplitSum': 'motion',
 
-    '-VolZ': 'tomo', '-AtBin': 'tomo', '-AtPatch': 'tomo', '-Wbp': 'tomo',
+    '-VolZ': 'tomo', '-ExtZ': 'tomo', '-AtBin': 'tomo', '-AtPatch': 'tomo', '-Wbp': 'tomo',
     '-Sart': 'tomo', '-FlipVol': 'tomo', '-TiltCor': 'tomo',
     '-DarkTol': 'tomo', '-TiltAxis': 'tomo', '-AlignZ': 'tomo',
     '-Group': 'tomo', '-CorrCTF': 'tomo', '-OutXF': 'tomo', '-OutImod': 'tomo',
@@ -348,6 +352,8 @@ def _build_cmd(args) -> list:
     cmd += ['-SplitSum', _num(args.split_sum)]
 
     cmd += ['-VolZ',     _num(args.vol_z)]
+    if args.ext_z is not None:
+        cmd += ['-ExtZ', _num(args.ext_z)]
     cmd += ['-AtBin']  + [_num(v) for v in args.at_bin]
     cmd += ['-AtPatch'] + [_num(v) for v in args.at_patch]
     cmd += ['-Wbp',      _num(args.wbp)]
@@ -382,7 +388,8 @@ def _build_cmd(args) -> list:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _read_mdoc_metadata(mdoc_path: Path) -> dict:
-    """Extract PixelSpacing and Voltage from a mdoc file (first occurrence of each)."""
+    """Extract PixelSpacing, Voltage, and SubFramePath from a mdoc file
+    (first occurrence of each)."""
     fields = {}
     try:
         with open(mdoc_path) as fh:
@@ -392,7 +399,11 @@ def _read_mdoc_metadata(mdoc_path: Path) -> dict:
                         m = re.match(rf'\s*{key}\s*=\s*([0-9.]+)', line)
                         if m:
                             fields[key] = float(m.group(1))
-                if len(fields) == 2:
+                if 'SubFramePath' not in fields:
+                    m = re.match(r'\s*SubFramePath\s*=\s*(.+?)\s*$', line)
+                    if m:
+                        fields['SubFramePath'] = m.group(1)
+                if len(fields) == 3:
                     break
     except Exception:
         pass
@@ -870,7 +881,7 @@ def _check_mdocs(mdoc_files: list) -> tuple:
         # traceback; surface it as the same kind of fatal error as any other
         # mdoc problem caught here.
         try:
-            mdoc_frames, _ = parse_mdoc_file(path)
+            mdoc_frames, _, _ = parse_mdoc_file(path)
         except Exception as e:
             bad_by_reason.setdefault(f'mdocfile parse error: {e}', []).append(path.name)
             continue
@@ -1196,6 +1207,55 @@ def _load_global_params(analysis_dir: Path) -> dict:
     return proj.get('analyse', {}).get('global_suggested', {})
 
 
+# Params with no safe default -- each has a real, dataset-specific
+# consequence for downstream results, so they must be answered explicitly
+# rather than silently defaulted. Shown in the preflight error when missing.
+_CRITICAL_PARAMS = {
+    'cmd': (
+        '--cmd',
+        'Pipeline mode -- 0=full (motion correction + alignment + '
+        'reconstruction), 1=from-alignment (realign + reconstruct from '
+        'already motion-corrected stacks), 2=recon-only (reconstruct from '
+        'an existing alignment). Determines which stages run and what '
+        'input this command expects.'
+    ),
+    'apix': (
+        '--apix',
+        'Pixel size of the input movies, in Å/px. Propagates into every '
+        'downstream geometry calculation (CTF, alignment, reconstruction '
+        'voxel size) -- a silently wrong value here corrupts everything '
+        'after it.'
+    ),
+    'vol_z': (
+        '--vol-z',
+        'Reconstruction thickness in Z, in pixels (0=auto-estimate). Sets '
+        'the volume size of every tomogram in this run; too small clips a '
+        'thick sample, too large wastes compute/disk.'
+    ),
+    'at_bin': (
+        '--at-bin',
+        'Tomogram binning factor. Sets the final voxel size of every '
+        'reconstructed tomogram -- every downstream tool (template '
+        'matching, masking, particle picking) has to be told this exact '
+        'value, so it must be a deliberate choice.'
+    ),
+    'tilt_cor': (
+        '--tilt-cor',
+        'Tilt-angle offset correction (0=off, 1=auto-correct during '
+        'alignment). Changes reconstruction geometry. Has no effect for '
+        '--cmd 2 (alignment is already fixed in the existing .aln), but is '
+        'still asked for explicitly for consistency.'
+    ),
+    'split_sum': (
+        '--split-sum',
+        'Write dose-weighted odd/even (EVN/ODD) half-set volumes (0=off, '
+        '1=on). Downstream denoising (cryoCARE/DeepDeWedge) depends on '
+        'these existing -- skip only if you know this run will never feed '
+        'a denoiser.'
+    ),
+}
+
+
 def _validate(args) -> tuple:
     """Run pre-flight checks.
 
@@ -1218,6 +1278,25 @@ def _validate(args) -> tuple:
 
     warnings.extend(_check_gpus(args.gpu))
     warnings.extend(check_disk_space(Path(args.output)))
+
+    # ── 0. Critical params with no safe default ────────────────────────────
+    missing_critical = [k for k in _CRITICAL_PARAMS if getattr(args, k) is None]
+    if missing_critical:
+        for k in missing_critical:
+            flag, desc = _CRITICAL_PARAMS[k]
+            errors.append(f'{flag} is required (no default).\n       {desc}')
+    else:
+        print('  Critical params : all present '
+              f'(--cmd {args.cmd} --apix {args.apix} --vol-z {args.vol_z} '
+              f'--at-bin {args.at_bin} --tilt-cor {args.tilt_cor} '
+              f'--split-sum {args.split_sum})')
+
+    if missing_critical:
+        # Every check below assumes args.cmd/apix/vol_z/at_bin/tilt_cor/
+        # split_sum are usable values -- with one or more missing there's
+        # nothing meaningful left to check, and run() aborts on `errors`
+        # immediately after this returns anyway.
+        return errors, warnings, mdoc_stats, set()
 
     # ── 1. Gain / fm-dose (only needed for cmd 0 = full pipeline) ─────────
     if args.gain is not None:
@@ -1369,31 +1448,113 @@ def _validate(args) -> tuple:
         print('  Gain check      : no gain_check in project JSON '
               '(run check-gain-transform to verify orientation)')
 
-    # ── 4. Pixel spacing and voltage vs mdoc ──────────────────────────────
+    # ── 4. Pixel spacing and voltage vs calibrated / mdoc / project ────────
+    # Pixel size priority: a confirmed calibrated_apix (set up front via
+    # `validate-mdoc --calibrated-apix`, or recorded lazily below the first
+    # time a --apix value passes this check) always wins -- once it exists,
+    # the raw mdoc value is known-uncalibrated and shouldn't keep demanding
+    # --force on every subsequent run. Only fall back to the raw mdoc when
+    # no calibration has been recorded yet.
+    #
+    # Voltage has no calibrated tier (kV doesn't drift the way pixel size
+    # does): cmd=0 (mdoc-input mode) has the raw .mdoc files about to be
+    # processed right here -- read those directly, freshest possible source
+    # (catches a .mdoc that changed since validate-mdoc last saved it).
+    # cmd=1/2 use .mrc input -- no mdoc in scope at all -- so project.json
+    # (populated by validate-mdoc, which runs before cmd=0 in the
+    # documented pipeline) is the only available source.
+    _calibrated_apix = get_calibrated_apix()
     if mdoc_files:
-        meta = _read_mdoc_metadata(mdoc_files[0])
-        ps = meta.get('PixelSpacing')
-        if ps is not None:
-            if abs(ps - args.apix) > 0.02:
-                warnings.append(
-                    f'Pixel spacing mismatch:\n'
-                    f'       mdoc PixelSpacing = {ps} Å/px\n'
-                    f'       --apix            = {args.apix} Å/px\n'
-                    f'       (from {mdoc_files[0].name})'
-                )
-            else:
-                print(f'  PixelSpacing    : OK  ({ps} Å/px matches --apix {args.apix})')
+        meta   = _read_mdoc_metadata(mdoc_files[0])
+        kv_ref = meta.get('Voltage')
+        kv_ref_label = mdoc_files[0].name
+    else:
+        kv_ref = get_voltage()
+        kv_ref_label = 'project.json (mdoc_data, from validate-mdoc)'
 
-        volt = meta.get('Voltage')
-        if volt is not None:
-            if abs(volt - args.kv) > 1:
+    if _calibrated_apix is not None:
+        ps_ref, ref_label = _calibrated_apix, 'project.json (calibrated_apix, previously confirmed)'
+    elif mdoc_files:
+        ps_ref, ref_label = meta.get('PixelSpacing'), mdoc_files[0].name
+    else:
+        ps_ref, ref_label = get_angpix(), 'project.json (mdoc_data, from validate-mdoc)'
+
+    if ps_ref is not None:
+        if abs(ps_ref - args.apix) > 0.02:
+            warnings.append(
+                f'Pixel spacing mismatch:\n'
+                f'       recorded PixelSpacing = {ps_ref} Å/px  (from {ref_label})\n'
+                f'       --apix                = {args.apix} Å/px'
+            )
+        else:
+            print(f'  PixelSpacing    : OK  ({ps_ref} Å/px matches --apix {args.apix})')
+    else:
+        print(f'  PixelSpacing    : no recorded value to check --apix against '
+              f'(run validate-mdoc first to enable this check)')
+
+    if kv_ref is not None:
+        if abs(kv_ref - args.kv) > 1:
+            warnings.append(
+                f'Voltage mismatch:\n'
+                f'       recorded Voltage = {kv_ref} kV  (from {kv_ref_label})\n'
+                f'       --kv             = {args.kv} kV'
+            )
+        else:
+            print(f'  Voltage         : OK  ({kv_ref} kV matches --kv {args.kv})')
+    else:
+        print(f'  Voltage         : no recorded value to check --kv against '
+              f'(run validate-mdoc first to enable this check)')
+
+    # ── 5. FmInt vs raw movie type (cmd=0 only -- MC-stage parameter) ──────
+    if mdoc_files and args.cmd == 0:
+        sub0 = meta.get('SubFramePath')
+        file_type = Path(sub0).suffix.lstrip('.').lower() if sub0 else None
+        if file_type in ('tif', 'tiff') and args.fm_int != 1:
+            warnings.append(
+                f'--fm-int {args.fm_int} looks wrong for TIFF movies (detected '
+                f'from {mdoc_files[0].name}): TIFF frames are already '
+                f'individually rendered, so --fm-int is normally 1.'
+            )
+        elif file_type == 'eer' and args.fm_int == 1:
+            warnings.append(
+                f'--fm-int 1 looks wrong for EER movies (detected from '
+                f'{mdoc_files[0].name}): EER needs raw frames grouped into '
+                f'rendered frames (commonly ~10-15, but depends on your '
+                f'fractionation setup) -- --fm-int 1 would treat every raw '
+                f'EER frame as its own image.'
+            )
+        elif file_type is not None:
+            print(f'  FmInt           : OK  ({file_type} movies, --fm-int {args.fm_int})')
+
+    # ── 6. Cs / AmpContrast vs previously-recorded run params ──────────────
+    # Cs/AmpContrast have no source in the mdoc at all -- SerialEM doesn't
+    # log spherical aberration or amplitude contrast -- so the only "ground
+    # truth" for these two is self-consistency with whatever value a prior
+    # real run-aretomo3 invocation on this same project actually used.
+    # Kv is included too as a second, independent layer on top of the
+    # mdoc-based check above (catches e.g. a stale/incomplete project.json).
+    # apix is deliberately NOT re-checked here -- calibrated_apix (section 4
+    # above) already owns that comparison exclusively, to avoid nagging
+    # about the same mismatch twice.
+    prior = get_run_params()
+    if prior is None:
+        print('  Run params      : no prior run-aretomo3 invocation recorded '
+              'yet for this project (first run, or none since --dry-run)')
+    else:
+        for label, argval, key, tol in (
+            ('Kv',          args.kv,           'kv',           1),
+            ('Cs',          args.cs,           'cs',           0.05),
+            ('AmpContrast', args.amp_contrast, 'amp_contrast', 0.005),
+        ):
+            recorded = prior.get(key)
+            if recorded is not None and abs(recorded - argval) > tol:
                 warnings.append(
-                    f'Voltage mismatch:\n'
-                    f'       mdoc Voltage = {volt} kV\n'
-                    f'       --kv         = {args.kv} kV'
+                    f'{label} differs from the last run-aretomo3 invocation '
+                    f'on this project (--cmd {prior.get("cmd")}, '
+                    f'{prior.get("timestamp")}):\n'
+                    f'       previously used = {recorded}\n'
+                    f'       now passing     = {argval}'
                 )
-            else:
-                print(f'  Voltage         : OK  ({volt} kV matches --kv {args.kv})')
 
     input_ts_names = {f.stem for f in mdoc_files} if mdoc_files else set()
 
@@ -1421,7 +1582,10 @@ def add_parser(subparsers):
                           'not needed for --cmd 1+ (alignment/recon only).')
     req.add_argument('--apix', '-a', type=float, default=None,
                      help='Pixel size of input movies in Å/px (-PixSize). '
-                          'Auto-read from project.json (mdoc_data) if omitted.')
+                          'Required -- no auto-fill. Checked against '
+                          'project.json calibrated_apix if set (see '
+                          'validate-mdoc --calibrated-apix), else raw mdoc '
+                          'PixelSpacing; mismatch aborts unless --force.')
     req.add_argument('--fm-dose', '-d', type=float, default=None,
                      help='Electron dose per raw frame in e⁻/Å² (-FmDose). '
                           'Required for --cmd 0 (motion correction); '
@@ -1447,7 +1611,8 @@ def add_parser(subparsers):
     inp.add_argument('--serial', type=int, default=1,
                      help='Seconds to wait for the next tilt series; '
                           '1=offline batch (default); 0=do not wait '
-                          '(use when processing a single TS) (-Serial)')
+                          '(use when processing a single TS) (-Serial). '
+                          'AreTomo3 default: 0.')
 
     mic = p.add_argument_group('microscope / acquisition')
     mic.add_argument('--kv', type=float, default=300.0,
@@ -1455,14 +1620,18 @@ def add_parser(subparsers):
     mic.add_argument('--cs', type=float, default=2.7,
                      help='Spherical aberration in mm (-Cs)')
     mic.add_argument('--amp-contrast', type=float, default=0.1,
-                     help='Amplitude contrast ratio (-AmpContrast)')
+                     help='Amplitude contrast ratio (-AmpContrast). '
+                          'AreTomo3 default: 0.07; ours matches TomoGuide (0.1).')
     mic.add_argument('--flip-gain', type=int, default=0,
                      help='Gain flip: 0=none 1=flipud (-FlipGain)')
     mic.add_argument('--rot-gain', type=int, default=0,
                      help='Gain rotation: 0=none 1=90CCW 2=180 3=270CCW (-RotGain)')
-    mic.add_argument('--cmd', type=int, default=0,
-                     help='Pipeline mode: 0=full 1=from-alignment 2=recon-only '
-                          '3=CTF-only 4=rotate-axis-180 (-Cmd)')
+    mic.add_argument('--cmd', type=int, default=None,
+                     help='Pipeline mode: 0=full 1=from-alignment 2=recon-only (-Cmd). '
+                          'Required -- no default. 3=CTF-only is rejected by this '
+                          'wrapper (unsupported); 4=rotate-axis-180 is accepted but '
+                          'has no dedicated staging/validation logic here -- use '
+                          'with care.')
 
     mc = p.add_argument_group('motion correction')
     mc.add_argument('--mc-bin', type=int, default=1,
@@ -1471,47 +1640,69 @@ def add_parser(subparsers):
                     metavar=('X', 'Y'),
                     help='Patch grid for local motion correction (-McPatch X Y)')
     mc.add_argument('--fm-int', type=int, default=1,
-                    help='Raw frames per rendered frame: 1=TIFF, ~15=EER (-FmInt)')
+                    help='Raw frames per rendered frame: 1=TIFF, ~15=EER (-FmInt). '
+                         'AreTomo3 default: 10.')
     mc.add_argument('--eer-sampling', type=int, default=None,
                     help='EER sampling rate; omitted if not given (-EerSampling)')
-    mc.add_argument('--split-sum', type=int, default=1,
-                    help='Write odd/even half-sets for dose weighting (-SplitSum)')
+    mc.add_argument('--split-sum', type=int, default=None,
+                    help='Write odd/even half-sets for dose weighting (-SplitSum). '
+                         'Required -- no default; downstream denoising '
+                         '(cryoCARE/DeepDeWedge) depends on this being a '
+                         'deliberate choice.')
 
     ali = p.add_argument_group('alignment and reconstruction')
-    ali.add_argument('--vol-z', type=int, default=2046,
-                     help='Reconstruction Z in pixels; 0=auto-estimate (-VolZ)')
-    ali.add_argument('--at-bin', type=float, nargs='+', default=[4.0],
+    ali.add_argument('--vol-z', type=int, default=None,
+                     help='Reconstruction Z in pixels; 0=auto-estimate (-VolZ). '
+                          'Required -- no default. AreTomo3 default: -1 '
+                          '(auto-estimate); a constant size across a whole run is '
+                          'usually preferable (2046 has worked well previously).')
+    ali.add_argument('--ext-z', type=int, default=None,
+                     help='Padding (px) added to auto-estimated thickness when '
+                          '--vol-z 0 (-ExtZ). Not passed unless given explicitly -- '
+                          "AreTomo3's own default (300) applies otherwise.")
+    ali.add_argument('--at-bin', type=float, nargs='+', default=None,
                      metavar='BIN',
-                     help='Tomogram binning; up to 3 values for multi-resolution (-AtBin)')
+                     help='Tomogram binning; up to 3 values for multi-resolution (-AtBin). '
+                          'Required -- no default. Sets the final tomogram voxel '
+                          'size that every downstream tool must match. '
+                          'AreTomo3 default: 1.0 (no binning).')
     ali.add_argument('--at-patch', type=int, nargs=2, default=[0, 0],
                      metavar=('X', 'Y'),
                      help='Local alignment patch grid; 0 0=global only (-AtPatch X Y)')
     ali.add_argument('--wbp', type=int, default=1,
-                     help='Reconstruction: 1=WBP 0=SART (-Wbp)')
+                     help='Reconstruction: 1=WBP 0=SART (-Wbp). '
+                          'AreTomo3 default: 0 (SART); ours matches TomoGuide (1).')
     ali.add_argument('--sart', type=int, nargs=2, default=None,
                      metavar=('ITERS', 'PROJS_PER_SUBSET'),
                      help='SART reconstruction parameters: number of iterations '
                           'and projections per subset (AreTomo3 defaults: 20 5). '
                           'Only used when --wbp 0. Omit to use AreTomo3 defaults. (-Sart)')
     ali.add_argument('--flip-vol', type=int, default=1,
-                     help='Flip reconstructed volume (-FlipVol)')
-    ali.add_argument('--tilt-cor', nargs='+', default=['1'],
+                     help='Flip reconstructed volume (-FlipVol). '
+                          'AreTomo3 default: 0 (off); ours matches TomoGuide (1) and is '
+                          'required for correct RELION5 xyz-axis-convention import.')
+    ali.add_argument('--tilt-cor', nargs='+', default=None,
                      metavar=('ENABLE', 'ANGLE'),
                      help='Tilt correction: 0=off, 1=auto-correct. Optionally '
                           'append a fixed offset in degrees, e.g. --tilt-cor 1 2.5 '
-                          '(-TiltCor)')
+                          '(-TiltCor). Required -- no default (has no effect for '
+                          '--cmd 2, still asked for consistency). AreTomo3 '
+                          'default: 0 (off).')
     ali.add_argument('--dark-tol', type=float, default=0.7,
                      help='Dark frame rejection tolerance (-DarkTol)')
     ali.add_argument('--corr-ctf', type=int, default=1,
                      help='Local CTF correction before reconstruction (-CorrCTF)')
     ali.add_argument('--out-xf', type=int, default=1,
-                     help='Write IMOD XF transform files (-OutXF)')
+                     help='Write IMOD XF transform files (-OutXF). '
+                          'AreTomo3 default: 0 (off).')
     ali.add_argument('--out-imod', type=int, default=1,
                      help='Write IMOD support files for RELION (-OutImod)')
     ali.add_argument('--analysis', default=None,
                      help='analyse output directory; loads global suggested '
-                          'TiltAxis and AlignZ from aretomo3_project.json. '
-                          'Also used by --filter-overlap. '
+                          'TiltAxis and AlignZ from aretomo3_project.json for '
+                          '--cmd 0/1 (both realign; --cmd 2 skips this -- '
+                          'alignment is already fixed in the existing .aln). '
+                          'Also used by --filter-overlap (--cmd 2 only). '
                           'Explicit --tilt-axis / --align-z take precedence.')
     ali.add_argument('--filter-overlap', type=float, default=None,
                      metavar='PCT',
@@ -1554,17 +1745,15 @@ def run(args):
     # Force line-buffered stdout so output appears immediately when piped (e.g. | tee)
     sys.stdout.reconfigure(line_buffering=True)
 
+    if args.cmd == 3:
+        print('ERROR: --cmd 3 (CTF-only) is not supported by this wrapper -- '
+              'no staging/validation logic here is written for it. '
+              'Use --cmd 0, 1, or 2.')
+        sys.exit(1)
+
     out_dir    = Path(args.output)
     src_in_dir = Path(args.in_prefix).parent  # original source (e.g. run003)
     staging_dir = None
-
-    # ── Auto-fill from project.json if not given on CLI ────────────────────
-    if args.apix is None:
-        args.apix = get_angpix()
-    if args.apix is None:
-        print('ERROR: --apix not provided and no pixel size found in project.json')
-        print('       Run validate-mdoc first, or supply --apix explicitly.')
-        sys.exit(1)
 
     # ── Staging directory (cmd=1/2) ─────────────────────────────────────────
     # Symlinks to .mrc/_TLT.txt stacks (from project.json input_stacks) are
@@ -1625,6 +1814,18 @@ def run(args):
         else:
             print('\n  Use --force to run anyway, or fix the parameters above.')
             sys.exit(1)
+
+    # Record kv/cs/amp_contrast/apix as the self-consistency baseline for
+    # cs/amp_contrast (which have no mdoc ground truth) and as a second
+    # check for kv -- only on a real run, so a --dry-run preview never
+    # mutates project.json. Also (re-)confirm calibrated_apix with whatever
+    # --apix value just passed the check above (matched cleanly, or was
+    # --force'd through) -- section 4 above will compare against this on
+    # every later run instead of the raw mdoc value.
+    if not args.dry_run:
+        record_run_params(kv=args.kv, cs=args.cs, amp_contrast=args.amp_contrast,
+                          apix=args.apix, cmd=args.cmd)
+        record_calibrated_apix(args.apix, source=f'run-aretomo3 --cmd {args.cmd}')
 
     print()
 

@@ -84,6 +84,99 @@ def get_angpix() -> Optional[float]:
     return data.get('analyse', {}).get('global_suggested', {}).get('angpix')
 
 
+def get_calibrated_apix() -> Optional[float]:
+    """
+    Return the confirmed/calibrated pixel size, if one has been recorded --
+    either up front via `validate-mdoc --calibrated-apix`, or lazily by any
+    command's real (non-dry-run) preflight after a --apix/--angpix value
+    has passed validation (matched cleanly, or was --force'd through).
+
+    This is deliberately separate from the raw mdoc PixelSpacing (which is
+    uncalibrated and routinely *expected* to disagree with the real value):
+    once a calibrated value exists, it's the reference every later
+    preflight check should compare against instead of the raw mdoc, so a
+    deliberately-confirmed override doesn't require --force again on every
+    subsequent run. Returns None if nothing has been recorded yet.
+    """
+    return _load().get('calibrated_apix', {}).get('value')
+
+
+def record_calibrated_apix(value: float, source: str) -> None:
+    """Record the confirmed/calibrated pixel size, so later preflight
+    checks (any command) compare against it instead of the raw,
+    uncalibrated mdoc PixelSpacing. See get_calibrated_apix()."""
+    update_section('calibrated_apix', {
+        'timestamp': datetime.datetime.now().isoformat(timespec='seconds'),
+        'value':     value,
+        'source':    source,
+    })
+
+
+def resolve_reference_apix() -> tuple:
+    """
+    Best available "ground truth" pixel size for a --apix/--angpix
+    mismatch check, for callers with no raw .mdoc file directly in scope
+    (--cmd 1/2, run-aretomo3-per-ts, analyse). Priority:
+      1. calibrated_apix   -- see get_calibrated_apix()
+      2. mdoc_data.per_ts  -- project.json, from validate-mdoc (uncalibrated)
+    Returns (value, label); value is None if neither is available.
+    """
+    calibrated = get_calibrated_apix()
+    if calibrated is not None:
+        return calibrated, 'project.json (calibrated_apix, previously confirmed)'
+    ps = get_angpix()
+    if ps is not None:
+        return ps, 'project.json (mdoc_data, from validate-mdoc)'
+    return None, None
+
+
+def get_voltage() -> Optional[float]:
+    """
+    Return the most common accelerating voltage (kV) from mdoc_data.per_ts,
+    or None if not available (mdoc_data.per_ts not yet populated -- e.g.
+    before enrich/validate-mdoc has run -- or acquisition.voltage missing
+    from an older mdoc parse that predates that field).
+    """
+    per_ts = _load().get('mdoc_data', {}).get('per_ts', {})
+    vals = [ts.get('acquisition', {}).get('voltage') for ts in per_ts.values()
+            if ts.get('acquisition', {}).get('voltage') is not None]
+    if not vals:
+        return None
+    from collections import Counter
+    return Counter(vals).most_common(1)[0][0]
+
+
+def get_run_params() -> Optional[dict]:
+    """
+    Return the microscope params ({'kv', 'cs', 'amp_contrast', 'apix',
+    'cmd', 'timestamp'}) recorded by the most recent real (non-dry-run)
+    run-aretomo3 invocation for this project, or None if run-aretomo3
+    hasn't recorded any yet.
+
+    This is the self-consistency baseline for --cs/--amp-contrast, which
+    (unlike --apix/--kv) have no source in the mdoc to check against --
+    SerialEM doesn't log spherical aberration or amplitude contrast, so
+    the only "ground truth" available is whatever value was actually used
+    on a prior stage of the same pipeline.
+    """
+    return _load().get('run_aretomo3_params') or None
+
+
+def record_run_params(kv: float, cs: float, amp_contrast: float,
+                      apix: float, cmd: int) -> None:
+    """Record the microscope params used by a real run-aretomo3 invocation,
+    so later stages (cmd=1/2) can be checked for self-consistency against
+    them via get_run_params()."""
+    update_section('run_aretomo3_params', {
+        'timestamp':    datetime.datetime.now().isoformat(timespec='seconds'),
+        'kv':           kv,
+        'cs':           cs,
+        'amp_contrast': amp_contrast,
+        'apix':         apix,
+        'cmd':          cmd,
+    })
+
+
 def get_latest_analysis_dir() -> Optional[Path]:
     """Return the output directory from the last analyse run, or None."""
     data = _load()

@@ -96,15 +96,16 @@ def _enrich_mdoc_data(frames_dir: Path, force: bool):
     n_ok = n_fail = 0
     for path in mdoc_files:
         try:
-            mdoc_data, angpix = parse_mdoc_file(path)
+            mdoc_data, angpix, acquisition = parse_mdoc_file(path)
         except Exception as exc:
             print(f'    FAIL  {path.name}: {exc}')
             n_fail += 1
             continue
         if mdoc_data:
             new_entries[path.stem] = {
-                'angpix':  angpix,
-                'frames':  {str(k): v for k, v in mdoc_data.items()},
+                'angpix':      angpix,
+                'acquisition': acquisition,
+                'frames':      {str(k): v for k, v in mdoc_data.items()},
             }
             n_ok += 1
         else:

@@ -28,7 +28,8 @@ from aretomo3_preprocess.shared.project_json import (
     update_section, update_section_once, args_to_dict,
 )
 from aretomo3_preprocess.shared.project_state import (
-    get_angpix, get_tlt_dir, get_gain_check_dir, get_ts_to_original_stem,
+    resolve_reference_apix, record_calibrated_apix,
+    get_tlt_dir, get_gain_check_dir, get_ts_to_original_stem,
 )
 from aretomo3_preprocess.shared.output_guard import check_output_dir
 from aretomo3_preprocess.shared.parsers import (
@@ -1537,8 +1538,12 @@ def add_parser(subparsers):
                    help='%% overlap below which a frame is flagged')
     p.add_argument('--angpix',    '-a', type=float, default=None,
                    help='Pixel size in Å/px — used to convert thickness from '
-                        'pixels to nm.  Auto-read from project.json (mdoc_data) '
-                        'if omitted.')
+                        'pixels to nm. Required -- no auto-fill. Checked '
+                        'against project.json calibrated_apix if set (see '
+                        'validate-mdoc --calibrated-apix), else mdoc_data '
+                        'PixelSpacing; mismatch aborts unless --force.')
+    p.add_argument('--force', action='store_true',
+                   help='Run despite a --angpix vs project.json PixelSpacing mismatch')
     p.add_argument('--n-lamellae', '-n', type=int, default=None,
                    help='Expected number of lamellae on the grid.  When set, '
                         'K-means clustering is applied to the stage X-Y '
@@ -1588,7 +1593,26 @@ def run(args):
         return
 
     if args.angpix is None:
-        args.angpix = get_angpix()
+        print('ERROR: --angpix is required (no default).')
+        print('       Pixel size of the input movies, in Å/px -- used to convert '
+              'thickness/AlignZ from pixels to nm in every plot and QC output. '
+              'A silently wrong value here corrupts those numbers with no '
+              'indication anything is off.')
+        sys.exit(1)
+
+    _ps_ref, _ps_ref_label = resolve_reference_apix()
+    if _ps_ref is not None and abs(_ps_ref - args.angpix) > 0.02:
+        msg = (f'Pixel spacing mismatch:\n'
+               f'       recorded PixelSpacing = {_ps_ref} Å/px  ({_ps_ref_label})\n'
+               f'       --angpix              = {args.angpix} Å/px')
+        if args.force:
+            print(f'WARNING: {msg}\n         (--force, continuing)\n')
+        else:
+            print(f'ERROR: {msg}')
+            print('       Use --force to run anyway, or fix --angpix.')
+            sys.exit(1)
+
+    record_calibrated_apix(args.angpix, source='analyse')
 
     # ── TLT directory: check --input first (direct cmd=0 case), then project.json ──
     if any(in_dir.glob('*_TLT.txt')):
@@ -1624,7 +1648,7 @@ def run(args):
     # translate via rename_ts.lookup.
     _ts_to_mdoc_stem = get_ts_to_original_stem()  # e.g. {'ts-001': 'Position_1', ...}
 
-    angpix_str = f'{args.angpix} Å/px' if args.angpix else 'from mdoc_data'
+    angpix_str = f'{args.angpix} Å/px'
     print(f'Found {len(aln_files)} .aln files  |  threshold = {args.threshold}%  '
           f'|  pixel size = {angpix_str}  |  TLT dir = {tlt_dir}\n')
 
@@ -1661,13 +1685,14 @@ def run(args):
         _mdoc_key   = _ts_to_mdoc_stem.get(ts_name, ts_name)
         _cm         = _cached_mdoc.get(_mdoc_key, {})
         mdoc_data   = {int(k): v for k, v in _cm.get('frames', {}).items()}
-        mdoc_angpix = _cm.get('angpix')
         if _cm:
             _n_mdoc_cached += 1
         _timing['mdoc'] += time.perf_counter() - _t
 
-        # Resolve pixel size: CLI arg → mdoc PixelSpacing → None
-        angpix = args.angpix if args.angpix is not None else mdoc_angpix
+        # angpix is required (validated above) -- one authoritative value for
+        # the whole run, not a silent per-TS fallback to uncalibrated mdoc
+        # PixelSpacing (that's only used for the mismatch check above).
+        angpix = args.angpix
         data['angpix'] = angpix
         if data['thickness'] is not None and angpix is not None:
             data['thickness_nm'] = round(data['thickness'] * angpix / 10.0, 2)
