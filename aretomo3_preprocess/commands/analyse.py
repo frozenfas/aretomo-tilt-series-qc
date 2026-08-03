@@ -1248,6 +1248,12 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
       <textarea id="ts-comment" rows="3"
                 placeholder="Notes for this tilt series..."></textarea>
       <div id="comment-controls">
+        <button class="nav-btn" id="btn-load-comments"
+                style="font-size:0.82em;background:#546e7a;border:1px solid #78909c;"
+                title="Load/merge notes from a ts_comments.csv file (e.g. one exported earlier, or from a colleague)">
+          &#128193; Load comments
+        </button>
+        <input type="file" id="comment-file-input" accept=".csv" style="display:none">
         <button class="nav-btn" id="btn-export-comments"
                 style="font-size:0.82em;background:#546e7a;border:1px solid #78909c;"
                 title="Save every non-empty note as ts_comments.csv">
@@ -1586,6 +1592,37 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
       else {{ comments[name] = commentBox.value; }}
       localStorage.setItem(commentStorageKey, JSON.stringify(comments));
       commentStatus.textContent = 'Saved (this browser)';
+    }});
+
+    document.getElementById('btn-load-comments').addEventListener('click', () => {{
+      document.getElementById('comment-file-input').click();
+    }});
+
+    document.getElementById('comment-file-input').addEventListener('change', (ev) => {{
+      const file = ev.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {{
+        const lines = reader.result.split(/\\r?\\n/).slice(1);  // skip header
+        const rowRe = /^([^,]+),"((?:[^"]|"")*)"\\s*$/;
+        let loaded = 0, unknown = 0;
+        lines.forEach(line => {{
+          if (!line.trim()) return;
+          const m = line.match(rowRe);
+          if (!m) return;
+          const [, name, rawComment] = m;
+          if (!tsNames.includes(name)) {{ unknown++; return; }}
+          comments[name] = rawComment.replace(/""/g, '"');
+          loaded++;
+        }});
+        localStorage.setItem(commentStorageKey, JSON.stringify(comments));
+        const name = tsNames[idx];
+        commentBox.value = name ? (comments[name] || '') : '';
+        commentStatus.textContent = 'Loaded ' + loaded + ' comment(s) from ' + file.name
+          + (unknown ? ' (' + unknown + ' skipped, unknown TS)' : '');
+      }};
+      reader.readAsText(file);
+      ev.target.value = '';  // allow re-selecting the same file later
     }});
 
     document.getElementById('btn-export-comments').addEventListener('click', () => {{
@@ -2132,6 +2169,12 @@ def add_parser(subparsers):
                    help='Skip regenerating per-TS plots that already exist in '
                         '--output.  Useful when re-running to update the HTML '
                         'or summary without re-plotting every tilt series.')
+    p.add_argument('--detailed-log', action='store_true',
+                   help='Print the full per-TS console breakdown (dark-frame '
+                        'list, per-frame overlap table) for every tilt series. '
+                        'Default: only a one-line status is printed, and only '
+                        'for TS with flagged frames, dark frames, or warnings '
+                        '-- everything else is still in the JSON/TSV/HTML output.')
     p.add_argument('--compare-previous', '-C', default=None,
                    help='Output directory from a previous analyse run.  '
                         'Previous run data is shown in grey in per-TS overlap '
@@ -2506,29 +2549,41 @@ def run(args):
         n_bad         = len(bad_frames)
         total_flagged += n_bad
 
-        status = '✗' if n_bad else '✓'
-        _pwrite(sep)
-        _pwrite(f'  {status}  {ts_name}   {n_bad} frame(s) below {args.threshold}%  '
-                f'| {len(data["dark_frames"])} dark frame(s)')
-        for w in data.get('warnings', []):
-            if w.startswith('NOTE:'):
-                _pwrite(f'  NOTE  {w[5:].lstrip()}')
-            else:
-                _pwrite(f'  WARN  {w}')
-        if bad_frames:
-            _pwrite(f'     {"SEC":>4}  {"Tilt (°)":>9}  {"TX (px)":>10}  '
-                    f'{"TY (px)":>10}  {"Overlap":>8}')
-            for f in bad_frames:
-                _pwrite(f'     {f["sec"]:>4}  {f["tilt"]:>9.2f}  {f["tx"]:>10.1f}  '
-                        f'{f["ty"]:>10.1f}  {f["overlap_pct"]:>7.1f}%')
-                flagged_rows.append({
-                    'ts':          ts_name,
-                    'sec':         f['sec'],
-                    'tilt':        f['tilt'],
-                    'tx':          f['tx'],
-                    'ty':          f['ty'],
-                    'overlap_pct': f['overlap_pct'],
-                })
+        status  = '✗' if n_bad else '✓'
+        n_dark  = len(data['dark_frames'])
+        _has_issue = bool(n_bad or n_dark or data.get('warnings'))
+
+        # Default: keep console output down to a one-liner, and only for TS
+        # that actually have something to report -- a clean multi-hundred-TS
+        # run used to print a full block (separator, status, per-frame
+        # overlap table) for every single TS, burying the aggregate summary
+        # and any real warnings under noise. --detailed-log restores the
+        # full per-TS breakdown unconditionally; everything is still in the
+        # JSON/TSV/HTML output regardless of this flag.
+        if args.detailed_log or _has_issue:
+            _pwrite(sep)
+            _pwrite(f'  {status}  {ts_name}   {n_bad} frame(s) below {args.threshold}%  '
+                    f'| {n_dark} dark frame(s)')
+            for w in data.get('warnings', []):
+                if w.startswith('NOTE:'):
+                    _pwrite(f'  NOTE  {w[5:].lstrip()}')
+                else:
+                    _pwrite(f'  WARN  {w}')
+            if bad_frames and args.detailed_log:
+                _pwrite(f'     {"SEC":>4}  {"Tilt (°)":>9}  {"TX (px)":>10}  '
+                        f'{"TY (px)":>10}  {"Overlap":>8}')
+                for f in bad_frames:
+                    _pwrite(f'     {f["sec"]:>4}  {f["tilt"]:>9.2f}  {f["tx"]:>10.1f}  '
+                            f'{f["ty"]:>10.1f}  {f["overlap_pct"]:>7.1f}%')
+        for f in bad_frames:
+            flagged_rows.append({
+                'ts':          ts_name,
+                'sec':         f['sec'],
+                'tilt':        f['tilt'],
+                'tx':          f['tx'],
+                'ty':          f['ty'],
+                'overlap_pct': f['overlap_pct'],
+            })
 
         all_parsed[ts_name] = {
             'file':         str(in_dir / f'{ts_name}.aln'),
@@ -2779,6 +2834,46 @@ def run(args):
     }
     recommended_tilt_axis = global_suggested['rot_deg']
 
+    # Per-TS QC values (mean_overlap/avg_defocus/thickness_nm/tilt_axis_deg),
+    # already computed above for the HTML report, persisted here too so
+    # `project-summary` can show real distributions (ranges, medians,
+    # histograms) from project.json alone rather than opening this run's
+    # alignment_data.json directly. ts_entries at this point also contains
+    # the synthetic Summary/lamella-overview rows inserted below the main
+    # loop -- excluded here the same way the HTML tab split does, via the
+    # `name.startswith('[')` marker.
+    per_ts_qc = [
+        {
+            'name':           e['name'],
+            'mean_overlap':   e.get('mean_overlap'),
+            'avg_defocus_um': e.get('avg_defocus'),
+            'thickness_nm':   e.get('thickness_nm'),
+            'tilt_axis_deg':  e.get('tilt_axis_deg'),
+            'n_bad':          e.get('n_bad'),
+            'n_dark':         e.get('n_dark'),
+        }
+        for e in ts_entries if not e['name'].startswith('[')
+    ]
+
+    def _pctile_range(vals, lo_pct=2, hi_pct=98):
+        clean = [v for v in vals if v is not None]
+        if not clean:
+            return None
+        if len(clean) < 5:
+            return {'lo': round(min(clean), 3), 'hi': round(max(clean), 3),
+                     'median': round(float(np.median(clean)), 3)}
+        lo_v, hi_v = float(np.percentile(clean, lo_pct)), float(np.percentile(clean, hi_pct))
+        trimmed = [v for v in clean if lo_v <= v <= hi_v]
+        return {'lo': round(lo_v, 3), 'hi': round(hi_v, 3),
+                 'median': round(float(np.median(trimmed)), 3)}
+
+    qc_summary = {
+        'thickness_nm':   _pctile_range([e['thickness_nm']   for e in per_ts_qc]),
+        'avg_defocus_um': _pctile_range([e['avg_defocus_um'] for e in per_ts_qc]),
+        'mean_overlap':   _pctile_range([e['mean_overlap']   for e in per_ts_qc]),
+        'tilt_axis_deg':  _pctile_range([e['tilt_axis_deg']  for e in per_ts_qc]),
+    }
+
     print()
     update_section(
         section    = 'analyse',
@@ -2794,6 +2889,8 @@ def run(args):
             'recommended_tilt_axis':  recommended_tilt_axis,
             'global_suggested':       global_suggested,
             'lamella_suggested':      lamella_stats,
+            'per_ts_qc':              per_ts_qc,
+            'qc_summary':             qc_summary,
         },
         backup_dir = out_dir,
     )
