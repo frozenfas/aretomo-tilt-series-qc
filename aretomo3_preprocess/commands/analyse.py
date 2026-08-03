@@ -1295,6 +1295,12 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
     //    this same script would throw "before initialization" the moment
     //    rebuildVis() is first called below) ────────────────────────────────
     const tsNames        = {ts_names_js};
+    // Real tilt-series count -- `n` (= images.length) also counts the
+    // synthetic [Summary]/[Lamella]/stage-overview entries, so anywhere the
+    // UI reports "N tilt series" (as opposed to "N of the M currently-
+    // visible-scope entries") must use this instead, or it overcounts by
+    // however many overview pages this run has.
+    const nRealTS        = tsNames.filter(Boolean).length;
     const storageKey     = 'aretomo_ratings_{session_key}';
     const embeddedRatings = {embedded_ratings_js};
     // Merge: embedded CSV ratings are the baseline; localStorage overrides
@@ -1313,6 +1319,36 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
     const ttl     = document.getElementById('title');
     const pbar    = document.getElementById('progress-bar');
     const btnFilt = document.getElementById('btn-filter');
+
+    // ── Selection override (localStorage, keyed by ts_name -- same pattern
+    //    as ratings/comments above) ─────────────────────────────────────────
+    // selectedFlags starts from whatever project.json's select_ts section
+    // had baked in at report-generation time (or all-1 if none). Without
+    // this, "Clear ts-selection" / loading a ts-select.csv only changed the
+    // in-memory state for the current page view -- any reload (or the next
+    // `analyse` re-run, which re-embeds select_ts unconditionally) silently
+    // reverted to the embedded selection, making it look like clearing
+    // "didn't work" when really it just never persisted anywhere. Applying
+    // a saved override here, and saving one on every change below, makes a
+    // choice to clear/reselect stick across reloads exactly like ratings do.
+    const selectionStorageKey = 'aretomo_selection_{session_key}';
+    (function() {{
+      const overrides = JSON.parse(localStorage.getItem(selectionStorageKey) || '{{}}');
+      for (let i = 0; i < n; i++) {{
+        const name = tsNames[i];
+        if (name && name in overrides && selectedFlags[i] !== overrides[name]) {{
+          selectedFlags[i] = overrides[name];
+          sel.options[i].setAttribute('data-selected', overrides[name]);
+        }}
+      }}
+    }})();
+    function _saveSelectionOverride() {{
+      const overrides = {{}};
+      for (let i = 0; i < n; i++) {{
+        if (tsNames[i]) overrides[tsNames[i]] = selectedFlags[i];
+      }}
+      localStorage.setItem(selectionStorageKey, JSON.stringify(overrides));
+    }}
 
     // ── Filter sliders (dual-thumb min/max range, per metric) ─────────────
     const FILTER_KEYS  = ['overlap', 'coverage', 'defocus', 'thickness', 'tiltaxis', 'rating'];
@@ -1366,11 +1402,13 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
 
     function rebuildVis() {{
       visIndices = [];
+      let nInScope = 0;
       for (let i = 0; i < n; i++) {{
         const opt  = sel.options[i];
         // viewScope splits Overview (synthetic [Summary]/[Lamella] entries,
         // tsNames[i] null) from Tilt Series (real TS) -- see switchTab().
         const inScope = (viewScope === 'ts') ? !!tsNames[i] : !tsNames[i];
+        if (inScope) nInScope++;
         const pass = inScope && (!showSelOnly || selectedFlags[i] !== 0) && effectivePass(i);
         if (pass) {{
           opt.style.display = '';
@@ -1381,7 +1419,12 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
         opt.style.color = (selectedFlags[i] === 0) ? '#546e7a' : '';
       }}
       if (filterCount) {{
-        filterCount.textContent = visIndices.length + ' / ' + n + ' shown';
+        // Denominator is the current scope's own total (nRealTS on the
+        // Tilt Series tab, count of overview pages on the Overview tab) --
+        // not the grand total `n`, which mixes both and made the TS tab
+        // show e.g. ".. / 184" instead of ".. / 172" on a run with several
+        // overview/lamella pages.
+        filterCount.textContent = visIndices.length + ' / ' + nInScope + ' shown';
       }}
     }}
 
@@ -1697,14 +1740,17 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
         }}
       }}
       if (changed) {{
+        _saveSelectionOverride();
         rebuildVis();
         if (!visIndices.includes(idx)) show(visIndices[0] || 0);
         else show(idx);
       }}
-      // Update 'Selected only' button count
+      // Update 'Selected only' button count -- real TS only, selectedFlags
+      // also covers the synthetic overview entries (always 1) which aren't
+      // part of what "selected" means here.
       const btnF = document.getElementById('btn-filter');
       if (btnF) {{
-        const nSel = selectedFlags.filter(v => v !== 0).length;
+        const nSel = tsNames.reduce((acc, name, i) => acc + (name && selectedFlags[i] !== 0 ? 1 : 0), 0);
         btnF.style.display = '';
         btnF.textContent   = 'Selected only (' + nSel + ')';
       }}
@@ -1715,11 +1761,9 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
       .then(text => _applyRatingsCSV(text))
       .catch(() => {{}});
 
-    fetch('./ts-select.csv')
-      .then(r => r.ok ? r.text() : Promise.reject())
-      .then(text => _applySelectionCSV(text))
-      .catch(() => {{}});
-
+    // No auto-fetch of ts-select.csv on page load (unlike ratings/comments
+    // above) -- a TS selection is opt-in, applied only via the Load/Reload
+    // buttons below, so the report always defaults to showing every TS.
     document.getElementById('btn-reload-sel').addEventListener('click', () => {{
       fetch('./ts-select.csv?_=' + Date.now())
         .then(r => r.ok ? r.text() : Promise.reject())
@@ -1748,10 +1792,11 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
         selectedFlags[i] = 1;
         sel.options[i].setAttribute('data-selected', '1');
       }}
+      _saveSelectionOverride();   // persist "everyone selected" past reload/re-analyse
       showSelOnly = false;
       if (btnFilt) {{ btnFilt.style.background = '#546e7a'; }}
       const btnF = document.getElementById('btn-filter');
-      if (btnF) {{ btnF.textContent = 'Selected only (' + n + ')'; }}
+      if (btnF) {{ btnF.textContent = 'Selected only (' + nRealTS + ')'; }}
       rebuildVis();
       if (!visIndices.includes(idx)) show(visIndices[0] || 0); else show(idx);
     }});
@@ -2748,19 +2793,25 @@ def run(args):
                     print(f'Note: gain-check PNG not found: {src}')
             print(f'Gain check results loaded from project.json (dir: {gc_dir})\n')
 
-    # ── Load TS selection from project.json (automatic) ──────────────────────
+    # ── TS selection: informational only, not auto-applied ───────────────────
+    # select_ts's project.json record is print-only here -- every other
+    # command that respects a TS selection (trim-ts, run-aretomo3,
+    # pytom-match, etc.) requires an explicit --select-ts CSV path rather
+    # than reading this automatically, and the HTML report used to be the
+    # one inconsistent exception: baking the *last* select-ts run's
+    # exclusions into every future report by default, with no way for a
+    # "Clear ts-selection" click to make that stick past a reload/re-analyse
+    # (any regeneration silently re-applied it). The HTML always defaults to
+    # showing every TS now; loading a selection (via the Load/Reload
+    # ts-select.csv buttons) is an explicit, opt-in action, matching the
+    # rest of the pipeline.
     sel_section = _proj.get('select_ts', {})
     if sel_section.get('ts_names') is not None:
-        selection = {ts: True  for ts in sel_section['ts_names']}
-        # Mark all TS in alignment_data that are NOT in the selection as False
-        for ts in all_ts:
-            if ts not in selection:
-                selection[ts] = False
-        n_sel = sum(1 for v in selection.values() if v)
-        print(f'TS selection loaded from project.json: '
-              f'{n_sel}/{len(all_ts)} selected\n')
-    else:
-        selection = None
+        n_sel = len(sel_section['ts_names'])
+        print(f'Note: project.json has a select_ts record ({n_sel}/{len(all_ts)} '
+              f'selected) -- not applied automatically; use the report\'s '
+              f'"Load ts-select.csv" button if you want to view it.\n')
+    selection = None
 
     def _most_recent(glob_pat):
         """Newest-by-mtime match for glob_pat in out_dir, or None. Not just
