@@ -1135,6 +1135,10 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
       font-size: 0.8em; font-weight: 600; color: #37474f;
       text-transform: uppercase; letter-spacing: 0.03em; white-space: nowrap;
     }}
+    /* Forces the filter sliders onto their own line within #selection-bar's
+       wrapping flex row, instead of trailing awkwardly after the buttons
+       whenever there's just enough width to fit a couple of them. */
+    .control-block-break {{ flex-basis: 100%; height: 0; }}
 
     /* ── Star ratings ── */
     .star {{
@@ -1146,11 +1150,6 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
     #btn-export {{ margin-left: auto; padding: 6px 18px; font-size: 0.84em; }}
 
     /* ── Filter sliders ── */
-    #filter-bar {{
-      display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
-      margin-bottom: 10px; width: 100%; max-width: 1380px;
-      background: #f5f7fa; border: 1px solid #e0e6ea; border-radius: 6px; padding: 8px 14px;
-    }}
     .filt {{ display: flex; align-items: center; gap: 8px; }}
     .filt label {{ font-size: 0.82em; color: #37474f; white-space: nowrap; }}
     .filt-num {{
@@ -1225,6 +1224,26 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
         &#10060; Clear ts-selection
       </button>
       <span id="sel-source" class="source-label">no selection loaded</span>
+      <div class="control-block-break"></div>
+      {_range_slider_html('overlap',   'Overlap',   '%',      ovl_lo, ovl_hi, 0.5,  0)}
+      {_range_slider_html('coverage',  'Coverage (frames)', '', cov_lo, cov_hi, 1,  0)}
+      {_range_slider_html('defocus',   'Defocus',   '&micro;m', def_lo, def_hi, 0.05, 2)}
+      {_range_slider_html('thickness', 'Thickness', 'nm',     thk_lo, thk_hi, 1,    0)}
+      {_range_slider_html('rating',    'Rating',    '',       0,      5,      1,    0)}
+      {_range_slider_html('tiltaxis',  'Tilt axis', '&#176;', axis_lo, axis_hi, 0.5, 1)}
+      <button class="nav-btn" id="btn-reset-filters"
+              style="font-size:0.82em;background:#546e7a;border:1px solid #78909c;">Reset filters</button>
+      <button class="nav-btn" id="btn-invert-filters"
+              style="font-size:0.82em;background:#546e7a;border:1px solid #78909c;"
+              title="Show TS that FAIL at least one active filter, instead of ones that pass all of them">
+        &#8646; Invert filters
+      </button>
+      <button class="nav-btn" id="btn-export-filtered"
+              style="font-size:0.82em;background:#546e7a;border:1px solid #78909c;"
+              title="Save the TS currently passing all filters as a ts-select.csv">
+        &#128190; Export filtered selection
+      </button>
+      <span id="filter-count"></span>
     </div>
 
     <div id="progress"><div id="progress-bar"></div></div>
@@ -1259,28 +1278,6 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
         &#10060; Clear ratings
       </button>
       <span id="ratings-source" class="source-label">no ratings file loaded</span>
-    </div>
-
-    <div id="filter-bar" class="ts-only">
-      {_range_slider_html('overlap',   'Overlap',   '%',      ovl_lo, ovl_hi, 0.5,  0)}
-      {_range_slider_html('coverage',  'Coverage (frames)', '', cov_lo, cov_hi, 1,  0)}
-      {_range_slider_html('defocus',   'Defocus',   '&micro;m', def_lo, def_hi, 0.05, 2)}
-      {_range_slider_html('thickness', 'Thickness', 'nm',     thk_lo, thk_hi, 1,    0)}
-      {_range_slider_html('rating',    'Rating',    '',       0,      5,      1,    0)}
-      {_range_slider_html('tiltaxis',  'Tilt axis', '&#176;', axis_lo, axis_hi, 0.5, 1)}
-      <button class="nav-btn" id="btn-reset-filters"
-              style="font-size:0.82em;background:#546e7a;border:1px solid #78909c;">Reset filters</button>
-      <button class="nav-btn" id="btn-invert-filters"
-              style="font-size:0.82em;background:#546e7a;border:1px solid #78909c;"
-              title="Show TS that FAIL at least one active filter, instead of ones that pass all of them">
-        &#8646; Invert filters
-      </button>
-      <button class="nav-btn" id="btn-export-filtered"
-              style="font-size:0.82em;background:#546e7a;border:1px solid #78909c;"
-              title="Save the TS currently passing all filters as a ts-select.csv">
-        &#128190; Export filtered selection
-      </button>
-      <span id="filter-count"></span>
     </div>
 
     <div id="img-wrap">
