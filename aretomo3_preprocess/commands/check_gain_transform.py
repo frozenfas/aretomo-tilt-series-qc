@@ -364,11 +364,11 @@ def _plot_corrected_averages(corr_mul, corr_div, scores, best, out_path,
     fig, axes = plt.subplots(n_rows, 4, figsize=(pan_w * 4, fig_h))
     if n_rows == 1:
         axes = axes[np.newaxis, :]   # keep 2-D indexing consistent
-    fig.patch.set_facecolor('#16213e')
+    fig.patch.set_facecolor('white')
 
     for col_i, name in enumerate(names):
         is_best = (name == best)
-        col     = '#66bb6a' if is_best else '#e0e0e0'
+        col     = '#2e7d32' if is_best else '#444444'
         marker  = '  \u2190' if is_best else ''
 
         iter_pairs = [(corr_mul[name], 'cv_mul', 0, 1)]
@@ -387,7 +387,7 @@ def _plot_corrected_averages(corr_mul, corr_div, scores, best, out_path,
                       aspect='equal', interpolation='nearest')
             cv_val = scores[name][cv_key]
             cv_str = f'{cv_val:.4f}' if cv_val is not None else 'n/a'
-            title_col = col if row_img == 0 else '#e0e0e0'
+            title_col = col if row_img == 0 else '#444444'
             title_txt = (f'{name}{marker}  CV={cv_str}'
                          if row_img == 0 else f'CV={cv_str}')
             ax.set_title(title_txt, color=title_col, fontsize=10,
@@ -399,13 +399,13 @@ def _plot_corrected_averages(corr_mul, corr_div, scores, best, out_path,
             ax.imshow(resid, cmap='RdBu_r', vmin=-vlim, vmax=vlim,
                       aspect='equal', interpolation='nearest')
             ax.set_title(f'residual  \u00b1{vlim:.3f}',
-                         color='#e0e0e0', fontsize=9)
+                         color='#444444', fontsize=9)
             ax.axis('off')
 
         if is_best:
             for row_i in range(n_rows):
                 for spine in axes[row_i, col_i].spines.values():
-                    spine.set_edgecolor('#66bb6a')
+                    spine.set_edgecolor('#2e7d32')
                     spine.set_linewidth(3)
                     spine.set_visible(True)
                 axes[row_i, col_i].axis('on')
@@ -417,10 +417,10 @@ def _plot_corrected_averages(corr_mul, corr_div, scores, best, out_path,
     if include_div:
         row_labels  = ['raw \u00d7 gain', 'residual (\u00d7)',
                        'raw \u00f7 gain', 'residual (\u00f7)']
-        row_colours = ['#90caf9', '#ce93d8', '#ef9a9a', '#ffcc80']
+        row_colours = ['#1565c0', '#6a1b9a', '#c62828', '#e65100']
     else:
         row_labels  = ['raw \u00d7 gain', 'residual']
-        row_colours = ['#90caf9', '#ce93d8']
+        row_colours = ['#1565c0', '#6a1b9a']
 
     for row_i, (label, rcol) in enumerate(zip(row_labels, row_colours)):
         axes[row_i, 0].set_ylabel(label, color=rcol, fontsize=10)
@@ -432,7 +432,7 @@ def _plot_corrected_averages(corr_mul, corr_div, scores, best, out_path,
             spine.set_visible(False)
 
     fig.suptitle('Gain-corrected averages — flat/grey residual = correct transform',
-                 color='#90caf9', fontsize=13)
+                 color='#1565c0', fontsize=13)
     plt.tight_layout()
     plt.savefig(out_path, dpi=120, bbox_inches='tight',
                 facecolor=fig.get_facecolor())
@@ -444,12 +444,12 @@ def _plot_corrected_averages(corr_mul, corr_div, scores, best, out_path,
 def _plot_cv_convergence(cv_hist_mul, cv_hist_div, scores, best, out_path,
                          include_div=False):
     fig, ax = plt.subplots(figsize=(10, 5))
-    fig.patch.set_facecolor('#16213e')
-    ax.set_facecolor('#0d1b2a')
+    fig.patch.set_facecolor('white')
+    ax.set_facecolor('#fafafa')
 
     for name in cv_hist_mul:
         lw  = 2.5 if name == best else 1.5
-        col = _COLOURS.get(name, 'white')
+        col = _COLOURS.get(name, '#333333')
         cv_mul = scores[name]['cv_mul']
         ax.plot(range(1, len(cv_hist_mul[name]) + 1), cv_hist_mul[name],
                 label=f'{name} ×  (CV={cv_mul:.4f})',
@@ -461,16 +461,17 @@ def _plot_cv_convergence(cv_hist_mul, cv_hist_div, scores, best, out_path,
                     label=f'{name} ÷  (CV={cv_div_s})',
                     color=col, lw=lw * 0.7, linestyle='--', alpha=0.6)
 
-    ax.set_xlabel('Movies accumulated', color='#e0e0e0')
-    ax.set_ylabel('CV  (std / mean)  — lower is flatter', color='#e0e0e0')
+    ax.set_xlabel('Movies accumulated', color='#333333')
+    ax.set_ylabel('CV  (std / mean)  — lower is flatter', color='#333333')
     title_suffix = ', dashed = raw÷gain' if include_div else ''
     ax.set_title(f'Flatness convergence — solid = raw×gain{title_suffix}',
-                 color='#90caf9', fontsize=12)
-    ax.tick_params(colors='#e0e0e0')
+                 color='#1565c0', fontsize=12)
+    ax.tick_params(colors='#333333')
     for spine in ax.spines.values():
-        spine.set_edgecolor('#445')
-    ax.legend(facecolor='#1e2a45', labelcolor='#e0e0e0', framealpha=0.8)
-    ax.grid(True, alpha=0.2, color='#445')
+        spine.set_edgecolor('#bbbbbb')
+    ax.legend(facecolor='white', labelcolor='#333333', framealpha=0.9,
+              edgecolor='#cccccc')
+    ax.grid(True, alpha=0.3, color='#cccccc')
 
     plt.tight_layout()
     plt.savefig(out_path, dpi=120, bbox_inches='tight',
@@ -501,18 +502,18 @@ def _plot_residual_progression(checkpoints, best, out_path):
     fig, axes = plt.subplots(1, n_ckpt, figsize=(pan_w * n_ckpt, pan_h + 1.2))
     if n_ckpt == 1:
         axes = [axes]
-    fig.patch.set_facecolor('#16213e')
+    fig.patch.set_facecolor('white')
 
     for ax, (n_movies, snap) in zip(axes, checkpoints):
         resid = snap[best]
         ax.imshow(resid, cmap='RdBu_r', vmin=-vlim, vmax=vlim,
                   aspect='equal', interpolation='nearest')
-        ax.set_title(f'n={n_movies}', color='#e0e0e0', fontsize=9)
+        ax.set_title(f'n={n_movies}', color='#444444', fontsize=9)
         ax.axis('off')
 
     fig.suptitle(
         f'Residual progression — {best}  (flat/grey = correct, ±{vlim:.3f})',
-        color='#90caf9', fontsize=12,
+        color='#1565c0', fontsize=12,
     )
     plt.tight_layout()
     plt.savefig(out_path, dpi=120, bbox_inches='tight',
@@ -532,17 +533,17 @@ def _plot_gain_image(gain, gain_path, out_path):
     fig_h = fig_w * ny / nx
 
     fig, ax = plt.subplots(figsize=(fig_w, fig_h + 0.8))
-    fig.patch.set_facecolor('#16213e')
+    fig.patch.set_facecolor('white')
     im = ax.imshow(gain, cmap='gray', vmin=vlo, vmax=vhi,
                    aspect='equal', interpolation='bilinear', origin='lower')
     cb = plt.colorbar(im, ax=ax, fraction=0.02, pad=0.02)
-    cb.set_label('Gain value', color='#e0e0e0')
-    cb.ax.yaxis.set_tick_params(color='#e0e0e0', labelcolor='#e0e0e0')
+    cb.set_label('Gain value', color='#333333')
+    cb.ax.yaxis.set_tick_params(color='#333333', labelcolor='#333333')
     ax.axis('off')
     ax.set_title(
         f'{Path(gain_path).name}   {nx}\u00d7{ny}   '
         f'mean={gain.mean():.4f}   min={gain.min():.4f}   max={gain.max():.4f}',
-        color='#90caf9', fontsize=11,
+        color='#1565c0', fontsize=11,
     )
     plt.tight_layout()
     plt.savefig(out_path, dpi=100, bbox_inches='tight',
@@ -562,7 +563,7 @@ def _make_standalone_html(results, out_path, include_div=False):
     rows_html = ''
     for name, s in results['scores'].items():
         marker   = '  \u2190 best' if name == best else ''
-        style    = 'color:#66bb6a;font-weight:bold' if name == best else ''
+        style    = 'color:#2e7d32;font-weight:bold' if name == best else ''
         cv_mul_s = f"{s['cv_mul']:.4f}" if s.get('cv_mul') is not None else 'n/a'
         row = (f'<tr style="{style}"><td>{name}{marker}</td>'
                f'<td>{cv_mul_s}</td>')
@@ -586,31 +587,32 @@ def _make_standalone_html(results, out_path, include_div=False):
     * {{ box-sizing: border-box; margin: 0; padding: 0; }}
     body {{
       font-family: 'Segoe UI', sans-serif;
-      background: #16213e; color: #e0e0e0;
+      background: #f5f6fa; color: #222222;
       padding: 30px 40px;
     }}
-    h1 {{ color: #90caf9; margin-bottom: 6px; font-size: 1.3em; }}
-    .sub {{ color: #78909c; font-size: 0.85em; margin-bottom: 24px; }}
+    h1 {{ color: #1565c0; margin-bottom: 6px; font-size: 1.3em; }}
+    .sub {{ color: #607080; font-size: 0.85em; margin-bottom: 24px; }}
     .card {{
-      background: #1e2a45; border-radius: 10px; padding: 20px 24px;
+      background: #ffffff; border-radius: 10px; padding: 20px 24px;
       margin-bottom: 24px; max-width: 680px;
+      border: 1px solid #e0e0e0; box-shadow: 0 1px 3px rgba(0,0,0,0.06);
     }}
-    .best {{ color: #66bb6a; font-size: 1.25em; font-weight: bold; }}
+    .best {{ color: #2e7d32; font-size: 1.25em; font-weight: bold; }}
     .flags {{
-      font-family: monospace; font-size: 1.05em; color: #ffcc80;
-      margin-top: 8px; background: #0d1b2a; padding: 6px 12px;
+      font-family: monospace; font-size: 1.05em; color: #b25c00;
+      margin-top: 8px; background: #f2f2f2; padding: 6px 12px;
       border-radius: 6px; display: inline-block; margin-top: 10px;
     }}
     table {{ border-collapse: collapse; width: 100%; margin-top: 16px; }}
-    th, td {{ padding: 7px 14px; text-align: left; border-bottom: 1px solid #2e3f5c; }}
-    th {{ color: #90caf9; font-weight: normal; }}
-    .meta {{ color: #78909c; font-size: 0.82em; margin-top: 14px; }}
+    th, td {{ padding: 7px 14px; text-align: left; border-bottom: 1px solid #e0e0e0; }}
+    th {{ color: #1565c0; font-weight: normal; }}
+    .meta {{ color: #607080; font-size: 0.82em; margin-top: 14px; }}
     .imgs {{
       display: flex; gap: 24px; flex-wrap: wrap; margin-top: 0;
     }}
     .imgs img {{
       max-width: 1400px; width: 100%; border-radius: 8px;
-      border: 1px solid #2e3f5c;
+      border: 1px solid #e0e0e0;
     }}
   </style>
 </head>
