@@ -38,6 +38,21 @@ from pathlib import Path
 
 PROJECT_FILENAME = 'aretomo3_project.json'
 
+# Bumped when the schema gains a field that later code actually depends on
+# being present (not for every new section -- most are read defensively via
+# .get() and degrade gracefully). Stamped into data['project']['schema_version']
+# on every write (see update_section/update_section_once below), so any
+# project.json touched by current code always carries an accurate version --
+# and a project.json last written by older code keeps showing its true
+# (older) version until something writes to it again. Read via
+# project_state.get_schema_version(); commands that need to tell a user
+# "re-run X to get field Y" (e.g. project-summary) check this instead of
+# guessing from which fields happen to be present.
+#   1 -> pre-2026-08 schema (no analysis_runs/tool_paths/per_ts_qc/qc_summary)
+#   2 -> analysis_runs, tool_paths, analyse.per_ts_qc/qc_summary, calibrated
+#        apix takes priority over raw mdoc everywhere, mdoc ExposureDose field
+SCHEMA_VERSION = 2
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Internal helpers
@@ -116,9 +131,10 @@ def load_or_create(path: Path = None) -> dict:
         # First run — initialise
         data = {
             'project': {
-                'working_dir':  cwd,
-                'created':      datetime.datetime.now().isoformat(timespec='seconds'),
-                'last_updated': datetime.datetime.now().isoformat(timespec='seconds'),
+                'working_dir':    cwd,
+                'created':        datetime.datetime.now().isoformat(timespec='seconds'),
+                'last_updated':   datetime.datetime.now().isoformat(timespec='seconds'),
+                'schema_version': SCHEMA_VERSION,
             }
         }
         _write(data, path)
@@ -162,9 +178,10 @@ def update_section(section: str, values: dict,
 
     data                         = load_or_create(path)
     data[section]                = values
-    data['project']['last_updated'] = (
+    data['project']['last_updated']   = (
         datetime.datetime.now().isoformat(timespec='seconds')
     )
+    data['project']['schema_version'] = SCHEMA_VERSION
 
     _write(data, path)
     print(f'Project file updated: {path.name}  [{section}]')
@@ -205,10 +222,11 @@ def update_section_once(section: str, values: dict,
     if section in data:
         return   # already frozen — do not overwrite
 
-    data[section]                   = values
-    data['project']['last_updated'] = (
+    data[section]                     = values
+    data['project']['last_updated']   = (
         datetime.datetime.now().isoformat(timespec='seconds')
     )
+    data['project']['schema_version'] = SCHEMA_VERSION
     _write(data, path)
     print(f'Project file updated: {path.name}  [{section}]  (invariant)')
 

@@ -16,12 +16,28 @@ import datetime
 from pathlib import Path
 from typing import Optional, Set
 
-from aretomo3_preprocess.shared.project_json import load as _load, update_section
+from aretomo3_preprocess.shared.project_json import load as _load, update_section, SCHEMA_VERSION
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Read-only accessors
 # ─────────────────────────────────────────────────────────────────────────────
+
+def get_schema_version() -> int:
+    """
+    Schema version last stamped into this project.json (see
+    project_json.SCHEMA_VERSION) -- i.e. how recent the code was that most
+    recently wrote *any* section here. 0 if project.json doesn't exist yet
+    or predates this tracking (every write stamps the current version, so a
+    project only touched by pre-tracking code has no stamp at all).
+
+    Not a hard compatibility gate -- every accessor in this module already
+    reads defensively via .get() and degrades gracefully on missing fields.
+    Use this to give a user an honest "re-run X to populate field Y" hint
+    instead of guessing from which fields happen to be present.
+    """
+    return _load().get('project', {}).get('schema_version', 0)
+
 
 def get_frames_dir() -> Optional[Path]:
     """Return the frames directory recorded by rename-ts, or None."""
@@ -398,21 +414,48 @@ def record_analysis_run(kind: str, output_dir, label: str = None) -> None:
     one. Unlike this file's other project.json sections (which are
     last-write-wins -- see project_json.update_section), analysis_runs is
     a real history across every run, since a project commonly has more
-    than one analyse/pytom-match run and the landing page needs to list
-    all of them, not just the most recent.
+    than one analyse/pytom-match run (e.g. cmd0 once, cmd1 several times
+    with different parameters, cmd2 several times) and the landing page
+    needs to list all of them, not just the most recent.
 
     kind       : 'gain_check' | 'aretomo_analyse' | 'pytom_match'
     output_dir : path to that run's own report directory (str or Path;
                  stored as given -- callers pass whatever they'd want a
                  human to see/use, absolute or relative to cwd)
     label      : human-readable run name shown on the landing page;
-                 defaults to output_dir's own directory name
+                 defaults to output_dir's own directory name, except when
+                 that name collides with another already-recorded run
+                 that has a *different* output_dir (a common case: several
+                 `analyse --output <run-N>/analyse` runs all sharing the
+                 leaf name "analyse") -- then both the new and the earlier
+                 colliding entries are qualified with their parent
+                 directory name instead, so the landing page never
+                 silently merges two distinct runs onto one tab.
     """
     output_dir = str(output_dir)
-    label = label or Path(output_dir).name or output_dir
+    runs = get_analysis_runs()
     timestamp = datetime.datetime.now().isoformat(timespec='seconds')
 
-    runs = get_analysis_runs()
+    def _leaf(od):
+        return Path(od).name or od
+
+    def _qualified(od):
+        p = Path(od)
+        leaf = p.name or od
+        return f'{p.parent.name}/{leaf}' if p.parent.name else leaf
+
+    if label is None:
+        leaf = _leaf(output_dir)
+        colliding = [r for r in runs
+                     if r['output_dir'] != output_dir and _leaf(r['output_dir']) == leaf]
+        if colliding:
+            label = _qualified(output_dir)
+            for r in colliding:
+                if r['label'] == leaf:
+                    r['label'] = _qualified(r['output_dir'])
+        else:
+            label = leaf
+
     for r in runs:
         if r.get('kind') == kind and r.get('output_dir') == output_dir:
             r['timestamp'] = timestamp

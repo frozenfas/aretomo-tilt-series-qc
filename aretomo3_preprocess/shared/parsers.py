@@ -226,7 +226,12 @@ def parse_mdoc_file(filepath):
       frames        — dict keyed by ZValue (0-indexed acquisition order):
                         {'tilt_angle', 'sub_frame_path', 'mdoc_defocus',
                          'target_defocus', 'datetime', 'stage_x/y/z',
-                         'image_shift_x/y', 'exposure_time', 'num_subframes'}
+                         'image_shift_x/y', 'exposure_time', 'num_subframes',
+                         'exposure_dose'}
+                        'exposure_dose' is the mdoc's own ExposureDose field
+                        (e/Å², per this tilt's exposure/frame-set) -- distinct
+                        from `parse_tlt_file`'s dose_e_per_A2, which is
+                        AreTomo3's own per-frame dose from _TLT.txt.
       pixel_spacing — float (Å/px) from the first row's PixelSpacing field,
                         or None if not present.
       acquisition   — {'width', 'height', 'file_type', 'voltage'} from the
@@ -284,5 +289,6 @@ def parse_mdoc_file(filepath):
             'image_shift_y':  float(img_shift[1]) if img_shift and not isinstance(img_shift, float) else None,
             'exposure_time':  _float_or_none(row.get('ExposureTime')),
             'num_subframes':  _int_or_none(row.get('NumSubFrames')),
+            'exposure_dose':  _float_or_none(row.get('ExposureDose')),
         }
     return result, pixel_spacing, acquisition
