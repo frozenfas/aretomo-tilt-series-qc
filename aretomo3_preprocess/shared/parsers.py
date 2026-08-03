@@ -226,7 +226,7 @@ def parse_mdoc_file(filepath):
       frames        — dict keyed by ZValue (0-indexed acquisition order):
                         {'tilt_angle', 'sub_frame_path', 'mdoc_defocus',
                          'target_defocus', 'datetime', 'stage_x/y/z',
-                         'exposure_time', 'num_subframes'}
+                         'image_shift_x/y', 'exposure_time', 'num_subframes'}
       pixel_spacing — float (Å/px) from the first row's PixelSpacing field,
                         or None if not present.
       acquisition   — {'width', 'height', 'file_type', 'voltage'} from the
@@ -270,6 +270,7 @@ def parse_mdoc_file(filepath):
             continue
         sub = row.get('SubFramePath', None)
         stage = row.get('StagePosition', None)
+        img_shift = row.get('ImageShift', None)
         result[z] = {
             'tilt_angle':     _float_or_none(row.get('TiltAngle')),
             'sub_frame_path': Path(sub).name if sub and not isinstance(sub, float) else None,
@@ -279,6 +280,8 @@ def parse_mdoc_file(filepath):
             'stage_x':        float(stage[0]) if stage and not isinstance(stage, float) else None,
             'stage_y':        float(stage[1]) if stage and not isinstance(stage, float) else None,
             'stage_z':        _float_or_none(row.get('StageZ')),
+            'image_shift_x':  float(img_shift[0]) if img_shift and not isinstance(img_shift, float) else None,
+            'image_shift_y':  float(img_shift[1]) if img_shift and not isinstance(img_shift, float) else None,
             'exposure_time':  _float_or_none(row.get('ExposureTime')),
             'num_subframes':  _int_or_none(row.get('NumSubFrames')),
         }
