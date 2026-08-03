@@ -1,25 +1,35 @@
 """
 project-summary — one-page colored terminal dashboard of project.json state.
 
-Reads whatever this project's aretomo3_project.json + (if analyse has run)
-alignment_data.json already have on disk and prints a concise overview: mdoc/
-rename counts, key paths, CTF/matching params, external tool paths, every
-recorded analysis run and where its report lives, and outlier-trimmed
-thickness/defocus/overlap distributions with small terminal histograms.
+Reads only aretomo3_project.json for this project (no other file on disk is
+opened) and prints a concise overview: mdoc/rename counts with a renaming
+example, calibrated vs. raw mdoc pixel size, full CTF/optics params, gain
+transform, external tool paths, handedness, every recorded analysis run and
+where its report lives, and outlier-trimmed thickness/defocus/overlap/tilt-
+axis distributions (with optional terminal histograms via --plot).
 
 Purely a read-only view over data other commands already recorded -- this
-command computes nothing new and writes nothing back to project.json.
+command computes nothing new and writes nothing back to project.json. The
+per-TS QC distributions come from `analyse`'s own `per_ts_qc`/`qc_summary`
+project.json fields (persisted by analyse.py itself) rather than opening
+that run's alignment_data.json directly, so this command's only I/O is
+project.json.
+
+The actual project.json reading/computation lives in
+`shared/project_summary_data.py`'s `gather()` -- shared with
+`shared/landing_page.py`, which renders the same data (minus histograms) as
+an HTML panel on the project's `analysis_start.html` landing page, so the
+CLI and the "first page" of the HTML report never drift out of sync with
+each other. This module only adds the ANSI/terminal rendering on top.
 """
 
 import sys
-import json
-import datetime
 from pathlib import Path
-from collections import Counter
 
 import numpy as np
 
-from aretomo3_preprocess.shared.project_json import load as load_project
+from aretomo3_preprocess.shared.project_json import load as load_project, SCHEMA_VERSION
+from aretomo3_preprocess.shared.project_summary_data import gather
 
 # ── ANSI colour helpers (no external dep -- hand-rolled) ────────────────────
 _RESET, _BOLD, _DIM = '\033[0m', '\033[1m', '\033[2m'
@@ -32,10 +42,6 @@ def _c(text, *codes, use_color=True):
     if not use_color:
         return str(text)
     return ''.join(codes) + str(text) + _RESET
-
-
-def _hr(width, use_color, ch='─'):
-    print(_c(ch * width, _DIM, use_color=use_color))
 
 
 def _kv(label, value, width=26, use_color=True, value_color=None):
@@ -54,15 +60,8 @@ def _section(title, use_color, width=78):
         width + (len(_BOLD) + len(_CYAN) + len(_RESET) if use_color else 0), '─'))
 
 
-def _percentile_range(vals, lo_pct=2, hi_pct=98):
-    clean = [v for v in vals if v is not None]
-    if not clean:
-        return None, None, []
-    if len(clean) < 5:
-        return min(clean), max(clean), clean
-    lo, hi = float(np.percentile(clean, lo_pct)), float(np.percentile(clean, hi_pct))
-    trimmed = [v for v in clean if lo <= v <= hi]
-    return lo, hi, trimmed
+def _note(text, use_color, width=78):
+    print(_c(f'    {text}', _DIM, use_color=use_color))
 
 
 _BLOCKS = ' ▁▂▃▄▅▆▇█'
@@ -83,7 +82,6 @@ def _ascii_hist(vals, width=50, height=6, use_color=True, unit=''):
     counts, _ = np.histogram(clean, bins=edges)
     max_count = counts.max() if counts.max() > 0 else 1
 
-    # Render height rows top-down using sub-block resolution per column.
     for row in range(height, 0, -1):
         line = []
         for cnt in counts:
@@ -99,11 +97,6 @@ def _ascii_hist(vals, width=50, height=6, use_color=True, unit=''):
     print(f'    {lo:.2f}{unit}' + ' ' * max(1, n_bins - len(f'{lo:.2f}{unit}') - len(f'{hi:.2f}{unit}')) + f'{hi:.2f}{unit}')
 
 
-def _median(vals):
-    clean = [v for v in vals if v is not None]
-    return float(np.median(clean)) if clean else None
-
-
 def add_parser(subparsers):
     p = subparsers.add_parser(
         'project-summary',
@@ -112,6 +105,11 @@ def add_parser(subparsers):
     )
     p.add_argument('--no-color', action='store_true',
                    help='Disable ANSI colors (auto-disabled anyway when not a terminal)')
+    p.add_argument('--plot', action='store_true',
+                   help='Also print terminal histograms for thickness/defocus/'
+                        'overlap/tilt-axis distributions (requires analyse to '
+                        'have been re-run since per_ts_qc was added; see the '
+                        'QC distributions section otherwise)')
     p.set_defaults(func=run)
     return p
 
@@ -120,138 +118,185 @@ def run(args):
     proj = load_project()
     use_color = (not args.no_color) and sys.stdout.isatty()
     W = 78
+    d = gather(proj)
 
     project_dir = Path.cwd()
     print()
     print(_c(f'  AreTomo3-Preprocess project summary', _BOLD, use_color=use_color))
     print(_c(f'  {project_dir}', _DIM, use_color=use_color))
-    last_updated = proj.get('project', {}).get('last_updated', '?')
-    print(_c(f'  last updated: {last_updated}', _DIM, use_color=use_color))
+    print(_c(f'  last updated: {d["last_updated"]}', _DIM, use_color=use_color))
+    if d['schema_version'] and d['schema_version'] < SCHEMA_VERSION:
+        print(_c(f'  NOTE: project.json schema v{d["schema_version"]} (this tool expects '
+                  f'v{SCHEMA_VERSION}) -- some fields below may be missing until the '
+                  f'relevant command is re-run.', _YELLOW, use_color=use_color))
+
+    # Everything below is read from aretomo3_project.json only -- no other
+    # file on disk is opened. Any value not present there is reported as
+    # explicitly missing (with a reason/fix), never silently skipped.
 
     # ── mdoc / renaming ───────────────────────────────────────────────────
     _section('mdoc & renaming', use_color, W)
-    mdoc = proj.get('mdoc_data', {})
-    per_ts = mdoc.get('per_ts', {})
-    n_mdoc = len(per_ts)
-    rename = proj.get('rename_ts', {})
-    n_renamed = len(rename.get('lookup', {}))
-    angpix_vals = [v.get('angpix') for v in per_ts.values() if v.get('angpix') is not None]
-    voltages = [v.get('acquisition', {}).get('voltage') for v in per_ts.values()
-               if v.get('acquisition', {}).get('voltage') is not None]
-    angpix_mode = Counter(angpix_vals).most_common(1)[0][0] if angpix_vals else None
-    voltage_mode = Counter(voltages).most_common(1)[0][0] if voltages else None
-    calibrated = proj.get('calibrated_apix', {})
+    _kv('mdoc files cached', d['n_mdoc'], use_color=use_color)
+    _kv('ts-XXX renamed', d['n_renamed'], use_color=use_color)
+    if d['renaming_example']:
+        ts_stem, orig_stem = d['renaming_example']
+        _kv('renaming example', f'{ts_stem}  →  {orig_stem}', use_color=use_color)
 
-    _kv('mdoc files cached', n_mdoc, use_color=use_color)
-    _kv('ts-XXX renamed', n_renamed, use_color=use_color)
-    _kv('pixel size (mdoc mode)', f'{angpix_mode} Å/px' if angpix_mode else 'n/a', use_color=use_color)
-    if calibrated.get('value') is not None:
-        _kv('pixel size (calibrated)', f'{calibrated["value"]} Å/px  (from {calibrated.get("source", "?")})',
-            use_color=use_color, value_color=_GREEN)
+    cal = d['calibrated']
+    cal_value = cal.get('value')
+    angpix_mdoc = d['angpix_mdoc']
+    if cal_value is not None:
+        bracket = f'  ({angpix_mdoc} from mdoc)' if (angpix_mdoc is not None
+                  and abs(angpix_mdoc - cal_value) > 1e-6) else ''
+        _kv('pixel size', f'{cal_value} Å/px{bracket}', use_color=use_color, value_color=_GREEN)
+        _kv('  calibrated via', cal.get('source', '?'), use_color=use_color)
+    elif angpix_mdoc is not None:
+        _kv('pixel size', f'{angpix_mdoc} Å/px  (raw mdoc, not yet calibrated)',
+            use_color=use_color, value_color=_YELLOW)
+    else:
+        _kv('pixel size', 'n/a', use_color=use_color)
+
+    w_mode, h_mode = d['image_dims']
+    voltage_mode = d['voltage_mode']
     _kv('voltage', f'{voltage_mode:.0f} kV' if voltage_mode else 'n/a', use_color=use_color)
+    _kv('image dimensions', f'{w_mode} × {h_mode} px' if (w_mode and h_mode) else 'n/a',
+        use_color=use_color)
+    if d['frames_per_tilt'] is not None:
+        _kv('frames per tilt', d['frames_per_tilt'], use_color=use_color)
+    if d['tilt_range']:
+        lo, hi, n_t, step = d['tilt_range']
+        _kv(f'tilt range (from {d["ts_key"]})',
+            f'{lo:+.1f}° → {hi:+.1f}°  ({n_t} tilts, ~{step:.2f}° step)', use_color=use_color)
+
+    dose = d['dose']
+    if dose['status'] == 'ok':
+        _kv(f'dose (--fm-dose, cmd=0, {dose["timestamp"]})',
+            f'{dose["per_frame"]:.3f} e⁻/Å² per frame  |  {dose["per_tilt"]:.2f} e⁻/Å² per tilt  |  '
+            f'~{dose["total"]:.0f} e⁻/Å² total', use_color=use_color)
+    elif dose['status'] == 'stale_cmd':
+        _kv('dose', f'--fm-dose was {dose["per_frame"]} e⁻/Å²/frame on the last '
+                    f'run-aretomo3 invocation, but that was cmd={dose["cmd"]}, '
+                    f'not cmd=0 -- project.json only keeps the most recent '
+                    f'run-aretomo3 call, so this may not be the cmd0 value.',
+            use_color=use_color, value_color=_YELLOW)
+    else:
+        _kv('dose', 'not available -- no run-aretomo3 --fm-dose recorded '
+                    'in project.json yet', use_color=use_color, value_color=_DIM)
+
+    # ── CTF / optics ──────────────────────────────────────────────────────
+    if d['ctf']:
+        run_params = d['ctf']
+        _section('CTF / optics params (run-aretomo3 self-consistency baseline)', use_color, W)
+        _kv('voltage', f'{run_params.get("kv", "n/a")} kV', use_color=use_color)
+        _kv('spherical aberration (Cs)', f'{run_params.get("cs", "n/a")} mm', use_color=use_color)
+        _kv('amplitude contrast', run_params.get('amp_contrast', 'n/a'), use_color=use_color)
+        _kv('pixel size used', f'{run_params.get("apix", "n/a")} Å/px', use_color=use_color)
+        _kv('  from cmd', run_params.get('cmd', '?'), use_color=use_color)
+
+    # ── Gain transform ────────────────────────────────────────────────────
+    if d['gain_check']:
+        gc = d['gain_check']
+        _section('gain transform', use_color, W)
+        _kv('best transform', gc.get('best_transform', 'n/a'), use_color=use_color, value_color=_GREEN)
+        _kv('AreTomo3 flags', f'-RotGain {gc.get("aretomo3_rot_gain", "?")} '
+            f'-FlipGain {gc.get("aretomo3_flip_gain", "?")}', use_color=use_color)
+        gain_file = gc.get('args', {}).get('gain')
+        if gain_file:
+            _kv('gain file', gain_file, use_color=use_color)
 
     # ── Paths ─────────────────────────────────────────────────────────────
     _section('paths', use_color, W)
-    stacks = proj.get('input_stacks', {})
-    _kv('cmd0 output dir', stacks.get('cmd0_outdir', 'n/a'), use_color=use_color)
-    _kv('mrc stacks registered', stacks.get('n_stacks', 'n/a'), use_color=use_color)
-    tlt_dir = stacks.get('tlt_dir')
-    _kv('TLT dir', tlt_dir or 'n/a', use_color=use_color)
+    paths = d['paths']
+    _kv('cmd0 output dir', paths['cmd0_outdir'] or 'n/a', use_color=use_color)
+    _kv('mrc stacks registered', paths['n_stacks'] if paths['n_stacks'] is not None else 'n/a',
+        use_color=use_color)
+    _kv('TLT dir', paths['tlt_dir'] or 'n/a', use_color=use_color)
+    if paths['tlt_dir']:
+        _note('only refreshed by "run-aretomo3 --cmd 0" -- a later --cmd 1/2 run '
+              'does NOT update this, so it may point at an older cmd0 pass than '
+              'whatever alignment run you last analysed.', use_color, W)
 
-    tool_paths = proj.get('tool_paths', {})
     for tool in ('aretomo3', 'pytom', 'imod', 'gapstop'):
-        _kv(f'{tool} path', tool_paths.get(tool, _c('not recorded', _DIM, use_color=use_color)),
+        _kv(f'{tool} path', paths['tool_paths'].get(tool, _c('not recorded', _DIM, use_color=use_color)),
             use_color=use_color)
 
-    # ── Matching / CTF params ────────────────────────────────────────────
-    run_params = proj.get('run_aretomo3_params', {})
-    if run_params:
-        _section('run-aretomo3 params (self-consistency baseline)', use_color, W)
-        _kv('kv', run_params.get('kv', 'n/a'), use_color=use_color)
-        _kv('cs', run_params.get('cs', 'n/a'), use_color=use_color)
-        _kv('amp_contrast', run_params.get('amp_contrast', 'n/a'), use_color=use_color)
-        _kv('apix', run_params.get('apix', 'n/a'), use_color=use_color)
-
     # ── Handedness / lamellae ────────────────────────────────────────────
-    handedness = proj.get('handedness')
-    lamellae = proj.get('lamella_assignments', {})
-    if handedness or lamellae:
-        _section('handedness & lamellae', use_color, W)
-        if handedness:
-            mirror = handedness.get('mirror')
-            _kv('handedness (mirror needed?)',
-                ('YES — use --mirror' if mirror else 'no'),
-                use_color=use_color, value_color=(_YELLOW if mirror else _GREEN))
-            _kv('  determined from', f'{handedness.get("particle", "?")}, '
-                f'{len(handedness.get("per_ts", {}))} TS, {handedness.get("timestamp", "?")}',
-                use_color=use_color)
-        if lamellae:
-            n_lam = len(set(lamellae.get('positions', {}).values()))
-            _kv('lamellae', f'{n_lam}  ({lamellae.get("n_ts", "?")} TS assigned)', use_color=use_color)
+    _section('handedness & lamellae', use_color, W)
+    handedness = d['handedness']
+    if handedness:
+        mirror = handedness.get('mirror')
+        _kv('physical (mirror) handedness',
+            ('YES — use --mirror' if mirror else 'no mirroring needed'),
+            use_color=use_color, value_color=(_YELLOW if mirror else _GREEN))
+        _kv('  determined from', f'{handedness.get("particle", "?")}, '
+            f'{len(handedness.get("per_ts", {}))} TS, {handedness.get("timestamp", "?")}',
+            use_color=use_color)
+    else:
+        _kv('physical (mirror) handedness', 'not determined yet -- run '
+            'pytom-ribo-auto --check-handedness', use_color=use_color, value_color=_DIM)
+    _kv('defocus handedness', 'not implemented in this pipeline (would need a '
+        'Defocusgrad/CTFFIND4-style region-split defocus check -- separate '
+        'from the physical/mirror handedness above)', use_color=use_color, value_color=_DIM)
+    if d['lamellae']:
+        n_lam, n_ts_assigned = d['lamellae']
+        _kv('lamellae', f'{n_lam}  ({n_ts_assigned} TS assigned)', use_color=use_color)
 
     # ── Analysis runs (jobs run + report locations) ──────────────────────
-    runs = proj.get('analysis_runs', [])
     _section('analysis runs & reports', use_color, W)
     landing = project_dir / 'analysis_start.html'
     if landing.exists():
         _kv('report index', str(landing), use_color=use_color, value_color=_CYAN)
-    if runs:
-        for r in runs:
+    if d['analysis_runs']:
+        for r in d['analysis_runs']:
             _kv(f'  [{r.get("kind", "?")}] {r.get("label", "?")}',
                 f'{r.get("output_dir", "?")}  ({r.get("timestamp", "?")})',
                 use_color=use_color)
     else:
         print(_c('    (none recorded yet)', _DIM, use_color=use_color))
 
-    # ── Alignment stats (from analyse's alignment_data.json, if present) ──
-    analyse_sec = proj.get('analyse', {})
-    align_json = None
-    if analyse_sec.get('output_dir'):
-        candidate = Path(analyse_sec['output_dir'])
-        if not candidate.is_absolute():
-            candidate = project_dir / candidate
-        cand_file = candidate / 'alignment_data.json'
-        if cand_file.exists():
-            align_json = cand_file
+    # ── QC distributions (from analyse's own project.json fields) ────────
+    analyse_sec = d['analyse_sec']
+    qc_summary  = d['qc_summary']
+    per_ts_qc   = d['per_ts_qc']
 
-    if align_json is not None:
-        with open(align_json) as fh:
-            all_ts = json.load(fh)
+    if qc_summary:
+        n_ts = analyse_sec.get('n_tilt_series', len(per_ts_qc or []))
+        _section(f'QC distributions — {n_ts} TS, 2nd-98th pctile trimmed '
+                 f'(from {analyse_sec.get("output_dir", "?")})', use_color, W)
+        _note(f'from the last "analyse" run of any cmd stage (timestamp '
+              f'{analyse_sec.get("timestamp", "?")}) -- independent of the TLT '
+              f'dir above, which only tracks the last cmd0 run.', use_color, W)
+        print()
 
-        rots, thickness_nm, overlaps, defoci = [], [], [], []
-        for ts, d in all_ts.items():
-            frames = d.get('frames', [])
-            if frames:
-                rots.append(frames[0].get('rot'))
-            if d.get('thickness_nm') is not None and d['thickness_nm'] < 5000:
-                thickness_nm.append(d['thickness_nm'])
-            for f in frames:
-                if f.get('overlap_pct') is not None:
-                    overlaps.append(f['overlap_pct'])
-                if f.get('mean_defocus_um') is not None:
-                    defoci.append(f['mean_defocus_um'])
+        def _range_line(key, label, unit):
+            r = qc_summary.get(key)
+            if not r:
+                return
+            print(f'  {_c(label + ":", _DIM, use_color=use_color)} '
+                  f'{r["lo"]:.2f} – {r["hi"]:.2f} {unit}  (median {r["median"]:.2f})')
+            if args.plot and per_ts_qc:
+                # Histogram over the same 2nd-98th pctile trimmed range the
+                # text line above reports, not the raw per-TS values -- a
+                # single genuine outlier (e.g. a mis-parsed thickness) would
+                # otherwise blow the bin range out far past what's shown as
+                # the dataset's actual range, making the histogram and the
+                # text line above it visually contradict each other.
+                trimmed = [v for v in (e.get(key) for e in per_ts_qc)
+                          if v is not None and r['lo'] <= v <= r['hi']]
+                _ascii_hist(trimmed, use_color=use_color, unit=unit)
 
-        _section(f'alignment stats — {len(all_ts)} TS ({align_json})', use_color, W)
-        med_rot = _median(rots)
-        _kv('median tilt axis (ROT)', f'{med_rot:.2f}°' if med_rot is not None else 'n/a',
-            use_color=use_color)
-        med_ovl = _median(overlaps)
-        _kv('median frame overlap', f'{med_ovl:.1f}%' if med_ovl is not None else 'n/a',
-            use_color=use_color, value_color=(_GREEN if (med_ovl or 0) > 80 else _YELLOW))
-
-        thk_lo, thk_hi, thk_trim = _percentile_range(thickness_nm)
-        if thk_trim:
-            print(f'\n  {_c("thickness (nm), 2nd-98th pctile:", _DIM, use_color=use_color)} '
-                  f'{thk_lo:.0f} – {thk_hi:.0f}  (median {_median(thk_trim):.0f})')
-            _ascii_hist(thk_trim, use_color=use_color, unit='nm')
-
-        def_lo, def_hi, def_trim = _percentile_range(defoci)
-        if def_trim:
-            print(f'\n  {_c("defocus (µm), 2nd-98th pctile:", _DIM, use_color=use_color)} '
-                  f'{def_lo:.2f} – {def_hi:.2f}  (median {_median(def_trim):.2f})')
-            _ascii_hist(def_trim, use_color=use_color, unit='µm')
+        _range_line('tilt_axis_deg',  'median tilt axis (ROT)', '°')
+        _range_line('mean_overlap',   'mean frame overlap',     '%')
+        _range_line('thickness_nm',   'thickness',              'nm')
+        _range_line('avg_defocus_um', 'defocus',                'µm')
+    elif analyse_sec:
+        _section('QC distributions', use_color, W)
+        _note('This project\'s project.json was last written by an older '
+              'analyse.py that did not persist per-TS QC data -- re-run '
+              '"analyse" (--reuse-plots is fine) to populate this section.',
+              use_color, W)
     else:
-        _section('alignment stats', use_color, W)
-        print(_c('    No alignment_data.json found (run analyse first).', _DIM, use_color=use_color))
+        _section('QC distributions', use_color, W)
+        _note('No analyse run recorded yet.', use_color, W)
 
     print()

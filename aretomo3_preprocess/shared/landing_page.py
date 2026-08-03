@@ -19,7 +19,9 @@ uses for auto-fill state elsewhere in this codebase.
 import html
 from pathlib import Path
 
+from aretomo3_preprocess.shared.project_json import load as load_project, PROJECT_FILENAME
 from aretomo3_preprocess.shared.project_state import get_analysis_runs
+from aretomo3_preprocess.shared.project_summary_data import render_html as render_project_summary_html
 
 _KIND_LABEL = {
     'gain_check':      ('Gain check',         '🎯'),
@@ -56,9 +58,18 @@ def write_landing_page(project_dir) -> Path:
     for i, (label, entries) in enumerate(by_label.items()):
         tab_id = f'run{i}'
         active = ' active' if i == 0 else ''
+        # Most-recent timestamp among this tab's entries -- shown on the
+        # button itself so runs sharing a kind (e.g. several cmd1 `analyse`
+        # attempts) are distinguishable without opening every tab.
+        latest_ts = max((e.get('timestamp', '') for e in entries), default='')
+        kinds_here = sorted({e['kind'] for e in entries})
+        icons = ''.join(_KIND_LABEL.get(k, (k, '📄'))[1] for k in kinds_here)
         tab_buttons.append(
             f'<button class="tab-btn{active}" data-tab="{tab_id}" '
-            f'onclick="switchTab(\'{tab_id}\')">{html.escape(label)}</button>'
+            f'onclick="switchTab(\'{tab_id}\')">'
+            f'<span class="tab-btn-label">{icons} {html.escape(label)}</span>'
+            f'<span class="tab-btn-time">{html.escape(latest_ts)}</span>'
+            f'</button>'
         )
 
         cards = []
@@ -104,6 +115,9 @@ def write_landing_page(project_dir) -> Path:
         f'<div id="tab-bar">{"".join(tab_buttons)}</div>{"".join(tab_sections)}'
     )
 
+    proj = load_project(project_dir / PROJECT_FILENAME)
+    summary_html = render_project_summary_html(proj) if proj else ''
+
     html_out = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -126,11 +140,15 @@ def write_landing_page(project_dir) -> Path:
       justify-content: center; width: 100%; max-width: 1000px;
     }}
     .tab-btn {{
-      padding: 8px 20px; font-size: 0.92em; border: none; border-radius: 6px;
+      display: flex; flex-direction: column; align-items: center; gap: 2px;
+      padding: 6px 20px; font-size: 0.92em; border: none; border-radius: 6px;
       background: #eceff1; color: #546e7a; cursor: pointer; transition: all 0.15s;
     }}
     .tab-btn.active {{ background: #1565c0; color: white; }}
+    .tab-btn.active .tab-btn-time {{ color: #bbdefb; }}
     .tab-btn:hover:not(.active) {{ background: #cfd8dc; color: #263238; }}
+    .tab-btn-label {{ font-weight: 500; }}
+    .tab-btn-time {{ font-size: 0.78em; color: #90a4ae; font-family: monospace; }}
     .tab-section {{
       width: 100%; max-width: 1000px;
       display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
@@ -152,11 +170,44 @@ def write_landing_page(project_dir) -> Path:
     .run-card-links .missing {{ color: #b0bec5; font-style: italic; }}
     .run-card-time {{ font-size: 0.72em; color: #b0bec5; margin-top: 10px; }}
     .empty {{ color: #78909c; margin-top: 40px; }}
+
+    #project-summary-panel {{
+      width: 100%; max-width: 1000px; margin-bottom: 24px;
+      background: #f5f7fa; border: 1px solid #e0e6ea; border-radius: 10px;
+      padding: 4px 20px 18px;
+    }}
+    #project-summary-panel summary {{
+      cursor: pointer; padding: 14px 0; font-size: 1.05em; font-weight: 600;
+      color: #263238; list-style: none;
+    }}
+    #project-summary-panel summary::-webkit-details-marker {{ display: none; }}
+    #project-summary-panel summary::before {{ content: '▸ '; color: #1565c0; }}
+    #project-summary-panel[open] summary::before {{ content: '▾ '; }}
+    .ps-updated {{ font-weight: normal; font-size: 0.78em; color: #90a4ae; margin-left: 8px; }}
+    .ps-schema-warn {{
+      background: #fff8e1; color: #8d6e00; border: 1px solid #ffe082;
+      border-radius: 6px; padding: 8px 12px; font-size: 0.82em; margin-bottom: 14px;
+    }}
+    .ps-grid {{
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+      gap: 16px;
+    }}
+    .ps-block {{ background: #ffffff; border: 1px solid #e0e6ea; border-radius: 8px; padding: 12px 16px; }}
+    .ps-block-title {{ font-size: 0.82em; font-weight: 600; color: #1565c0; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.03em; }}
+    .ps-table {{ width: 100%; border-collapse: collapse; font-size: 0.86em; }}
+    .ps-table td {{ padding: 3px 0; vertical-align: top; }}
+    .ps-label {{ color: #78909c; padding-right: 10px; white-space: nowrap; }}
+    .ps-value {{ color: #263238; }}
+    .ps-note {{ font-size: 0.85em; color: #90a4ae; }}
+    .ps-good {{ color: #2e7d32; font-weight: 600; }}
+    .ps-warn {{ color: #b26a00; font-weight: 600; }}
+    .ps-dim {{ color: #b0bec5; }}
   </style>
 </head>
 <body>
   <h1>AreTomo3-Preprocess</h1>
   <div id="project-path">{html.escape(str(project_dir))}</div>
+  {summary_html}
   {body}
   <script>
     function switchTab(id) {{
