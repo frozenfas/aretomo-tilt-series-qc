@@ -379,3 +379,82 @@ def load_input_stacks() -> tuple:
         'stacks':       stored['stacks'],
     }
     return mrc_files, source_info
+
+
+def get_analysis_runs() -> list:
+    """
+    List of {'kind', 'output_dir', 'label', 'timestamp'} records for every
+    gain_check/aretomo_analyse/pytom_match run this project has completed --
+    see record_analysis_run(). Used by shared.landing_page.write_landing_page
+    to build analysis_start.html. Empty list if none recorded yet.
+    """
+    return _load().get('analysis_runs') or []
+
+
+def record_analysis_run(kind: str, output_dir, label: str = None) -> None:
+    """
+    Append a completed run's record for the project landing page to link
+    to, or refresh its timestamp/label if (kind, output_dir) already has
+    one. Unlike this file's other project.json sections (which are
+    last-write-wins -- see project_json.update_section), analysis_runs is
+    a real history across every run, since a project commonly has more
+    than one analyse/pytom-match run and the landing page needs to list
+    all of them, not just the most recent.
+
+    kind       : 'gain_check' | 'aretomo_analyse' | 'pytom_match'
+    output_dir : path to that run's own report directory (str or Path;
+                 stored as given -- callers pass whatever they'd want a
+                 human to see/use, absolute or relative to cwd)
+    label      : human-readable run name shown on the landing page;
+                 defaults to output_dir's own directory name
+    """
+    output_dir = str(output_dir)
+    label = label or Path(output_dir).name or output_dir
+    timestamp = datetime.datetime.now().isoformat(timespec='seconds')
+
+    runs = get_analysis_runs()
+    for r in runs:
+        if r.get('kind') == kind and r.get('output_dir') == output_dir:
+            r['timestamp'] = timestamp
+            r['label'] = label
+            break
+    else:
+        runs.append({'kind': kind, 'output_dir': output_dir,
+                      'label': label, 'timestamp': timestamp})
+
+    update_section('analysis_runs', runs)
+
+
+def get_tool_path(name: str) -> Optional[str]:
+    """
+    Return the recorded binary/env-dir path for an external tool (e.g.
+    'aretomo3', 'pytom', 'imod', 'gapstop'), or None if never recorded.
+    See record_tool_path()/resolve_tool_path().
+    """
+    return _load().get('tool_paths', {}).get(name)
+
+
+def record_tool_path(name: str, path) -> None:
+    """
+    Remember an external tool's binary/env directory so later commands in
+    this project can auto-fill it instead of the user re-typing
+    --pytom-dir/--imod-bin-dir/--aretomo3/etc. on every invocation. Called
+    either when a command runs with that path explicitly given (see
+    resolve_tool_path()), or via enrich --set-path-<tool>.
+    """
+    paths = dict(_load().get('tool_paths', {}))
+    paths[name] = str(path)
+    update_section('tool_paths', paths)
+
+
+def resolve_tool_path(name: str, cli_value):
+    """
+    CLI flag wins and gets remembered for next time (record_tool_path);
+    otherwise fall back to whatever was previously recorded for this
+    project, or None if neither is set (caller applies its own hardcoded
+    default in that case -- this function never invents one).
+    """
+    if cli_value is not None:
+        record_tool_path(name, cli_value)
+        return cli_value
+    return get_tool_path(name)
