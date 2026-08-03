@@ -1119,11 +1119,24 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
       height: 100%; background: #1565c0; border-radius: 2px; transition: width 0.2s;
     }}
 
-    /* ── Star ratings ── */
-    #rating-bar {{
-      display: flex; align-items: center; gap: 12px;
+    /* ── Selection / rating control blocks -- visually separated panels so
+       the two independent, similarly-styled button rows (loading/clearing
+       a ts-select.csv vs. a ts_ratings.csv) don't blend into one wall of
+       gray buttons ── */
+    .control-block {{
+      display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
       margin-bottom: 8px; width: 100%; max-width: 1380px;
+      background: #f5f7fa; border: 1px solid #e0e6ea; border-radius: 8px;
+      padding: 8px 14px;
     }}
+    #selection-bar {{ border-left: 3px solid #6a1b9a; }}
+    #rating-bar    {{ border-left: 3px solid #ef6c00; }}
+    .control-block-label {{
+      font-size: 0.8em; font-weight: 600; color: #37474f;
+      text-transform: uppercase; letter-spacing: 0.03em; white-space: nowrap;
+    }}
+
+    /* ── Star ratings ── */
     .star {{
       font-size: 1.9em; cursor: pointer; color: #cfd8dc;
       transition: color 0.10s; user-select: none; line-height: 1;
@@ -1186,36 +1199,39 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
       </select>
       <button class="nav-btn" id="btn-next">Next &#8594;</button>
       <span id="counter">1&nbsp;/&nbsp;{n}</span>
-      <span class="ts-only" style="display:contents">
-        <button class="nav-btn" id="btn-filter"
-                style="font-size:0.82em;background:#546e7a;border:1px solid #78909c;{'display:none' if not has_selection else ''}">
-          Selected only ({n_sel})
-        </button>
-        <button class="nav-btn" id="btn-reload-sel"
-                style="font-size:0.82em;background:#546e7a;border:1px solid #78909c;"
-                title="Re-fetch ts-select.csv from the same directory as this HTML (requires HTTP server)">
-          &#8635; Reload ts-select.csv
-        </button>
-        <input type="file" id="file-sel-input" accept=".csv"
-               style="display:none">
-        <button class="nav-btn" id="btn-load-csv"
-                style="font-size:0.82em;background:#546e7a;border:1px solid #78909c;"
-                title="Load any ts-select.csv from your computer (works with file://)">
-          &#128193; Load ts-select.csv&#8230;
-        </button>
-        <button class="nav-btn" id="btn-clear-selection"
-                style="font-size:0.82em;background:#546e7a;border:1px solid #78909c;"
-                title="Mark every TS as selected again, discarding the loaded ts-select.csv exclusions">
-          &#10060; Clear ts-selection
-        </button>
-        <span id="sel-source" class="source-label">no selection loaded</span>
-      </span>
+    </div>
+
+    <div id="selection-bar" class="control-block ts-only">
+      <span class="control-block-label">Selection</span>
+      <button class="nav-btn" id="btn-filter"
+              style="font-size:0.82em;background:#546e7a;border:1px solid #78909c;{'display:none' if not has_selection else ''}">
+        Selected only ({n_sel})
+      </button>
+      <button class="nav-btn" id="btn-reload-sel"
+              style="font-size:0.82em;background:#546e7a;border:1px solid #78909c;"
+              title="Re-fetch ts-select.csv from the same directory as this HTML (requires HTTP server)">
+        &#8635; Reload ts-select.csv
+      </button>
+      <input type="file" id="file-sel-input" accept=".csv"
+             style="display:none">
+      <button class="nav-btn" id="btn-load-csv"
+              style="font-size:0.82em;background:#546e7a;border:1px solid #78909c;"
+              title="Load any ts-select.csv from your computer (works with file://)">
+        &#128193; Load ts-select.csv&#8230;
+      </button>
+      <button class="nav-btn" id="btn-clear-selection"
+              style="font-size:0.82em;background:#546e7a;border:1px solid #78909c;"
+              title="Mark every TS as selected again, discarding the loaded ts-select.csv exclusions">
+        &#10060; Clear ts-selection
+      </button>
+      <span id="sel-source" class="source-label">no selection loaded</span>
     </div>
 
     <div id="progress"><div id="progress-bar"></div></div>
     <div id="title"></div>
 
-    <div id="rating-bar" class="ts-only">
+    <div id="rating-bar" class="control-block ts-only">
+      <span class="control-block-label">Rating</span>
       <span id="stars">
         <span class="star" data-val="1">&#9733;</span>
         <span class="star" data-val="2">&#9733;</span>
