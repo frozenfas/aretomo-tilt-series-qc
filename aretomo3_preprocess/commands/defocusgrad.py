@@ -172,6 +172,53 @@ def _parse_defocusgrad_stdout(text: str) -> dict:
     }
 
 
+def _read_ctf_diagnostics(ts_out: Path, strootname: str) -> dict:
+    """
+    CTFFIND's own per-half fit quality (cross-correlation score + fit
+    resolution) -- independent of, and a useful cross-check against,
+    DefocusGrad's own corr_left/corr_right (which measures how well
+    defocus fits a straight line vs. tilt, not whether CTFFIND found a
+    good CTF in the first place). Neither aligned stack's diagnostic .txt
+    is deleted by defocusgrad's own cleanup (only the aligned .mrc stacks
+    are, and only without --no_clean), so these are always available to
+    read after a successful run.
+
+    Columns (same format read by defocusgrad's own np.loadtxt call, and by
+    RELION's ctffind_runner.cpp -- confirmed against that source): micro-
+    graph#, defocus1, defocus2, astig_angle, phase_shift, score (cross-
+    correlation, higher = better), fit resolution in Angstrom (lower =
+    better; CTFFIND prints the literal string "inf" when no Thon rings
+    were fit at all, treated here as a very poor 999 Å).
+    """
+    def _read_one(path):
+        if not path.exists():
+            return None
+        scores, resolutions = [], []
+        with open(path) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                parts = line.split()
+                if len(parts) < 7:
+                    continue
+                try:
+                    scores.append(float(parts[5]))
+                    res_s = parts[6]
+                    resolutions.append(999.0 if res_s.lower() == 'inf' else float(res_s))
+                except ValueError:
+                    continue
+        if not scores:
+            return None
+        return {'score_mean': round(float(np.mean(scores)), 4),
+                'res_mean_A': round(float(np.mean(resolutions)), 2)}
+
+    return {
+        'ctf_left':  _read_one(ts_out / f'{strootname}_diagnostic_output_left.txt'),
+        'ctf_right': _read_one(ts_out / f'{strootname}_diagnostic_output_right.txt'),
+    }
+
+
 def _run_one_ts(ts_name, st_path, xf_path, tlt_path, out_dir, args,
                 defocusgrad_bin, newstack_bin, ctffind_bin):
     ts_out = out_dir / ts_name
@@ -214,8 +261,13 @@ def _run_one_ts(ts_name, st_path, xf_path, tlt_path, out_dir, args,
     plot_path = ts_out / plot_name
     result['plot_path'] = str(plot_path) if plot_path.exists() else None
     result['log'] = str(log_path)
+    result.update(_read_ctf_diagnostics(ts_out, Path(st_path).stem))
     if result['handedness'] is None and 'error' not in result:
         print(f'  WARNING: could not parse a handedness verdict from defocusgrad output for {ts_name}')
+    for side in ('ctf_left', 'ctf_right'):
+        d = result.get(side)
+        if d is None:
+            print(f'  WARNING: no CTFFIND diagnostic output found for {ts_name} ({side})')
     return result
 
 
@@ -223,15 +275,42 @@ def _run_one_ts(ts_name, st_path, xf_path, tlt_path, out_dir, args,
 # HTML report
 # ─────────────────────────────────────────────────────────────────────────────
 
+_CTF_POOR_RES_A = 15.0  # CTFFIND fit resolution worse than this = don't trust that side's fit
+
+
+def _ctf_is_poor(r: dict) -> bool:
+    """True if CTFFIND itself found a poor fit on either half -- a clean
+    ±1 handedness verdict is only as trustworthy as the CTF estimation it
+    was built on, and DefocusGrad's own corr_left/corr_right (how well
+    defocus fits a straight line vs. tilt) doesn't catch this: a handful
+    of noisy defocus points can still trace a passable line by chance."""
+    ctf_left, ctf_right = r.get('ctf_left'), r.get('ctf_right')
+    if ctf_left is None or ctf_right is None:
+        return True
+    return ctf_left['res_mean_A'] > _CTF_POOR_RES_A or ctf_right['res_mean_A'] > _CTF_POOR_RES_A
+
+
 def _consensus(per_ts: dict) -> str:
-    values = [r['handedness'] for r in per_ts.values() if r.get('handedness') in (-1, 1)]
-    if not values:
-        return 'inconclusive'
-    counts = Counter(values)
+    """
+    Majority vote across TS with a clean ±1 verdict AND a good CTFFIND fit
+    on both halves -- a TS with a poor CTF fit is excluded from the vote
+    even if it happened to produce a ±1 verdict, since that verdict isn't
+    trustworthy (see _ctf_is_poor). Reports how many were excluded this
+    way so a consensus built on very few TS is visible as such, not
+    silently presented with the same confidence as one built on many.
+    """
+    trusted = [r['handedness'] for r in per_ts.values()
+              if r.get('handedness') in (-1, 1) and not _ctf_is_poor(r)]
+    n_excluded_poor_ctf = sum(1 for r in per_ts.values()
+                              if r.get('handedness') in (-1, 1) and _ctf_is_poor(r))
+    suffix = f' [{n_excluded_poor_ctf} more ±1 verdict(s) excluded for a poor CTFFIND fit]' if n_excluded_poor_ctf else ''
+    if not trusted:
+        return 'inconclusive' + suffix
+    counts = Counter(trusted)
     (top_val, top_n), = counts.most_common(1)
-    if top_n == len(values):
-        return str(top_val)
-    return f'inconsistent ({dict(counts)})'
+    if top_n == len(trusted):
+        return f'{top_val}{suffix}' if len(trusted) > 1 else f'{top_val} (from only 1 TS){suffix}'
+    return f'inconsistent ({dict(counts)}){suffix}'
 
 
 def _make_html(per_ts: dict, selection_scores: dict, consensus: str, out_path: Path):
@@ -243,7 +322,10 @@ def _make_html(per_ts: dict, selection_scores: dict, consensus: str, out_path: P
     for ts_name, r in per_ts.items():
         h = r.get('handedness')
         if h in (-1, 1):
-            badge_cls, badge_txt = 'ok', f'{h:+d}'
+            if _ctf_is_poor(r):
+                badge_cls, badge_txt = 'warn', f'{h:+d} (poor CTF)'
+            else:
+                badge_cls, badge_txt = 'ok', f'{h:+d}'
         elif h == 0:
             badge_cls, badge_txt = 'warn', 'inconclusive'
         else:
@@ -255,6 +337,10 @@ def _make_html(per_ts: dict, selection_scores: dict, consensus: str, out_path: P
         else:
             img_html = '<div class="missing">no plot produced</div>'
         s = selection_scores.get(ts_name, {})
+        ctf_left, ctf_right = r.get('ctf_left'), r.get('ctf_right')
+        def _ctf_txt(d):
+            return f'score={d["score_mean"]:.3f} res={d["res_mean_A"]:.1f}Å' if d else 'no CTFFIND output'
+        ctf_poor = _ctf_is_poor(r)
         cards.append(f'''
       <div class="card">
         <div class="card-title">{esc(ts_name)} <span class="badge {badge_cls}">{esc(badge_txt)}</span></div>
@@ -262,6 +348,10 @@ def _make_html(per_ts: dict, selection_scores: dict, consensus: str, out_path: P
         <div class="stats">
           corr(left)={esc(r.get('corr_left'))}  corr(right)={esc(r.get('corr_right'))}
           {'<span class="warn">low correlation — not reliable</span>' if r.get('reliable') is False else ''}
+        </div>
+        <div class="stats">
+          CTFFIND left: {esc(_ctf_txt(ctf_left))}  &middot;  CTFFIND right: {esc(_ctf_txt(ctf_right))}
+          {'<span class="warn">poor CTF fit (&gt;15&Aring;) — treat this handedness verdict cautiously</span>' if ctf_poor else ''}
         </div>
         <div class="why">selected for: coverage={esc(s.get('coverage_deg'))}&deg;,
           high-tilt CTF res={esc(s.get('high_tilt_ctf_res_A'))}&Aring;,
@@ -494,10 +584,14 @@ def run(args):
         }
         for future in as_completed(futures):
             ts_name = futures[future]
-            per_ts[ts_name] = future.result()
-            h = per_ts[ts_name].get('handedness')
-            status = f'{h:+d}' if h in (-1, 1) else ('inconclusive' if h == 0 else per_ts[ts_name].get('error', '?'))
-            print(f'[{ts_name}] done -> {status}')
+            r = future.result()
+            per_ts[ts_name] = r
+            h = r.get('handedness')
+            status = f'{h:+d}' if h in (-1, 1) else ('inconclusive' if h == 0 else r.get('error', '?'))
+            ctf_l, ctf_r = r.get('ctf_left'), r.get('ctf_right')
+            ctf_note = (f'  (CTFFIND res: left={ctf_l["res_mean_A"]:.1f}Å right={ctf_r["res_mean_A"]:.1f}Å)'
+                       if ctf_l and ctf_r else '')
+            print(f'[{ts_name}] done -> {status}{ctf_note}')
 
     consensus = _consensus(per_ts)
     print(f'\nConsensus defocus handedness: {consensus}')
