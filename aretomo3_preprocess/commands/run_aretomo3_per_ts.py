@@ -44,6 +44,7 @@ from aretomo3_preprocess.shared.project_state import (
     get_frames_dir, get_latest_analysis_dir,
     resolve_reference_apix, record_calibrated_apix,
     register_input_stacks, load_input_stacks, resolve_selected_ts,
+    resolve_tool_path,
 )
 
 
@@ -272,8 +273,10 @@ def add_parser(subparsers):
                      help='Output EVN/ODD frame sums: 0=disabled 1=enabled (-SplitSum)')
 
     ctl = p.add_argument_group('run control')
-    ctl.add_argument('--aretomo3', dest='aretomo3_bin', default='AreTomo3',
-                     help='Path to or name of the AreTomo3 executable')
+    ctl.add_argument('--aretomo3', dest='aretomo3_bin', default=None,
+                     help='Path to or name of the AreTomo3 executable '
+                          '(default: previously recorded via enrich --set-path-aretomo3 '
+                          'or a prior run of this command, else "AreTomo3" on PATH)')
     ctl.add_argument('--overwrite', action='store_true',
                      help='Re-run even if output .aln already exists')
     ctl.add_argument('--dry-run',   action='store_true',
@@ -291,6 +294,7 @@ def add_parser(subparsers):
 
 def run(args):
     out_dir  = Path(args.output)
+    args.aretomo3_bin = resolve_tool_path('aretomo3', args.aretomo3_bin) or 'AreTomo3'
 
     # ── Auto-fill from project.json if not given on CLI ────────────────────
     if args.analysis is None:

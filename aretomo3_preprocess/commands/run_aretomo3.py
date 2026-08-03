@@ -92,7 +92,7 @@ from aretomo3_preprocess.shared.project_json import (
 from aretomo3_preprocess.shared.project_state import (
     get_angpix, get_voltage, get_run_params, record_run_params,
     get_calibrated_apix, record_calibrated_apix,
-    register_input_stacks, resolve_selected_ts,
+    register_input_stacks, resolve_selected_ts, resolve_tool_path,
 )
 from aretomo3_preprocess.shared.output_guard import check_disk_space
 
@@ -1723,8 +1723,10 @@ def add_parser(subparsers):
                      help='Frame grouping GLOBAL LOCAL; AreTomo3 default if omitted (-Group)')
 
     ctl = p.add_argument_group('run control')
-    ctl.add_argument('--aretomo3', dest='aretomo3_bin', default='AreTomo3',
-                     help='Path to or name of the AreTomo3 executable')
+    ctl.add_argument('--aretomo3', dest='aretomo3_bin', default=None,
+                     help='Path to or name of the AreTomo3 executable '
+                          '(default: previously recorded via enrich --set-path-aretomo3 '
+                          'or a prior run of this command, else "AreTomo3" on PATH)')
     ctl.add_argument('--resume', action='store_true',
                      help='Pass -Resume 1 to AreTomo3: skip TS that already '
                           'have output files in --output. Staging is preserved.')
@@ -1744,6 +1746,8 @@ def add_parser(subparsers):
 def run(args):
     # Force line-buffered stdout so output appears immediately when piped (e.g. | tee)
     sys.stdout.reconfigure(line_buffering=True)
+
+    args.aretomo3_bin = resolve_tool_path('aretomo3', args.aretomo3_bin) or 'AreTomo3'
 
     if args.cmd == 3:
         print('ERROR: --cmd 3 (CTF-only) is not supported by this wrapper -- '

@@ -1,11 +1,12 @@
 """
 pytom-ribo-auto — fully-automated pytom-match-pick ribosome picking.
 
-A thin, opinionated front-end over `pytom-match`: given an AreTomo3 cmd=2
-output directory and an expected-particle count, it drives the whole
-template-matching -> extraction -> QC-report chain for a bundled ribosome
-reference (70S/50S/30S/80S), with no template/mask/voxel-size bookkeeping
-left to the user.
+A thin, opinionated front-end over `pytom-match`, deliberately kept to a
+handful of options: given an AreTomo3 cmd=2 output directory and
+--particle, it drives the whole template-matching -> extraction ->
+QC-report chain for a bundled ribosome reference, with no template/mask/
+voxel-size/particle-diameter bookkeeping left to the user. Only '70S' is
+actually usable right now -- see _PARTICLES below.
 
 Every fixed value in this file (the _PARTICLES registry's reference/mask
 paths and target_apix, the matching flags in _matching_defaults()) is
@@ -54,24 +55,24 @@ _PARTICLES to activate those choices; until then they fail with a
 clear "no pre-made reference/mask" error rather than silently using the
 wrong particle.
 
-Particle diameters (--particle-diameter) are documented estimates, not
-independently verified per-particle -- override them if you have a better
-number; they drive the extraction peak-spacing (pytom_extract_candidates.py's
-own spacing behaviour) and the matching command's Crowther-criterion
-angular-search fallback (currently overridden by the fixed --angular-search
-10 in _matching_defaults(), so this mostly matters for extraction).
+Particle diameters (_PARTICLES[...]['diameter_a']) are documented estimates,
+not independently verified per-particle -- no CLI override, edit the
+registry directly if you have a better number. They drive the extraction
+peak-spacing (pytom_extract_candidates.py's own spacing behaviour) and the
+matching command's Crowther-criterion angular-search fallback (currently
+overridden by the fixed --angular-search 10 in _matching_defaults(), so
+this mostly matters for extraction).
 
 Typical usage
 -------------
   aretomo3-preprocess pytom-ribo-auto \\
-      --input run002-cmd2 \\
-      --output pytom_ribo_auto \\
-      --expected-particles 3000
+      --input run002-cmd2 --output pytom_ribo_auto --particle 70S
 
-  # Only a subset of TS
+  # Only a subset of TS, flat top-N instead of auto-cutoff
   aretomo3-preprocess pytom-ribo-auto \\
-      --input run002-cmd2 --output pytom_ribo_auto \\
-      --expected-particles 3000 --select-ts run002_analysis/ts-select.csv
+      --input run002-cmd2 --output pytom_ribo_auto --particle 70S \\
+      --select-ts run002_analysis/ts-select.csv \\
+      --no-auto-cutoff --expected-particles 3000
 """
 
 import os
@@ -87,7 +88,7 @@ from aretomo3_preprocess.commands import pytom_match as _pm
 from aretomo3_preprocess.shared.output_guard import check_output_dir, check_disk_space
 from aretomo3_preprocess.shared.project_json import update_section, args_to_dict
 from aretomo3_preprocess.shared.project_state import (
-    resolve_selected_ts, record_handedness,
+    resolve_selected_ts, record_handedness, resolve_tool_path,
 )
 from aretomo3_preprocess.shared.discovery import (
     print_cmd as _print_cmd,
@@ -115,9 +116,10 @@ _RESAMPLE_TOL_PCT = 5.0
 _REF_DIR = Path('/opt/data/pytom')
 
 # diameter_a: envelope diameter in Angstrom, used for Crowther-criterion
-# sizing and extraction peak spacing (--particle-diameter, passed straight
-# to pytom_match_template.py/pytom_extract_candidates.py) -- see module
-# docstring re: these being estimates.
+# sizing and extraction peak spacing (passed straight through as
+# pytom_match_template.py/pytom_extract_candidates.py's own
+# --particle-diameter -- no CLI override on our side, see module docstring
+# re: these being estimates).
 #
 # target_apix: fixed voxel size this entry's map/mask were built at --
 # NOT a per-tomogram parameter, one value per registry entry. Every run
@@ -153,7 +155,7 @@ _PARTICLES = {
             'mask': _REF_DIR / 'SC_job035_run_it120_class001_10.00A_MASK.mrc',
             'map_mirror': _REF_DIR / 'SC_job035_run_it120_class001_10.00A_mirror.mrc',
             'mask_mirror': _REF_DIR / 'SC_job035_run_it120_class001_10.00A_mirror_MASK.mrc',
-            'diameter_a': 290.0, 'target_apix': 10.0},
+            'diameter_a': 280.0, 'target_apix': 10.0},
     # Same physical particle (70S ribosome) as '70S' above, but from PDB
     # 8B0X via ChimeraX molmap (native 4.0 A/px) rather than the
     # SC_job035 subtomogram average, and at a finer target resolution --
@@ -476,6 +478,20 @@ def _matching_defaults():
 
 _HANDEDNESS_SEED = 42  # fixed, for a reproducible TS sample across re-runs
 
+# -n cap used under the default auto-cutoff mode when --expected-particles
+# isn't given -- well above what auto-cutoff should ever actually return, so
+# it never becomes the binding constraint (matches pytom_param_screen.py's
+# own EXPECTED_PARTICLES_CAP).
+_AUTO_CUTOFF_PARTICLE_CAP = 5000
+
+
+def _resolve_n_particles(args):
+    if not args.auto_cutoff and args.expected_particles is None:
+        print('ERROR: --expected-particles is required when --no-auto-cutoff is given')
+        sys.exit(1)
+    return args.expected_particles if args.expected_particles is not None \
+        else _AUTO_CUTOFF_PARTICLE_CAP
+
 
 def _resolve_handedness_ts_list(in_dir, vol_suffix, select_ts, include, exclude,
                                 handedness_ts, n_ts):
@@ -727,25 +743,30 @@ def _reextract(args, out_dir, diameter_a, sep):
     """
     Re-run pytom_extract_candidates.py against an existing --output's
     *_job.json files, without touching matching (no GPU, no --input).
-    Lets --expected-particles/--auto-cutoff/--particle-diameter be changed
-    and re-applied cheaply -- the GPU search is by far the expensive part.
+    Lets --expected-particles/--no-auto-cutoff be changed and re-applied
+    cheaply -- the GPU search is by far the expensive part.
     """
     if not out_dir.is_dir():
         print(f'ERROR: --output {out_dir} not found (nothing to re-extract from)')
         sys.exit(1)
 
+    n_particles = _resolve_n_particles(args)
     cut_off = None if args.auto_cutoff else 0.0
     print(f'Re-extracting from existing results in {out_dir}')
-    print(f'  n_particles={args.expected_particles}  '
+    print(f'  n_particles={n_particles}  '
           f'cut_off={"auto-estimated" if cut_off is None else cut_off}  '
           f'diameter={diameter_a:.0f} A')
     print(sep)
 
     pm_ns = argparse.Namespace(
         output=str(out_dir),
-        n_particles=args.expected_particles,
+        n_particles=n_particles,
         particle_diameter=diameter_a,
-        tophat_filter=True, tophat_bins=None,
+        # tophat_filter off: bi38262-30-akinetes param screen (2026-08-01)
+        # measured 2.2x more auto-cutoff particles with it off vs baseline,
+        # at ~baseline time cost, and a visual QC check of the picks looked
+        # fine -- see runs/08_notophat/pytom_extract_qc.html in that screen.
+        tophat_filter=False, tophat_bins=None,
         cut_off=cut_off, cut_off_csv=None, n_false_positives=None,
         relion5_compat=True, imod=True, imod_dir=None, imod_sphere_diameter=None,
         select_ts=args.select_ts, include=args.include, exclude=args.exclude,
@@ -760,12 +781,21 @@ def _reextract(args, out_dir, diameter_a, sep):
 # Parser registration
 # ─────────────────────────────────────────────────────────────────────────────
 
+_SHORT_DESCRIPTION = (
+    "Fully-automated pytom-match-pick ribosome picking against a bundled "
+    "reference -- runs matching + extraction + QC report end to end from "
+    "a run-aretomo3 --cmd 2 output directory. Hardcoded for this lab's "
+    "conventions/references (only 70S is bundled right now); see the "
+    "module docstring in the code for the full rationale."
+)
+
+
 def add_parser(subparsers):
     p = subparsers.add_parser(
         'pytom-ribo-auto',
         help='Fully-automated pytom-match-pick ribosome picking (bundled reference)',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-        description=__doc__,
+        description=_SHORT_DESCRIPTION,
     )
 
     req = p.add_argument_group('required')
@@ -775,25 +805,20 @@ def add_parser(subparsers):
     req.add_argument('--output', '-o', required=True,
                      help='Output directory (created; staged/ + per-TS pytom results inside). '
                           'With --reextract, an existing output from a previous run.')
-    req.add_argument('--expected-particles', type=int, required=True,
-                     help='Number of top-scoring candidates to extract per tomogram. '
-                          'Cut-off is disabled (0) by default, so this picks the top-N '
-                          'candidates directly rather than filtering by an '
-                          'auto-estimated LCCmax significance threshold -- see '
-                          '--auto-cutoff to restore that behaviour instead.')
-    req.add_argument('--auto-cutoff', action='store_true',
-                     help='Use pytom_extract_candidates.py\'s automatic ROC-based '
-                          'LCCmax cutoff estimation instead of extracting a flat '
-                          'top-N. Can return 0 particles even for real hits if the '
-                          'estimated cutoff is conservative -- off by default for '
-                          'that reason.')
+    req.add_argument('--expected-particles', type=int, default=None,
+                     help='Flat top-N candidates per tomogram, instead of the default '
+                          'auto-cutoff. Required if --no-auto-cutoff is given, ignored '
+                          'otherwise.')
+    req.add_argument('--no-auto-cutoff', dest='auto_cutoff', action='store_false',
+                     help="Extract a flat top-N (needs --expected-particles) instead of "
+                          "pytom's automatic ROC-based LCCmax cutoff. Auto-cutoff is the "
+                          "default because a flat top-N can't tell a real hit from noise.")
 
     part = p.add_argument_group('particle')
-    part.add_argument('--particle', choices=sorted(_PARTICLES), default='70S',
-                      help='Which reference to use (only 70S has a bundled '
-                           'reference on this system right now)')
-    part.add_argument('--particle-diameter', type=float, default=None,
-                      help='Override the built-in diameter estimate (Angstrom)')
+    part.add_argument('--particle', choices=sorted(_PARTICLES), required=True,
+                      help='Which reference to use. Fixes the diameter too -- see '
+                           '_PARTICLES in the code for the per-particle values and '
+                           'which ones actually have a bundled reference on this system.')
     part.add_argument('--mirror', action='store_true',
                       help='Mirror the reference template before matching '
                            '(chirality/handedness correction -- see '
@@ -805,44 +830,32 @@ def add_parser(subparsers):
     filt.add_argument('--include', nargs='+', help='Process only these TS prefixes')
     filt.add_argument('--exclude', nargs='+', help='Exclude these TS prefixes')
 
+    # --check-handedness follows TomoGuide's handedness workflow ("one will
+    # output way more particles than the other"), including its "3-4
+    # tomograms" sample-size recommendation (a single TS risks a fluke
+    # result) -- majority vote across --handedness-n-ts TS, same
+    # auto-estimated cutoff a real run would use. Re-run with --mirror if
+    # mirrored wins.
     hand = p.add_argument_group('handedness check')
     hand.add_argument('--check-handedness', action='store_true',
-                      help='Run matching+extraction with BOTH the normal and '
-                           'mirrored template on --handedness-n-ts tomograms, '
-                           'report which wins the majority vote of particles '
-                           'extracted under the same auto-estimated cutoff a real '
-                           'run would use, and exit -- does not run the full '
-                           'batch. Follows TomoGuide\'s handedness workflow '
-                           '("one will output way more particles than the other"), '
-                           'including its "3-4 tomograms" sample-size recommendation '
-                           '(a single TS risks a fluke result). '
-                           'Re-run with --mirror if mirrored wins.')
+                      help='Compare normal vs. mirrored template on a TS sample '
+                           'and exit (does not run the full batch)')
     hand.add_argument('--handedness-ts', nargs='+', default=None, metavar='TS_NAME',
-                      help='Pin --check-handedness to one or more specific '
-                           'tomograms instead of a --handedness-n-ts sample '
-                           '(manual override -- trusted as given, not restricted '
-                           'to the selected_ts pool)')
+                      help='Check these specific TS instead of a random sample')
     hand.add_argument('--handedness-n-ts', type=int, default=4, metavar='N',
-                      help='Number of tomograms to check (seeded random sample '
-                           'from the selected-TS pool). TomoGuide recommends 3-4.')
+                      help='Sample size if --handedness-ts not given')
     hand.add_argument('--handedness-particles', type=int, default=1000,
-                      help='Cap on particles extracted per template for the '
-                           'comparison (auto-estimated cutoff still applies, same '
-                           'as a real run -- this is just an upper bound)')
+                      help='Cap on particles extracted per template for the comparison')
 
     ctl = p.add_argument_group('run control')
     ctl.add_argument('--reextract', action='store_true',
-                     help='Skip matching entirely and re-run extraction only, '
-                          'against the existing --output from a previous run -- '
-                          'use this to change --expected-particles/--auto-cutoff/'
-                          '--particle-diameter without re-running the GPU search. '
-                          'Does not need --input or a GPU.')
+                     help='Re-run extraction only against an existing --output '
+                          '(no --input/GPU needed) -- for changing '
+                          '--expected-particles/--no-auto-cutoff cheaply')
+    # Default is every visible GPU, which can starve other jobs on shared
+    # hardware -- pass this explicitly unless that's really what you want.
     ctl.add_argument('--gpu', '-g', nargs='+', type=int, default=None,
-                     help='GPU ID(s) to use. REQUIRED to think about on shared '
-                          'hardware: default is to auto-detect and use *all* '
-                          'visible GPUs, which can starve other jobs on this '
-                          'machine -- pass this explicitly (e.g. --gpu 0 1) '
-                          'unless you really want every GPU.')
+                     help='GPU ID(s) to use (default: auto-detect, ALL visible GPUs)')
     ctl.add_argument('--clean', action='store_true',
                      help='Remove an existing --output directory before starting')
     ctl.add_argument('--pytom-dir', default=None,
@@ -867,8 +880,11 @@ def run(args):
     sep = '─' * 70
     out_dir = Path(args.output).resolve()
 
+    args.pytom_dir    = resolve_tool_path('pytom', args.pytom_dir)
+    args.imod_bin_dir = resolve_tool_path('imod', args.imod_bin_dir)
+
     if args.reextract:
-        diameter_a = args.particle_diameter or _PARTICLES[args.particle]['diameter_a']
+        diameter_a = _PARTICLES[args.particle]['diameter_a']
         _reextract(args, out_dir, diameter_a, sep)
         return
 
@@ -909,7 +925,7 @@ def run(args):
     ref_map = Path(reg['map'])
     target_apix = reg['target_apix']
 
-    diameter_a = args.particle_diameter or reg['diameter_a']
+    diameter_a = reg['diameter_a']
 
     gpus = args.gpu or _detect_gpus()
     if not gpus:
@@ -917,7 +933,6 @@ def run(args):
         sys.exit(1)
 
     print(f'pytom-ribo-auto: {args.particle}  (diameter {diameter_a:.0f} A'
-          f'{" -- override" if args.particle_diameter else " -- built-in estimate"}'
           f'{", mirrored" if args.mirror else ""})')
     if args.gpu:
         print(f'GPUs: {gpus}  (explicit)')
@@ -995,6 +1010,7 @@ def run(args):
     # ── 4. Delegate to pytom-match's own run() ──────────────────────────────
     # Reuses pytom-match's matching + extraction + QC-report pipeline
     # directly rather than reimplementing it -- see module docstring.
+    n_particles = _resolve_n_particles(args)
     pm_ns = argparse.Namespace(
         # input
         input=str(in_dir), vol_suffix=vol_suffix,
@@ -1007,8 +1023,12 @@ def run(args):
         # QC report
         analyse=True, analyse_thickness=300.0, analyse_output=None,
         # extraction
-        extract=True, n_particles=args.expected_particles,
-        tophat_filter=True, tophat_bins=None,
+        extract=True, n_particles=n_particles,
+        # tophat_filter off: bi38262-30-akinetes param screen (2026-08-01)
+        # measured 2.2x more auto-cutoff particles with it off vs baseline,
+        # at ~baseline time cost, and a visual QC check of the picks looked
+        # fine -- see runs/08_notophat/pytom_extract_qc.html in that screen.
+        tophat_filter=False, tophat_bins=None,
         cut_off=(None if args.auto_cutoff else 0.0),
         cut_off_csv=None, n_false_positives=None,
         relion5_compat=True, imod=True, imod_dir=None, imod_sphere_diameter=None,

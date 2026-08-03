@@ -66,6 +66,8 @@ import datetime
 import numpy as np
 
 from aretomo3_preprocess.shared.project_json import update_section, args_to_dict
+from aretomo3_preprocess.shared.project_state import record_analysis_run
+from aretomo3_preprocess.shared.landing_page import write_landing_page
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -880,3 +882,7 @@ def run(args):
     print(f'  Residual progression     : {prog_path}')
     print(f'  HTML report              : {html_path}')
     print(f'  Project backup           : {proj_backup}')
+
+    record_analysis_run('gain_check', str(out_dir))
+    landing_path = write_landing_page(Path.cwd())
+    print(f'See {landing_path} for the full report index.')

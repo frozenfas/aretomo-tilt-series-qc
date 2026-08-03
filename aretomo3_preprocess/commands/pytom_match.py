@@ -60,7 +60,10 @@ from aretomo3_preprocess.shared.parsers import (
 from aretomo3_preprocess.shared.project_json import (
     update_section, args_to_dict,
 )
-from aretomo3_preprocess.shared.project_state import resolve_selected_ts
+from aretomo3_preprocess.shared.project_state import (
+    resolve_selected_ts, record_analysis_run, resolve_tool_path,
+)
+from aretomo3_preprocess.shared.landing_page import write_landing_page
 from aretomo3_preprocess.shared.discovery import (
     print_cmd as _print_cmd,
     find_volumes as _find_volumes,
@@ -608,6 +611,8 @@ def run(args):
     out_dir = Path(args.output).resolve()
     sep     = '─' * 70
 
+    args.pytom_dir = resolve_tool_path('pytom', args.pytom_dir)
+
     extract_only  = getattr(args, 'extract_only',  False)
     analyse_only  = getattr(args, 'analyse_only',  False)
 
@@ -699,7 +704,7 @@ def run(args):
         try:
             from aretomo3_preprocess.shared.volume_qc import (
                 central_slab_projection, projection_to_b64png, make_comparison_html,
-                slab_with_picks_b64, slab_picks_data, make_picks_html, make_picks_html_dev,
+                slab_with_picks_b64, slab_picks_data, make_picks_html_dev,
             )
         except ImportError as e:
             print(f'WARNING: --analyse requires mrcfile and matplotlib ({e}); skipping report')
@@ -920,15 +925,10 @@ def run(args):
         )
 
     if do_qc_picks and extract_qc_entries:
-        picks_html = out_dir / 'pytom_extract_qc.html'
-        make_picks_html(
-            entries    = extract_qc_entries,
-            out_path   = picks_html,
-            title      = 'pytom-extract QC',
-            command    = ' '.join(sys.argv),
-            slab_angst = qc_thick,
-        )
-        dev_path = picks_html.with_stem(picks_html.stem + '_dev')
+        # Interactive dev page only -- it's a strict superset of the static
+        # pytom_extract_qc.html (same picks data, plus a per-TS score-cutoff
+        # slider/live recount/CSV export), so the static one is redundant.
+        dev_path = out_dir / 'pytom_extract_qc_dev.html'
         make_picks_html_dev(
             entries    = extract_qc_entries,
             out_path   = dev_path,
@@ -952,6 +952,9 @@ def run(args):
         },
         backup_dir=out_dir,
     )
+    record_analysis_run('pytom_match', str(out_dir))
+    landing_path = write_landing_page(Path.cwd())
+    print(f'See {landing_path} for the full report index.')
 
 
 def _run_analyse_only(args, out_dir, sep):
@@ -970,7 +973,7 @@ def _run_analyse_only(args, out_dir, sep):
         from aretomo3_preprocess.shared.volume_qc import (
             central_slab_projection, projection_to_b64png,
             make_comparison_html, slab_with_picks_b64, slab_picks_data,
-            make_picks_html, make_picks_html_dev,
+            make_picks_html_dev,
         )
     except ImportError as e:
         print(f'ERROR: --analyse-only requires mrcfile, matplotlib, starfile ({e})')
@@ -1076,17 +1079,11 @@ def _run_analyse_only(args, out_dir, sep):
     print(f'Match QC:   {match_html}')
 
     # ── Extract QC HTML ───────────────────────────────────────────────────
+    # Interactive dev page only -- see the note in the main matching path
+    # above for why the static pytom_extract_qc.html is redundant with it.
     has_picks = any(e.get('img_b64') for e in extract_entries)
     if has_picks:
-        picks_html = out_dir / 'pytom_extract_qc.html'
-        make_picks_html(
-            entries    = extract_entries,
-            out_path   = picks_html,
-            title      = 'pytom-extract QC',
-            command    = ' '.join(sys.argv),
-            slab_angst = qc_thick,
-        )
-        dev_path = picks_html.with_stem(picks_html.stem + '_dev')
+        dev_path = out_dir / 'pytom_extract_qc_dev.html'
         make_picks_html_dev(
             entries    = extract_entries,
             out_path   = dev_path,
@@ -1094,10 +1091,13 @@ def _run_analyse_only(args, out_dir, sep):
             command    = ' '.join(sys.argv),
             slab_angst = qc_thick,
         )
-        print(f'Extract QC: {picks_html}')
-        print(f'Dev HTML:   {dev_path}')
+        print(f'Extract QC (interactive): {dev_path}')
     else:
         print('No extracted particles found — skipping picks QC HTML')
+
+    record_analysis_run('pytom_match', str(out_dir))
+    landing_path = write_landing_page(Path.cwd())
+    print(f'See {landing_path} for the full report index.')
 
 
 def _run_extract_only(args, out_dir, sep):
@@ -1167,7 +1167,7 @@ def _run_extract_only(args, out_dir, sep):
             from aretomo3_preprocess.shared.volume_qc import (
                 slab_with_picks_b64, slab_picks_data,
                 central_slab_projection, projection_to_b64png,
-                make_picks_html, make_picks_html_dev,
+                make_picks_html_dev,
             )
         except ImportError as e:
             print(f'WARNING: --analyse requires starfile and matplotlib ({e}); skipping')
@@ -1271,15 +1271,11 @@ def _run_extract_only(args, out_dir, sep):
         print(f'IMOD models: {mod_dir}/')
 
     if do_qc and qc_entries:
+        # Interactive dev page only -- see the note in the main matching
+        # path (run()) for why the static pytom_extract_qc.html is
+        # redundant with it.
         html_path = (Path(args.analyse_output) if args.analyse_output
                      else out_dir / 'pytom_extract_qc.html')
-        make_picks_html(
-            entries    = qc_entries,
-            out_path   = html_path,
-            title      = 'pytom-extract QC',
-            command    = ' '.join(sys.argv),
-            slab_angst = qc_thick,
-        )
         dev_path = html_path.with_stem(html_path.stem + '_dev')
         make_picks_html_dev(
             entries    = qc_entries,
@@ -1304,3 +1300,6 @@ def _run_extract_only(args, out_dir, sep):
         },
         backup_dir=out_dir,
     )
+    record_analysis_run('pytom_match', str(out_dir))
+    landing_path = write_landing_page(Path.cwd())
+    print(f'See {landing_path} for the full report index.')

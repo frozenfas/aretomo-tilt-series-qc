@@ -62,12 +62,15 @@ from aretomo3_preprocess.shared.parsers import (
     parse_aln_file, parse_ctf_file, parse_tlt_file,
 )
 from aretomo3_preprocess.shared.project_json import update_section, args_to_dict
-from aretomo3_preprocess.shared.project_state import resolve_selected_ts
+from aretomo3_preprocess.shared.project_state import (
+    resolve_selected_ts, record_analysis_run, resolve_tool_path,
+)
+from aretomo3_preprocess.shared.landing_page import write_landing_page
 from aretomo3_preprocess.shared.output_guard import check_output_dir
 from aretomo3_preprocess.shared.volume_qc import (
     central_slab_projection, projection_to_b64png,
     slab_with_picks_b64, slab_picks_data,
-    make_picks_html, make_picks_html_dev,
+    make_picks_html_dev,
     make_comparison_html,
 )
 from aretomo3_preprocess.shared.discovery import (
@@ -795,15 +798,11 @@ def _run_extract_only(args, out_dir, sep):  # noqa: C901
         print(f'Failed: {", ".join(failed)}')
 
     if do_qc and qc_entries:
+        # Interactive dev page only -- static gapstop_extract_qc.html is a
+        # redundant static duplicate of the same picks data (see
+        # pytom_match.py's equivalent note).
         html_path = (Path(args.analyse_output) if args.analyse_output
                      else out_dir / 'gapstop_extract_qc.html')
-        make_picks_html(
-            entries   = qc_entries,
-            out_path  = html_path,
-            title     = 'gapstop-match extraction QC',
-            command   = ' '.join(sys.argv),
-            slab_angst = getattr(args, 'analyse_thickness', 300.0),
-        )
         make_picks_html_dev(
             entries   = qc_entries,
             out_path  = html_path.with_stem(html_path.stem + '_dev'),
@@ -811,6 +810,11 @@ def _run_extract_only(args, out_dir, sep):  # noqa: C901
             command   = ' '.join(sys.argv),
             slab_angst = getattr(args, 'analyse_thickness', 300.0),
         )
+
+    if not args.dry_run:
+        record_analysis_run('gapstop_match', str(out_dir))
+        landing_path = write_landing_page(Path.cwd())
+        print(f'See {landing_path} for the full report index.')
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -867,15 +871,10 @@ def _run_analyse_only(args, out_dir, sep):
         ))
 
     print(sep)
+    # Interactive dev page only -- see the note in _run_extract_only above
+    # for why the static gapstop_extract_qc.html is redundant with it.
     html_path = (Path(args.analyse_output) if args.analyse_output
                  else out_dir / 'gapstop_extract_qc.html')
-    make_picks_html(
-        entries    = qc_entries,
-        out_path   = html_path,
-        title      = 'gapstop-match picks QC',
-        command    = ' '.join(sys.argv),
-        slab_angst = getattr(args, 'analyse_thickness', 300.0),
-    )
     make_picks_html_dev(
         entries    = qc_entries,
         out_path   = html_path.with_stem(html_path.stem + '_dev'),
@@ -883,6 +882,10 @@ def _run_analyse_only(args, out_dir, sep):
         command    = ' '.join(sys.argv),
         slab_angst = getattr(args, 'analyse_thickness', 300.0),
     )
+
+    record_analysis_run('gapstop_match', str(out_dir))
+    landing_path = write_landing_page(Path.cwd())
+    print(f'See {landing_path} for the full report index.')
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -892,6 +895,8 @@ def _run_analyse_only(args, out_dir, sep):
 def run(args):
     out_dir = Path(args.output).resolve()
     sep     = '─' * 70
+
+    args.gapstop_dir = resolve_tool_path('gapstop', args.gapstop_dir)
 
     if getattr(args, 'analyse_only', False):
         _run_analyse_only(args, out_dir, sep)
@@ -1164,16 +1169,14 @@ def run(args):
 
     # QC report
     if do_qc and qc_entries:
-        html_path = (Path(args.analyse_output) if args.analyse_output
-                     else out_dir / 'gapstop_match_qc.html')
         if do_extract:
-            make_picks_html(
-                entries   = qc_entries,
-                out_path  = html_path,
-                title     = 'gapstop-match QC',
-                command   = ' '.join(sys.argv),
-                slab_angst = qc_thick,
-            )
+            # Interactive dev page only, named to match _run_extract_only/
+            # _run_analyse_only's gapstop_extract_qc*.html convention (this
+            # branch used to write a separate gapstop_match_qc.html name
+            # for the same picks content -- consolidated to one name for
+            # picks QC across all three gapstop code paths).
+            html_path = (Path(args.analyse_output) if args.analyse_output
+                         else out_dir / 'gapstop_extract_qc.html')
             make_picks_html_dev(
                 entries   = qc_entries,
                 out_path  = html_path.with_stem(html_path.stem + '_dev'),
@@ -1181,7 +1184,10 @@ def run(args):
                 command   = ' '.join(sys.argv),
                 slab_angst = qc_thick,
             )
+            print(f'QC report: {html_path.with_stem(html_path.stem + "_dev")}')
         else:
+            html_path = (Path(args.analyse_output) if args.analyse_output
+                         else out_dir / 'gapstop_match_qc.html')
             make_comparison_html(
                 entries      = qc_entries,
                 out_path     = html_path,
@@ -1191,7 +1197,7 @@ def run(args):
                 after_label  = 'Score map',
                 slab_angst   = qc_thick,
             )
-        print(f'QC report: {html_path}')
+            print(f'QC report: {html_path}')
 
     if args.dry_run:
         return
@@ -1209,3 +1215,6 @@ def run(args):
         },
         backup_dir=out_dir,
     )
+    record_analysis_run('gapstop_match', str(out_dir))
+    landing_path = write_landing_page(Path.cwd())
+    print(f'See {landing_path} for the full report index.')

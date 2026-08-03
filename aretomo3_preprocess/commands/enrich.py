@@ -50,6 +50,7 @@ Typical usage
 """
 
 import csv as _csv_module
+import re
 import sys
 import datetime
 from pathlib import Path
@@ -64,7 +65,9 @@ except ImportError:
 from aretomo3_preprocess.shared.project_json import (
     load as _load_project, update_section,
 )
-from aretomo3_preprocess.shared.project_state import register_input_stacks
+from aretomo3_preprocess.shared.project_state import (
+    register_input_stacks, record_tool_path,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -72,7 +75,22 @@ from aretomo3_preprocess.shared.project_state import register_input_stacks
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _enrich_mdoc_data(frames_dir: Path, force: bool):
-    """Parse all *.mdoc files and write mdoc_data to project.json."""
+    """Parse mdoc files and write mdoc_data to project.json.
+
+    Prefers ts-*.mdoc (the rename-ts symlinks -- exactly the curated set
+    that's actually used downstream) over a raw *.mdoc glob when both
+    exist in frames_dir. rename-ts creates its symlinks alongside the
+    original Position_*.mdoc files it points at, so a bare *.mdoc glob
+    there double-counts every renamed TS once under its original stem and
+    once under its ts-XXX symlink name (e.g. 172 real TS -> 344 mdoc
+    files). Each ts-XXX.mdoc entry is still keyed by its RESOLVED
+    (original) stem, not 'ts-XXX' -- matching the existing convention
+    that mdoc_data.per_ts is keyed by original stem (see
+    get_ts_to_original_stem()'s docstring), so this is a pure dedup, not
+    a change to how downstream code looks entries up. Falls back to a raw
+    *.mdoc glob when no ts-*.mdoc symlinks exist yet (e.g. this is being
+    run before rename-ts in the pipeline).
+    """
     if not _HAS_MDOCFILE:
         print('  ERROR: mdocfile not installed — cannot parse mdoc files')
         print('         Install with: pip install mdocfile')
@@ -86,12 +104,25 @@ def _enrich_mdoc_data(frames_dir: Path, force: bool):
 
     from aretomo3_preprocess.shared.parsers import parse_mdoc_file
 
-    mdoc_files = sorted(frames_dir.glob('*.mdoc'))
+    ts_mdocs = sorted(frames_dir.glob('ts-*.mdoc'))
+    if ts_mdocs:
+        mdoc_files = ts_mdocs
+        key_of = lambda p: p.resolve().stem
+        print(f'  Found {len(ts_mdocs)} ts-*.mdoc symlinks — reading only the '
+              f'renamed/curated set (not every raw *.mdoc in this directory).')
+    else:
+        mdoc_files = sorted(frames_dir.glob('*.mdoc'))
+        key_of = lambda p: p.stem
     if not mdoc_files:
         print(f'  ERROR: no .mdoc files found in {frames_dir}')
         return
 
     prior = _load_project().get('mdoc_data', {}).get('per_ts', {})
+    # Drop any 'ts-XXX'-keyed entries left over from before this function
+    # preferred ts-*.mdoc's resolved (original) stem as the key -- a bare
+    # 'ts-123' key is never a real original stem (those are always
+    # Position_N-style names), so it's always stale double-counted debris.
+    prior = {k: v for k, v in prior.items() if not re.match(r'^ts-\d+$', k)}
     new_entries = {}
     n_ok = n_fail = 0
     for path in mdoc_files:
@@ -102,7 +133,7 @@ def _enrich_mdoc_data(frames_dir: Path, force: bool):
             n_fail += 1
             continue
         if mdoc_data:
-            new_entries[path.stem] = {
+            new_entries[key_of(path)] = {
                 'angpix':      angpix,
                 'acquisition': acquisition,
                 'frames':      {str(k): v for k, v in mdoc_data.items()},
@@ -300,6 +331,21 @@ def add_parser(subparsers):
                    default=['_CTF', '_Vol', '_EVN', '_ODD'],
                    help='Stem substrings to exclude when scanning --mrc-data '
                         '(default: _CTF _Vol _EVN _ODD).')
+    tools = p.add_argument_group('external tool paths')
+    tools.add_argument('--set-path-aretomo3', default=None, metavar='PATH',
+                       help='Remember an AreTomo3 binary/path for this project '
+                            '(run-aretomo3/run-aretomo3-per-ts auto-fill --aretomo3 '
+                            'from this instead of needing it every invocation).')
+    tools.add_argument('--set-path-pytom', default=None, metavar='DIR',
+                       help='Remember a pytom-match-pick bin/ directory for this '
+                            'project (pytom-match/pytom-ribo-auto auto-fill '
+                            '--pytom-dir from this).')
+    tools.add_argument('--set-path-imod', default=None, metavar='DIR',
+                       help='Remember an IMOD bin/ directory for this project '
+                            '(pytom-ribo-auto auto-fills --imod-bin-dir from this).')
+    tools.add_argument('--set-path-gapstop', default=None, metavar='DIR',
+                       help='Remember a gapstop env/ directory for this project '
+                            '(gapstop-match auto-fills --gapstop-dir from this).')
     p.add_argument('--force', action='store_true',
                    help='Overwrite existing data in project.json.  '
                         'Without --force, enrich skips sections that are already '
@@ -360,7 +406,16 @@ def run(args):
         _enrich_defocus_data(ctf_dir, args.force)
         did_anything = True
 
+    for tool_name, cli_flag in (('aretomo3', args.set_path_aretomo3),
+                                ('pytom',    args.set_path_pytom),
+                                ('imod',     args.set_path_imod),
+                                ('gapstop',  args.set_path_gapstop)):
+        if cli_flag is not None:
+            record_tool_path(tool_name, cli_flag)
+            print(f'Recorded tool path: {tool_name} -> {cli_flag}')
+            did_anything = True
+
     if not did_anything:
         print('ERROR: at least one of --mdoc-data, --mrc-data, --tlt-data, '
-              '--lamellae, --defocus-data must be given.')
+              '--lamellae, --defocus-data, --set-path-* must be given.')
         sys.exit(1)
