@@ -234,9 +234,17 @@ def run(args):
     else:
         _kv('physical (mirror) handedness', 'not determined yet -- run '
             'pytom-ribo-auto --check-handedness', use_color=use_color, value_color=_DIM)
-    _kv('defocus handedness', 'not implemented in this pipeline (would need a '
-        'Defocusgrad/CTFFIND4-style region-split defocus check -- separate '
-        'from the physical/mirror handedness above)', use_color=use_color, value_color=_DIM)
+    dg = d['defocusgrad']
+    if dg:
+        consensus = dg.get('consensus', '?')
+        n_ts = len(dg.get('per_ts', {}))
+        is_warn = 'inconsist' in str(consensus) or 'inconclus' in str(consensus)
+        _kv('defocus handedness', consensus, use_color=use_color,
+            value_color=(_YELLOW if is_warn else _GREEN))
+        _kv('  determined from', f'defocusgrad, {n_ts} TS', use_color=use_color)
+    else:
+        _kv('defocus handedness', 'not checked yet -- run defocusgrad',
+            use_color=use_color, value_color=_DIM)
     if d['lamellae']:
         n_lam, n_ts_assigned = d['lamellae']
         _kv('lamellae', f'{n_lam}  ({n_ts_assigned} TS assigned)', use_color=use_color)

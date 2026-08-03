@@ -7,7 +7,7 @@ from aretomo3_preprocess.commands import (
     rename_ts, run_aretomo3, run_aretomo3_per_ts, cryocare, enrich, select_ts,
     imod_mtffilter, topaz_denoise3d, topaz_train, deep_dewedge, deep_dewedge_mw,
     aln_edit, pytom_match, membrain_seg, slabify, simple_box_mask, gapstop_match,
-    relion5_convert, easymode_seg, pytom_ribo_auto, project_summary,
+    relion5_convert, easymode_seg, pytom_ribo_auto, project_summary, defocusgrad,
 )
 
 # Groups shown on the top-level --help listing, purely a navigation aid --
@@ -32,6 +32,7 @@ _HELP_GROUPS = [
     ]),
     ('STA / RELION5 prep', [
         'membrain-seg', 'slabify', 'simple-box-mask', 'relion5-convert', 'easymode-seg',
+        'defocusgrad',
     ]),
 ]
 
@@ -97,6 +98,7 @@ def main():
     easymode_seg.add_parser(sub)
     pytom_ribo_auto.add_parser(sub)
     project_summary.add_parser(sub)
+    defocusgrad.add_parser(sub)
 
     # No command given at all, or top-level -h/--help (as opposed to
     # `<command> --help`, which argparse already routes to that command's

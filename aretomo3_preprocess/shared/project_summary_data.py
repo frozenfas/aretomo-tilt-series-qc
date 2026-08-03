@@ -120,6 +120,7 @@ def gather(proj: dict) -> dict:
     }
 
     d['handedness'] = proj.get('handedness')
+    d['defocusgrad'] = proj.get('defocusgrad')
     lamellae = proj.get('lamella_assignments', {})
     d['lamellae'] = None
     if lamellae:
@@ -248,7 +249,16 @@ def render_html(proj: dict) -> str:
     else:
         rows.append(_html_row('physical (mirror) handedness',
                               '<span class="ps-dim">not determined yet (pytom-ribo-auto --check-handedness)</span>'))
-    rows.append(_html_row('defocus handedness', '<span class="ps-dim">not implemented in this pipeline</span>'))
+    dg = d['defocusgrad']
+    if dg:
+        consensus = dg.get('consensus', '?')
+        cls = 'ps-warn' if 'inconsist' in str(consensus) or 'inconclus' in str(consensus) else 'ps-good'
+        n_ts = len(dg.get('per_ts', {}))
+        rows.append(_html_row('defocus handedness', f'<span class="{cls}">{_e(consensus)}</span>',
+                              note=f'defocusgrad, {n_ts} TS'))
+    else:
+        rows.append(_html_row('defocus handedness',
+                              '<span class="ps-dim">not checked yet (defocusgrad)</span>'))
     if d['lamellae']:
         n_lam, n_ts_assigned = d['lamellae']
         rows.append(_html_row('lamellae', f'{n_lam}  ({_e(n_ts_assigned)} TS assigned)'))
