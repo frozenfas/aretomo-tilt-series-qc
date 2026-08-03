@@ -5,6 +5,7 @@ a global summary PNG, an HTML viewer, alignment JSON, and flagged TSV.
 
 import sys
 import csv
+import math
 import time
 import json
 import shutil
@@ -776,12 +777,31 @@ def _range_slider_html(key, label, unit, lo, hi, step, decimals):
     """One dual-thumb (min/max) filter slider block for the analyse HTML
     report -- two overlaid native <input type=range> elements (the
     standard dependency-free two-thumb-slider trick), clamped against
-    each other in JS so min can never cross max."""
+    each other in JS so min can never cross max. The fv-{key}-min/max
+    number inputs mirror the slider thumbs exactly (same id as the old
+    read-only display spans they replaced) -- typing a precise value in
+    either updates the corresponding slider and re-filters, for cases
+    where dragging isn't precise enough (e.g. "exactly 80% overlap")."""
+    # Floor lo / ceil hi at the slider's own decimal precision, not plain
+    # round-to-nearest -- rounding the true min UP (or max DOWN) at low
+    # decimal counts (e.g. Overlap has 0 decimals) clips exactly the TS
+    # sitting at that boundary out of the slider's range entirely, hiding
+    # it from the default view even though nothing was ever dragged.
+    factor = 10 ** decimals
+    lo_floored = math.floor(lo * factor) / factor
+    hi_ceiled  = math.ceil(hi * factor) / factor
     fmt = f'{{:.{decimals}f}}'
-    lo_s, hi_s = fmt.format(lo), fmt.format(hi)
+    lo_s, hi_s = fmt.format(lo_floored), fmt.format(hi_ceiled)
     return f'''
       <div class="filt">
-        <label>{label}: <span id="fv-{key}-min">{lo_s}</span>&#8211;<span id="fv-{key}-max">{hi_s}</span>{unit}</label>
+        <label>{label}:
+          <input type="number" class="filt-num" id="fv-{key}-min"
+                 min="{lo_s}" max="{hi_s}" step="{step}" value="{lo_s}">
+          &#8211;
+          <input type="number" class="filt-num" id="fv-{key}-max"
+                 min="{lo_s}" max="{hi_s}" step="{step}" value="{hi_s}">
+          {unit}
+        </label>
         <div class="range-slider">
           <input type="range" class="range-min" id="sl-{key}-min"
                  min="{lo_s}" max="{hi_s}" step="{step}" value="{lo_s}">
@@ -861,22 +881,22 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
     # ── Filter-slider bounds (from real, non-None per-TS values only --
     #    synthetic [Summary]/[Lamella]/stage entries contribute None and
     #    are excluded from range computation, but always stay visible in
-    #    the filtered list -- see rebuildVis()). 2nd/98th percentile, not
-    #    raw min/max (same convention as the global defocus axis range
-    #    above): a single corrupted outlier TS (e.g. a bad thickness_px
-    #    from a degenerate alignment) shouldn't compress the whole
-    #    slider's usable range down to a sliver -- the outlier TS is just
-    #    excluded once the slider's max sits below it, which is
-    #    informative rather than making the control useless. ──────────────
+    #    the filtered list -- see rebuildVis()). True min/max, not a
+    #    percentile-trimmed range: these bounds become each slider's
+    #    initial thumb *and* attribute range, so a trimmed range silently
+    #    excluded every outlier TS from the report's default view with no
+    #    visual indication why (five independently-trimmed sliders, ~4%
+    #    excluded each, compounding to a substantial minority of TS hidden
+    #    on a completely fresh report). Matches the same "show every TS by
+    #    default, filtering is an explicit action" principle applied to
+    #    ts-select.csv above -- an outlier is something to *see* and flag
+    #    via the sliders yourself, not something already filtered out
+    #    before you've touched anything. ──────────────────────────────────
     def _bounds(vals, lo_default, hi_default, pad=0.0, clip_zero=True):
         real = [v for v in vals if v is not None]
         if not real:
             return lo_default, hi_default
-        if len(real) < 5:
-            lo, hi = min(real) - pad, max(real) + pad
-        else:
-            lo = float(np.percentile(real, 2)) - pad
-            hi = float(np.percentile(real, 98)) + pad
+        lo, hi = min(real) - pad, max(real) + pad
         return (max(lo, 0.0) if clip_zero else lo), hi
 
     ovl_lo,  ovl_hi  = _bounds(overlap_vals,   0.0,  100.0)
@@ -1089,6 +1109,7 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
     }}
     #comment-controls {{ display: flex; align-items: center; gap: 10px; }}
     #comment-status {{ font-size: 0.8em; color: #78909c; }}
+    .source-label {{ font-size: 0.8em; color: #78909c; font-style: italic; }}
     #hint {{ font-size: 0.75em; color: #78909c; margin-top: 12px; }}
     #progress {{
       width: 100%; max-width: 1380px; height: 4px;
@@ -1119,6 +1140,10 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
     }}
     .filt {{ display: flex; align-items: center; gap: 8px; }}
     .filt label {{ font-size: 0.82em; color: #37474f; white-space: nowrap; }}
+    .filt-num {{
+      width: 4.2em; font-size: 0.82em; padding: 1px 3px; border: 1px solid #cfd8dc;
+      border-radius: 3px; text-align: right;
+    }}
     #filter-count {{ margin-left: auto; font-size: 0.82em; color: #546e7a; }}
 
     /* ── Dual-thumb range slider: two overlaid native <input type=range>,
@@ -1183,6 +1208,7 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
                 title="Mark every TS as selected again, discarding the loaded ts-select.csv exclusions">
           &#10060; Clear ts-selection
         </button>
+        <span id="sel-source" class="source-label">no selection loaded</span>
       </span>
     </div>
 
@@ -1216,6 +1242,7 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
               title="Remove every star rating (in-page and saved localStorage)">
         &#10060; Clear ratings
       </button>
+      <span id="ratings-source" class="source-label">no ratings file loaded</span>
     </div>
 
     <div id="filter-bar" class="ts-only">
@@ -1307,6 +1334,16 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
     // any TS the user has re-rated in this browser session.
     let   ratings    = Object.assign({{}}, embeddedRatings,
                            JSON.parse(localStorage.getItem(storageKey) || '{{}}'));
+    (function() {{
+      const fromStorage = Object.keys(JSON.parse(localStorage.getItem(storageKey) || '{{}}')).length > 0;
+      const fromEmbed    = Object.keys(embeddedRatings).length > 0;
+      const src = document.getElementById('ratings-source');
+      if (src && (fromStorage || fromEmbed)) {{
+        src.textContent = fromStorage
+          ? 'ratings from this browser' + (fromEmbed ? ' + ts_ratings.csv at report generation' : '')
+          : 'ratings embedded at report generation (ts_ratings.csv found alongside the analyse output)';
+      }}
+    }})();
 
     const commentStorageKey  = 'aretomo_comments_{session_key}';
     const embeddedComments   = {embedded_comments_js};
@@ -1334,12 +1371,34 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
     const selectionStorageKey = 'aretomo_selection_{session_key}';
     (function() {{
       const overrides = JSON.parse(localStorage.getItem(selectionStorageKey) || '{{}}');
+      if (Object.keys(overrides).length === 0) return;
+      let anyExcluded = false;
       for (let i = 0; i < n; i++) {{
         const name = tsNames[i];
-        if (name && name in overrides && selectedFlags[i] !== overrides[name]) {{
-          selectedFlags[i] = overrides[name];
-          sel.options[i].setAttribute('data-selected', overrides[name]);
+        if (name && name in overrides) {{
+          if (selectedFlags[i] !== overrides[name]) {{
+            selectedFlags[i] = overrides[name];
+            sel.options[i].setAttribute('data-selected', overrides[name]);
+          }}
+          if (overrides[name] === 0) anyExcluded = true;
         }}
+      }}
+      // Surface this explicitly -- without it, a selection restored from an
+      // earlier browser session (e.g. a ts-select.csv loaded last week) is
+      // indistinguishable from the report silently re-applying something on
+      // its own, which is exactly the confusing behavior this was meant to
+      // fix in the first place.
+      const src = document.getElementById('sel-source');
+      if (src) {{
+        src.textContent = anyExcluded
+          ? 'restored from this browser\\'s earlier session (not from project.json)'
+          : 'cleared — showing all TS (restored from this browser)';
+      }}
+      const btnF = document.getElementById('btn-filter');
+      if (btnF && anyExcluded) {{
+        const nSel = tsNames.reduce((acc, name, i) => acc + (name && selectedFlags[i] !== 0 ? 1 : 0), 0);
+        btnF.style.display = '';
+        btnF.textContent   = 'Selected only (' + nSel + ')';
       }}
     }})();
     function _saveSelectionOverride() {{
@@ -1459,8 +1518,10 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
       FILTER_KEYS.forEach(key => {{
         const e   = filterEls[key];
         const dec = FILTER_DECIMALS[key];
-        e.fvMin.textContent = parseFloat(e.min.value).toFixed(dec);
-        e.fvMax.textContent = parseFloat(e.max.value).toFixed(dec);
+        // .value, not .textContent -- fvMin/fvMax are number <input>s (so a
+        // precise value can be typed directly), not read-only spans.
+        e.fvMin.value = parseFloat(e.min.value).toFixed(dec);
+        e.fvMax.value = parseFloat(e.max.value).toFixed(dec);
       }});
       rebuildVis();
       if (!visIndices.includes(idx)) show(visIndices[0] || 0);
@@ -1474,6 +1535,23 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
       }});
       e.max.addEventListener('input', () => {{
         if (parseFloat(e.max.value) < parseFloat(e.min.value)) e.max.value = e.min.value;
+        onFilterChange();
+      }});
+      // Typed value in the number box -- clamp to the slider's own
+      // min/max attributes (same underlying range), sync the slider thumb,
+      // then run the exact same update path as dragging it.
+      e.fvMin.addEventListener('change', () => {{
+        let v = parseFloat(e.fvMin.value);
+        if (isNaN(v)) {{ onFilterChange(); return; }}
+        v = Math.min(Math.max(v, parseFloat(e.min.min)), parseFloat(e.max.value));
+        e.min.value = v;
+        onFilterChange();
+      }});
+      e.fvMax.addEventListener('change', () => {{
+        let v = parseFloat(e.fvMax.value);
+        if (isNaN(v)) {{ onFilterChange(); return; }}
+        v = Math.max(Math.min(v, parseFloat(e.max.max)), parseFloat(e.min.value));
+        e.max.value = v;
         onFilterChange();
       }});
     }});
@@ -1709,7 +1787,7 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
       }});
     }}
 
-    function _applyRatingsCSV(text) {{
+    function _applyRatingsCSV(text, sourceName) {{
       _parseCSV(text).forEach(row => {{
         if (row.ts_name && row.rating) {{
           const r = parseInt(row.rating);
@@ -1723,9 +1801,11 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
       }}
       showRating(idx);
       rebuildVis();   // loaded ratings can change filter membership
+      const src = document.getElementById('ratings-source');
+      if (src && sourceName) src.textContent = 'loaded: ' + sourceName;
     }}
 
-    function _applySelectionCSV(text) {{
+    function _applySelectionCSV(text, sourceName) {{
       const byName = {{}};
       _parseCSV(text).forEach(row => {{
         if (row.ts_name) byName[row.ts_name] = parseInt(row.selected || '0');
@@ -1754,11 +1834,13 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
         btnF.style.display = '';
         btnF.textContent   = 'Selected only (' + nSel + ')';
       }}
+      const src = document.getElementById('sel-source');
+      if (src && sourceName) src.textContent = 'loaded: ' + sourceName;
     }}
 
     fetch('./ts_ratings.csv')
       .then(r => r.ok ? r.text() : Promise.reject())
-      .then(text => _applyRatingsCSV(text))
+      .then(text => _applyRatingsCSV(text, 'ts_ratings.csv (this directory)'))
       .catch(() => {{}});
 
     // No auto-fetch of ts-select.csv on page load (unlike ratings/comments
@@ -1767,7 +1849,7 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
     document.getElementById('btn-reload-sel').addEventListener('click', () => {{
       fetch('./ts-select.csv?_=' + Date.now())
         .then(r => r.ok ? r.text() : Promise.reject())
-        .then(text => {{ _applySelectionCSV(text); }})
+        .then(text => {{ _applySelectionCSV(text, 'ts-select.csv (this directory)'); }})
         .catch(() => {{ alert('ts-select.csv not found in this directory.\\nUse the Load CSV button to browse for the file instead.'); }});
     }});
 
@@ -1781,7 +1863,7 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
       const file = fileInput.files[0];
       if (!file) return;
       const reader = new FileReader();
-      reader.onload = e => {{ _applySelectionCSV(e.target.result); }};
+      reader.onload = e => {{ _applySelectionCSV(e.target.result, file.name); }};
       reader.readAsText(file);
     }});
 
@@ -1797,6 +1879,8 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
       if (btnFilt) {{ btnFilt.style.background = '#546e7a'; }}
       const btnF = document.getElementById('btn-filter');
       if (btnF) {{ btnF.textContent = 'Selected only (' + nRealTS + ')'; }}
+      const src = document.getElementById('sel-source');
+      if (src) src.textContent = 'cleared — showing all TS';
       rebuildVis();
       if (!visIndices.includes(idx)) show(visIndices[0] || 0); else show(idx);
     }});
@@ -1804,7 +1888,7 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
     document.getElementById('btn-reload-ratings').addEventListener('click', () => {{
       fetch('./ts_ratings.csv?_=' + Date.now())
         .then(r => r.ok ? r.text() : Promise.reject())
-        .then(text => {{ _applyRatingsCSV(text); }})
+        .then(text => {{ _applyRatingsCSV(text, 'ts_ratings.csv (this directory)'); }})
         .catch(() => {{ alert('ts_ratings.csv not found in this directory.\\nUse the Load ts_ratings.csv button to browse for the file instead.'); }});
     }});
 
@@ -1818,7 +1902,7 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
       const file = fileRatingsInput.files[0];
       if (!file) return;
       const reader = new FileReader();
-      reader.onload = e => {{ _applyRatingsCSV(e.target.result); }};
+      reader.onload = e => {{ _applyRatingsCSV(e.target.result, file.name); }};
       reader.readAsText(file);
     }});
 
@@ -2215,11 +2299,11 @@ def add_parser(subparsers):
                         '--output.  Useful when re-running to update the HTML '
                         'or summary without re-plotting every tilt series.')
     p.add_argument('--detailed-log', action='store_true',
-                   help='Print the full per-TS console breakdown (dark-frame '
-                        'list, per-frame overlap table) for every tilt series. '
-                        'Default: only a one-line status is printed, and only '
-                        'for TS with flagged frames, dark frames, or warnings '
-                        '-- everything else is still in the JSON/TSV/HTML output.')
+                   help='Print the full per-TS console breakdown (status line, '
+                        'warnings, per-frame overlap table) for every tilt '
+                        'series. Default: nothing per-TS is printed, only the '
+                        'aggregate Summary block at the end -- everything else '
+                        'is still in the JSON/TSV/HTML output regardless.')
     p.add_argument('--compare-previous', '-C', default=None,
                    help='Output directory from a previous analyse run.  '
                         'Previous run data is shown in grey in per-TS overlap '
@@ -2596,16 +2680,18 @@ def run(args):
 
         status  = '✗' if n_bad else '✓'
         n_dark  = len(data['dark_frames'])
-        _has_issue = bool(n_bad or n_dark or data.get('warnings'))
 
-        # Default: keep console output down to a one-liner, and only for TS
-        # that actually have something to report -- a clean multi-hundred-TS
-        # run used to print a full block (separator, status, per-frame
-        # overlap table) for every single TS, burying the aggregate summary
-        # and any real warnings under noise. --detailed-log restores the
-        # full per-TS breakdown unconditionally; everything is still in the
-        # JSON/TSV/HTML output regardless of this flag.
-        if args.detailed_log or _has_issue:
+        # Default: print nothing per-TS -- a multi-hundred-TS run used to
+        # print a full block (separator, status, per-frame overlap table)
+        # for every single TS (or, in an earlier revision of this gate,
+        # still a one-liner per TS with any flag/dark-frame/warning, which
+        # in practice was still most of them), burying the aggregate
+        # summary at the end under scroll. Everything below is still in
+        # the JSON/TSV/HTML output regardless of this flag; the aggregate
+        # counts (TS with flagged frames, sanity warnings, etc.) print
+        # unconditionally in the Summary block further down. --detailed-log
+        # restores the full per-TS breakdown.
+        if args.detailed_log:
             _pwrite(sep)
             _pwrite(f'  {status}  {ts_name}   {n_bad} frame(s) below {args.threshold}%  '
                     f'| {n_dark} dark frame(s)')
@@ -2614,7 +2700,7 @@ def run(args):
                     _pwrite(f'  NOTE  {w[5:].lstrip()}')
                 else:
                     _pwrite(f'  WARN  {w}')
-            if bad_frames and args.detailed_log:
+            if bad_frames:
                 _pwrite(f'     {"SEC":>4}  {"Tilt (°)":>9}  {"TX (px)":>10}  '
                         f'{"TY (px)":>10}  {"Overlap":>8}')
                 for f in bad_frames:
@@ -2963,10 +3049,14 @@ def run(args):
     if global_suggested.get('alpha_offset_deg') is not None:
         print(f'  Median AlphaOffset    : {global_suggested["alpha_offset_deg"]}°  '
               f'(informational; AreTomo3 estimates this automatically)')
+    record_analysis_run('aretomo_analyse', str(out_dir))
+    landing_path = write_landing_page(Path.cwd())
+
     print(f'\nOutput')
     print(f'  Plots          : {out_dir}/<ts-name>.png')
     print(f'  Stage positions: {out_dir}/stage_positions*.png')
     print(f'  HTML viewer    : {html_path}')
+    print(f'  Report index   : {landing_path}')
     print(f'  Alignment JSON : {json_path}')
     print(f'  Flagged TSV    : {tsv_path}')
 
@@ -2987,6 +3077,4 @@ def run(args):
                            ('other',           _t2_other)]:
         print(f'    {_label:<26}  {_secs:6.2f}s  ({100*_secs/_t2_total:.0f}%)')
 
-    record_analysis_run('aretomo_analyse', str(out_dir))
-    landing_path = write_landing_page(Path.cwd())
     print(f'\nSee {landing_path} for the full report index.')
