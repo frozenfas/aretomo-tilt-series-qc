@@ -1604,11 +1604,7 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
       const tags = _activeFilterTags();
       const tagStr = tags.length ? '_' + tags.join('_') : '_nofilter';
       const fname = 'ts-select_' + runLabel + '_' + dateStr + tagStr + '.csv';
-      const blob = new Blob([lines.join('\\n')], {{type: 'text/csv'}});
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = fname;
-      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      _downloadCSV(fname, lines.join('\\n'));
       alert('Exported ' + nSel + ' / ' + nTotalReal + ' TS as ' + fname);
     }});
 
@@ -1675,11 +1671,10 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
         if (ratings[name]) rows.push(name + ',' + ratings[name]);
       }});
       if (rows.length === 1) {{ alert('No ratings to export yet.'); return; }}
-      const a   = document.createElement('a');
-      a.href    = URL.createObjectURL(
-        new Blob([rows.join('\\n') + '\\n'], {{type: 'text/csv'}}));
-      a.download = 'ts_ratings.csv';
-      a.click();
+      const now = new Date();
+      const pad = v => String(v).padStart(2, '0');
+      const dateStr = now.getFullYear() + pad(now.getMonth() + 1) + pad(now.getDate());
+      _downloadCSV('ts-ratings-' + dateStr + '-' + runLabel + '.csv', rows.join('\\n') + '\\n');
     }});
 
     document.getElementById('btn-clear-ratings').addEventListener('click', () => {{
@@ -1755,11 +1750,10 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
         const esc = '"' + comments[name].replace(/"/g, '""').replace(/\\n/g, ' ') + '"';
         rows.push(name + ',' + esc);
       }});
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(
-        new Blob([rows.join('\\n') + '\\n'], {{type: 'text/csv'}}));
-      a.download = 'ts_comments.csv';
-      a.click();
+      const now = new Date();
+      const pad = v => String(v).padStart(2, '0');
+      const dateStr = now.getFullYear() + pad(now.getMonth() + 1) + pad(now.getDate());
+      _downloadCSV('ts-comments-' + dateStr + '-' + runLabel + '.csv', rows.join('\\n') + '\\n');
     }});
 
     document.getElementById('btn-clear-comments').addEventListener('click', () => {{
@@ -1770,6 +1764,43 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
       localStorage.removeItem(commentStorageKey);
       showComment(idx);
     }});
+
+    // ── CSV export (shared by ratings/selection/comments export buttons) ────
+    // Prefers the File System Access API's showSaveFilePicker, which lets
+    // the user pick where to save and rename before writing -- falls back
+    // to a plain <a download> (browser's default download location, no
+    // picker) when that API isn't available. Note: showSaveFilePicker
+    // requires a secure context (https/localhost) and is NOT available
+    // when this report is opened directly via file://, which is a
+    // deliberately-supported way of viewing these reports (see the CSV
+    // load buttons elsewhere) -- the fallback covers that case.
+    function _downloadCSV(filename, content) {{
+      const blob = new Blob([content], {{type: 'text/csv'}});
+      if (window.showSaveFilePicker) {{
+        (async () => {{
+          try {{
+            const handle = await window.showSaveFilePicker({{
+              suggestedName: filename,
+              types: [{{description: 'CSV file', accept: {{'text/csv': ['.csv']}}}}],
+            }});
+            const writable = await handle.createWritable();
+            await writable.write(blob);
+            await writable.close();
+          }} catch (err) {{
+            if (err.name === 'AbortError') return;   // user cancelled the picker
+            _downloadViaAnchor(filename, blob);
+          }}
+        }})();
+      }} else {{
+        _downloadViaAnchor(filename, blob);
+      }}
+    }}
+    function _downloadViaAnchor(filename, blob) {{
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = filename;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    }}
 
     // ── Dynamic CSV loading ────────────────────────────────────────────────
     // Load ts_ratings.csv and ts-select.csv from the same directory as
