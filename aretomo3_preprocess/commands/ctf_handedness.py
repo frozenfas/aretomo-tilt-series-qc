@@ -41,7 +41,26 @@ alignment_data.json rather than a blind wide default -- verified this
 matters: a blind 5-60um scan (DefocusGrad's own CTFFIND default range)
 produced garbage single-view ctfplotter fits (fit error ~0.2, defocus
 hundreds of um), while a scan centered on the known ~1.9um true defocus
-gave clean fits (error ~0.006) tracking the known range exactly.
+gave clean fits (error ~0.006) tracking the known range exactly. The plot
+also shows a second panel: delta = right - left defocus at matching tilts,
+with its own linear fit (_make_plot). This matters because the raw
+per-side defocus vs tilt is often not flat even ignoring handedness --
+confirmed on real data (ts-083) that AreTomo3's own overall per-frame
+defocus estimate ranges ~15000-34000 A across one tilt series (a common-
+mode trend from something other than the left-right gradient: stage/
+autofocus drift, poor eucentricity, etc.), which swamped the smaller
+differential signal enough that the two raw per-side slopes came out
+same-sign ("inconclusive" by the naive slope-sign test) even though
+-testInv gave a clear, correct result and the plot visually showed the
+right pattern. Subtracting right-left cancels any such common-mode trend
+at each matching tilt, isolating the differential (handedness) signal --
+delta_slope/delta_corr/delta_relion_handedness are exposed per-TS, still
+only as a secondary/diagnostic cross-check (never the primary verdict,
+which is always -testInv's own result). shared/tilt_series_qc.py's TS
+auto-selection now also screens for this: it scores each candidate TS's
+AreTomo3-reported defocus_tilt_spread_um (std of mean_defocus_um across
+that TS) and ranks flatter TS higher, since a flat TS is inherently less
+likely to need this correction in the first place.
 
 Confirmed via a real subprocess test that the installed /opt/IMOD/bin/
 ctfplotter (a full Qt build, not the "standalone no-Qt" build the manual
@@ -231,38 +250,46 @@ def _run_side_autofit(ctfplotter_bin, half_path, tlt_path, apix_A, bin_factor,
 
 
 def _make_plot(tilts_l, def_l, tilts_r, def_r, out_path):
+    """
+    Top panel: DefocusGrad-style left/right defocus vs tilt, as before.
+    Bottom panel: delta = right - left at matching tilts (same underlying
+    .tlt file/view order for both halves, so index-paired -- not a
+    tilt-angle match). Any common-mode trend shared by both sides (overall
+    focus drift, ramp during acquisition -- anything that isn't the
+    left-right geometric gradient itself) cancels out of the subtraction,
+    which the raw per-side slopes above don't do: on real data (ts-083) the
+    whole-frame defocus estimate ranged ~15000-34000 A across the tilt
+    series (see shared/tilt_series_qc.py's defocus_tilt_spread_um), enough
+    to swamp the smaller differential signal and make the two raw slopes
+    read as same-sign ("inconclusive") even when the delta and -testInv
+    both agree on a clear handedness.
+    """
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
 
-    fig, ax = plt.subplots(figsize=(6, 4.5))
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(6, 7.5))
+
     slope_l = slope_r = None
     if len(tilts_l) >= 2:
         slope_l, intercept_l = np.polyfit(tilts_l, def_l, 1)
-        ax.scatter(tilts_l, def_l, color='blue', label='Defocus left-side', s=18)
+        ax1.scatter(tilts_l, def_l, color='blue', label='Defocus left-side', s=18)
         xs = np.linspace(tilts_l.min(), tilts_l.max(), 50)
-        ax.plot(xs, slope_l * xs + intercept_l, '--', color='blue', label='Linear fit left-side')
+        ax1.plot(xs, slope_l * xs + intercept_l, '--', color='blue', label='Linear fit left-side')
     if len(tilts_r) >= 2:
         slope_r, intercept_r = np.polyfit(tilts_r, def_r, 1)
-        ax.scatter(tilts_r, def_r, color='orange', label='Defocus right-side', s=18)
+        ax1.scatter(tilts_r, def_r, color='orange', label='Defocus right-side', s=18)
         xs = np.linspace(tilts_r.min(), tilts_r.max(), 50)
-        ax.plot(xs, slope_r * xs + intercept_r, '--', color='orange', label='Linear fit right-side')
-    ax.set_xlabel('Tilt angle (deg)')
-    ax.set_ylabel('Defocus (A)')
-    ax.legend(fontsize=8)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=130)
-    plt.close(fig)
+        ax1.plot(xs, slope_r * xs + intercept_r, '--', color='orange', label='Linear fit right-side')
+    ax1.set_xlabel('Tilt angle (deg)')
+    ax1.set_ylabel('Defocus (A)')
+    ax1.legend(fontsize=8)
 
     # Cruder than -testInv's own verdict: -testInv compares defocus at one
     # strategically-chosen high-tilt view set, while this is a naive global
-    # linear fit across the whole tilt range. Confirmed on real data
-    # (ts-083) that this can read 0 (same-sign slopes) even when -testInv
-    # gives a clear, correct result and the plot visually shows the right
-    # pattern (right stays above left at high positive tilt) -- the two
-    # halves aren't always a clean DefocusGrad-style "X" with ctfplotter's
-    # per-view fit. Keep this as a secondary/diagnostic note in the report,
-    # never as the primary verdict -- that's always -testInv's own result.
+    # linear fit across the whole tilt range. Kept as a secondary/diagnostic
+    # note in the report, never as the primary verdict -- that's always
+    # -testInv's own result.
     slope_verdict = None
     if slope_l is not None and slope_r is not None:
         if slope_l < 0 and slope_r > 0:
@@ -271,7 +298,38 @@ def _make_plot(tilts_l, def_l, tilts_r, def_r, out_path):
             slope_verdict = 1
         else:
             slope_verdict = 0
-    return slope_l, slope_r, slope_verdict
+
+    delta_slope = delta_corr = delta_verdict = None
+    if len(tilts_l) == len(tilts_r) and len(tilts_l) >= 3 and np.allclose(tilts_l, tilts_r, atol=0.05):
+        delta = def_r - def_l
+        delta_slope, delta_intercept = np.polyfit(tilts_l, delta, 1)
+        with np.errstate(invalid='ignore'):
+            delta_corr = float(np.corrcoef(tilts_l, delta)[0, 1])
+        # right - left increasing with tilt (delta_slope > 0) is the same
+        # "right more underfocused at positive tilt" pattern -testInv's
+        # x=1 (-> RELION -1) describes -- see module docstring.
+        if delta_slope > 0:
+            delta_verdict = -1
+        elif delta_slope < 0:
+            delta_verdict = 1
+        else:
+            delta_verdict = 0
+        ax2.scatter(tilts_l, delta, color='green', s=18, label='Delta (right - left)')
+        xs = np.linspace(tilts_l.min(), tilts_l.max(), 50)
+        ax2.plot(xs, delta_slope * xs + delta_intercept, '--', color='green', label='Linear fit')
+        ax2.axhline(0, color='gray', linewidth=0.8)
+        ax2.set_xlabel('Tilt angle (deg)')
+        ax2.set_ylabel('Defocus delta, right - left (A)')
+        ax2.legend(fontsize=8)
+    else:
+        ax2.text(0.5, 0.5, 'delta unavailable (mismatched tilt sampling)',
+                  ha='center', va='center', transform=ax2.transAxes)
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=130)
+    plt.close(fig)
+
+    return slope_l, slope_r, slope_verdict, delta_slope, delta_corr, delta_verdict
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -333,11 +391,15 @@ def _run_one_ts(ts_name, st_path, xf_path, tlt_path, out_dir, args,
                 ctfplotter_bin, halves['right'], tlt_path, apix_A, args.bin,
                 scan_lo, scan_hi, ts_out, env, args.kv, args.cs, args.amp_contrast, 'right', args.timeout)
             plot_path = ts_out / f'{ts_name}_ctfplotter.png'
-            slope_l, slope_r, slope_verdict = _make_plot(tilts_l, def_l, tilts_r, def_r, plot_path)
+            slope_l, slope_r, slope_verdict, delta_slope, delta_corr, delta_verdict = _make_plot(
+                tilts_l, def_l, tilts_r, def_r, plot_path)
             result['plot_path'] = str(plot_path)
             result['slope_left'] = None if slope_l is None else round(float(slope_l), 2)
             result['slope_right'] = None if slope_r is None else round(float(slope_r), 2)
             result['slope_relion_handedness'] = slope_verdict
+            result['delta_slope'] = None if delta_slope is None else round(float(delta_slope), 2)
+            result['delta_corr'] = None if delta_corr is None else round(float(delta_corr), 3)
+            result['delta_relion_handedness'] = delta_verdict
         except subprocess.TimeoutExpired:
             result['plot_error'] = f'plot generation timed out after {args.timeout}s'
         except Exception as e:
@@ -401,7 +463,12 @@ def _make_html(per_ts: dict, selection_scores: dict, consensus: str, out_path: P
                 slope_note = (f"slope L={r.get('slope_left')} R={r.get('slope_right')} "
                                f"&rarr; {r.get('slope_relion_handedness')}"
                                if r.get('slope_relion_handedness') is not None else '')
-                plot_html = f'<img src="data:image/png;base64,{b64}"><div class="note">{_esc(slope_note)}</div>'
+                delta_note = (f"delta (right-left) slope={r.get('delta_slope')} A/deg, "
+                               f"corr={r.get('delta_corr')} &rarr; {r.get('delta_relion_handedness')}"
+                               if r.get('delta_relion_handedness') is not None else '')
+                plot_html = (f'<img src="data:image/png;base64,{b64}">'
+                              f'<div class="note">{_esc(delta_note)}</div>'
+                              f'<div class="note">{_esc(slope_note)}</div>')
             except OSError:
                 pass
         elif r.get('plot_error'):
