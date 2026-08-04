@@ -50,7 +50,7 @@ from aretomo3_preprocess.shared.landing_page import write_landing_page
 from aretomo3_preprocess.shared.output_guard import check_output_dir
 from aretomo3_preprocess.shared.parsers import (
     parse_aln_file, parse_ctf_file, parse_tlt_file,
-    _float_or_none,
+    check_nominal_tilt_consistency, _float_or_none,
 )
 from aretomo3_preprocess.shared.geometry import compute_overlap, rotated_rect_corners
 from aretomo3_preprocess.shared.colours import (
@@ -474,20 +474,12 @@ def _validate_ts(data, tlt_data, mdoc_data, mrc_path=None):
             warnings.append(f'MRC header read failed: {e}')
 
     # 2. Nominal tilt cross-check: _TLT.txt nominal_tilt + alpha_offset ≈
-    # .aln TILT.  _TLT.txt is always raw nominal; .aln TILT already has
-    # alpha_offset baked in whenever -TiltCor produced a nonzero
-    # AlphaOffset (confirmed dataset-wide -- see CLAUDE.md's alpha_offset
-    # convention section). alpha_offset defaults to 0.0 (no TiltCor), which
-    # reduces this to a plain equality check.
+    # .aln TILT -- see shared/parsers.py:check_nominal_tilt_consistency's
+    # docstring and CLAUDE.md's alpha_offset convention section.
     if tlt_data:
         alpha_offset = data.get('alpha_offset') or 0.0
-        bad = []
-        for f in data['frames']:
-            tlt = tlt_data.get(f['sec'])
-            if tlt is None:
-                continue
-            if abs(tlt['nominal_tilt'] + alpha_offset - f['tilt']) > 0.05:
-                bad.append(f['sec'])
+        bad = check_nominal_tilt_consistency(
+            [(f['sec'], f['tilt']) for f in data['frames']], tlt_data, alpha_offset)
         if bad:
             warnings.append(
                 f'{len(bad)} frame(s) |TLT nominal + alpha_offset − .aln tilt| > 0.05°: '

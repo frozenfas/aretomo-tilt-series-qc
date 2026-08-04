@@ -214,6 +214,37 @@ def parse_tlt_file(filepath):
     return result
 
 
+def check_nominal_tilt_consistency(sec_tilt_pairs, tlt_data, alpha_offset=0.0, tol=0.05):
+    """
+    Cross-check _TLT.txt's nominal_tilt against a tilt value from another
+    source (.aln's TILT column, or a DarkFrame header line's tilt field)
+    for the same SEC. _TLT.txt is always raw nominal regardless of
+    -TiltCor; the other source already has alpha_offset baked in whenever
+    -TiltCor produced a nonzero AlphaOffset (confirmed dataset-wide -- see
+    CLAUDE.md's alpha_offset convention section) -- so the correct
+    comparison is nominal_tilt + alpha_offset ≈ other_tilt, not plain
+    equality. alpha_offset=0.0 (no TiltCor) reduces this to a plain
+    equality check.
+
+    sec_tilt_pairs: iterable of (sec, tilt) pairs to check, e.g.
+        [(f['sec'], f['tilt']) for f in aln_data['frames']]
+        [(df['frame_b'], df['tilt']) for df in aln_data['dark_frames']]
+    tlt_data: {sec: {'nominal_tilt': ..., ...}} from parse_tlt_file.
+
+    Returns a list of SEC numbers where the two disagree by more than tol
+    degrees (SECs with no entry in tlt_data are skipped, not flagged).
+    """
+    alpha_offset = alpha_offset or 0.0
+    bad = []
+    for sec, tilt in sec_tilt_pairs:
+        tlt = tlt_data.get(sec)
+        if tlt is None:
+            continue
+        if abs(tlt['nominal_tilt'] + alpha_offset - tilt) > tol:
+            bad.append(sec)
+    return bad
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # mdoc parsing
 # ─────────────────────────────────────────────────────────────────────────────

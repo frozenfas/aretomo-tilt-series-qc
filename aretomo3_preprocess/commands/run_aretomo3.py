@@ -92,7 +92,7 @@ from aretomo3_preprocess.shared.project_json import (
 from aretomo3_preprocess.shared.project_state import (
     get_angpix, get_voltage, get_run_params, record_run_params,
     get_calibrated_apix, record_calibrated_apix,
-    register_input_stacks, resolve_selected_ts, resolve_tool_path,
+    register_input_stacks, register_frame_lookup, resolve_selected_ts, resolve_tool_path,
 )
 from aretomo3_preprocess.shared.output_guard import check_disk_space
 
@@ -2059,6 +2059,10 @@ def run(args):
         # ── Register cmd=0 output stacks and TLT dir for later runs ──────
         if args.cmd == 0:
             register_input_stacks(out_dir, in_skips=args.in_skips, tlt_dir=out_dir)
+            # SEC <-> acq_order/z_value bridge (see CLAUDE.md's
+            # "frame_lookup" section) -- .aln/_TLT.txt first exist at this
+            # point, the earliest point SEC is knowable.
+            register_frame_lookup(out_dir)
 
         # ── Save to project JSON ──────────────────────────────────────────
         update_section(

@@ -8,6 +8,7 @@ processed outside the standard pipeline.
 The normal pipeline populates these sections automatically:
   validate-mdoc        → mdoc_data             (--mdoc-data)
   run-aretomo3 --cmd 0 → input_stacks          (--mrc-data, --tlt-data)
+  run-aretomo3 --cmd 0 → frame_lookup          (--frame-lookup)
   run-aretomo3 --cmd 0 → defocus_data          (--defocus-data, future auto)
   analyse (first run)  → lamella_assignments   (--lamellae)
 
@@ -26,6 +27,12 @@ Sections
   input_stacks.tlt_dir directory containing ts-xxx_TLT.txt files
                        Required by analyse for dose, z_value, stage positions.
 
+  frame_lookup         per-TS SEC <-> acq_order/z_value bridge + dark-SEC
+                       flags, from ts-*.aln + ts-*_TLT.txt. The canonical
+                       cross-referencing table -- see CLAUDE.md's
+                       "frame_lookup" section and shared/project_state.py's
+                       resolve_frame()/get_frame_lookup().
+
   lamella_assignments  ts-name → lamella cluster mapping
                        Locks clustering so repeated analyse runs are consistent.
 
@@ -39,6 +46,7 @@ Typical usage
       --mdoc-data   frames/ \\
       --mrc-data    run001/ \\
       --tlt-data    run001/ \\
+      --frame-lookup run001/ \\
       --defocus-data run001/ \\
       --lamellae    run001_analysis/lamella_positions.csv
 
@@ -190,6 +198,23 @@ def _enrich_tlt_data(tlt_dir: Path, force: bool):
     print(f'  tlt_dir: {tlt_dir.resolve()}  ({len(tlt_files)} _TLT.txt files)')
 
 
+def _enrich_frame_lookup(aln_dir: Path, force: bool):
+    """Register frame_lookup from aln_dir (see project_state.register_frame_lookup).
+    Thin wrapper adding enrich's usual already-populated/--force check --
+    register_frame_lookup itself always merges (safe to call repeatedly
+    from run-aretomo3's own auto-fill as TS complete incrementally), so
+    this is enrich's manual-invocation guard, not a change to that
+    function's own merge behaviour."""
+    existing = _load_project().get('frame_lookup', {}).get('per_ts')
+    if existing and not force:
+        print(f'  frame_lookup already registered ({len(existing)} TS).')
+        print(f'  Use --force to overwrite/refresh.')
+        return
+
+    from aretomo3_preprocess.shared.project_state import register_frame_lookup
+    register_frame_lookup(aln_dir)
+
+
 def _enrich_defocus_data(ctf_dir: Path, force: bool):
     """Parse ts-xxx_CTF.txt + ts-xxx_TLT.txt files to extract per-TS reference defocus."""
     existing = _load_project().get('defocus_data', {}).get('per_ts')
@@ -199,6 +224,7 @@ def _enrich_defocus_data(ctf_dir: Path, force: bool):
         return
 
     from aretomo3_preprocess.shared.parsers import parse_ctf_file, parse_tlt_file
+    from aretomo3_preprocess.shared.project_state import resolve_frame
 
     ctf_files = sorted(ctf_dir.glob('ts-*_CTF.txt'))
     if not ctf_files:
@@ -215,16 +241,25 @@ def _enrich_defocus_data(ctf_dir: Path, force: bool):
             if not ctf_data:
                 raise ValueError('no CTF rows parsed')
 
+            # Reference frame = first-acquired tilt (acq_order==1).
+            # Prefer the already-registered frame_lookup (see CLAUDE.md's
+            # "frame_lookup" section) so this doesn't re-parse _TLT.txt when
+            # the SEC<->acq_order bridge is already known; fall back to a
+            # direct parse (this function's original behaviour) when
+            # frame_lookup isn't registered for ts_name -- e.g. datasets
+            # processed outside the standard pipeline, this handler's own
+            # documented escape-hatch use case.
             defocus = None
-            if tlt_path.exists():
+            resolved = resolve_frame(ts_name, acq_order=1)
+            ref_sec = resolved['sec'] if resolved is not None else None
+            if ref_sec is None and tlt_path.exists():
                 tlt_data = parse_tlt_file(tlt_path)
-                # Use the first-acquired tilt (acq_order==1) as the reference frame
                 ref_sec = next(
                     (sec for sec, t in tlt_data.items() if t['acq_order'] == 1),
                     None,
                 )
-                if ref_sec is not None and ref_sec in ctf_data:
-                    defocus = ctf_data[ref_sec]['mean_defocus_um']
+            if ref_sec is not None and ref_sec in ctf_data:
+                defocus = ctf_data[ref_sec]['mean_defocus_um']
 
             if defocus is None:
                 # Fallback: median of all fitted frames
@@ -327,6 +362,13 @@ def add_parser(subparsers):
                         'Used by imod-mtffilter for per-TS defocus lookup.  '
                         'Will be populated automatically by run-aretomo3 --cmd 0 '
                         'in a future release.')
+    p.add_argument('--frame-lookup', default=None, metavar='DIR',
+                   help='Directory containing ts-*.aln + ts-*_TLT.txt files '
+                        '(e.g. a run-aretomo3 --cmd 0 output dir).  '
+                        'Populates frame_lookup in project.json (per-TS SEC '
+                        '<-> acq_order/z_value bridge + dark-SEC flags, see '
+                        'CLAUDE.md).  '
+                        'Normally populated automatically by run-aretomo3 --cmd 0.')
     p.add_argument('--in-skips', nargs='*', metavar='PATTERN',
                    default=['_CTF', '_Vol', '_EVN', '_ODD'],
                    help='Stem substrings to exclude when scanning --mrc-data '
@@ -388,6 +430,15 @@ def run(args):
         _enrich_tlt_data(tlt_dir, args.force)
         did_anything = True
 
+    if args.frame_lookup is not None:
+        aln_dir = Path(args.frame_lookup)
+        if not aln_dir.is_dir():
+            print(f'ERROR: --frame-lookup {aln_dir} is not a directory')
+            sys.exit(1)
+        print(f'Registering frame lookup from {aln_dir}/')
+        _enrich_frame_lookup(aln_dir, args.force)
+        did_anything = True
+
     if args.lamellae is not None:
         csv_path = Path(args.lamellae)
         if not csv_path.exists():
@@ -417,5 +468,5 @@ def run(args):
 
     if not did_anything:
         print('ERROR: at least one of --mdoc-data, --mrc-data, --tlt-data, '
-              '--lamellae, --defocus-data, --set-path-* must be given.')
+              '--frame-lookup, --lamellae, --defocus-data, --set-path-* must be given.')
         sys.exit(1)

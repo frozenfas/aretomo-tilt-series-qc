@@ -98,10 +98,66 @@ direct `sec`/`frame_b` index lookup (`sections_from_sec_numbers`). Before
 writing new cross-file matching logic, check whether `sec`/`frame_b`/
 `acq_order`/`z_value` already gets you there exactly.
 
+**`frame_lookup` (project.json section) — the canonical SEC ↔ acq_order/
+z_value bridge, build once, don't re-derive.** Cross-referencing a frame
+between `SEC` and `acq_order`/`z_value` used to be re-derived independently
+in at least 7 files (`analyse.py`, `check_gain_transform.py`, `enrich.py`,
+`gapstop_match.py`, `pytom_match.py`, `relion5_convert.py`, `select_ts.py`)
+— exactly the kind of repeat re-derivation that produced the
+`find_sections_by_tilt` bug above. `frame_lookup` (added 2026-08) closes
+this off for new code:
+
+- **Schema**: `project.json['frame_lookup']['per_ts'][ts_name] = {n_total,
+  sec_to_z, dark_secs, validated}`. `sec_to_z` is `{str(sec): z_value}` for
+  *every* SEC (aligned + dark) — deliberately only one direction; reverse
+  lookup is built in memory by the accessor. `dark_secs` is the list of
+  dark SECs. `validated` records whether `_TLT.txt`'s `nominal_tilt +
+  alpha_offset` agreed with `.aln`'s TILT column (both frames and
+  `DarkFrame` lines) to within 0.05° when this entry was built — a
+  consistency check via tilt-angle agreement, not the cross-referencing
+  mechanism itself (that's still exact SEC/`frame_b` keys throughout).
+- **Deliberately thin, not a copy of `mdoc_data`**: `mdoc_data.per_ts`
+  (auto-written by `validate-mdoc`) already carries `sub_frame_path`
+  (filename) keyed by `z_value` per original stem — `frame_lookup` only
+  adds the one thing `mdoc_data` can't have yet (SEC doesn't exist until
+  AreTomo3 has run). Filename resolution composes the two at read time.
+- **Built by** `shared/project_state.py:register_frame_lookup(out_dir)`,
+  parsing that directory's `ts-*.aln` (for `dark_frames`, `alpha_offset`)
+  + matching `ts-*_TLT.txt` (for `sec_to_z`, covering all SECs in one
+  parse) per TS. Wired into `run-aretomo3 --cmd 0`'s completion (same
+  integration point as `input_stacks`' auto-fill) and into `enrich
+  --frame-lookup <dir>` (the manual/force-overwrite escape hatch, same
+  pattern as `enrich`'s other sections). Safe to call repeatedly — merges
+  into existing `per_ts` entries.
+- **Read via** `get_frame_lookup(ts_name)` (raw section) or
+  `resolve_frame(ts_name, sec=... | z_value=... | acq_order=...)` (give
+  exactly one identifier, get `{sec, z_value, acq_order, is_dark,
+  sub_frame_path}` back, composing `frame_lookup` with `mdoc_data` via
+  `get_ts_to_original_stem()`). Returns `None` — never raises — when the
+  TS isn't registered or the given id isn't found; `sub_frame_path` alone
+  is `None` if `mdoc_data` has no matching entry, without failing the rest
+  of the lookup.
+- **Migration is intentionally partial**: `enrich.py`'s
+  `_enrich_defocus_data` was migrated as the reference example (tries
+  `resolve_frame` first, falls back to its original direct `_TLT.txt`
+  parse if `frame_lookup` isn't registered for that TS — preserves its
+  standalone/escape-hatch robustness for datasets processed outside the
+  pipeline). The other 6 files listed above still re-derive independently
+  — known candidates for a future pass, not migrated in this change (same
+  reasoning as `pytom_match.py`/`gapstop_match.py` not yet preferring IMOD
+  `_st.tlt`, flagged in the alpha_offset section below rather than
+  migrated all at once).
+
+**Design principle — build a centralized lookup table for any cross-file
+index correspondence used by more than one command, rather than letting
+each consumer re-derive it.** `frame_lookup` is the concrete example;
+apply the same instinct to any future correspondence problem that shows up
+in more than one file.
+
 **`shared/` modules** — parsing and cross-command utilities, not one-off
 helpers:
-- `parsers.py` — `parse_aln_file`/`parse_ctf_file`/`parse_tlt_file`/`parse_mdoc_file`. Always reuse these instead of hand-rolling `.aln`/`.mdoc` parsing.
-- `project_json.py` / `project_state.py` — the state file API above, plus resolving `--select-ts`.
+- `parsers.py` — `parse_aln_file`/`parse_ctf_file`/`parse_tlt_file`/`parse_mdoc_file`/`check_nominal_tilt_consistency`. Always reuse these instead of hand-rolling `.aln`/`.mdoc` parsing.
+- `project_json.py` / `project_state.py` — the state file API above, plus resolving `--select-ts`, plus `frame_lookup`'s `register_frame_lookup`/`get_frame_lookup`/`resolve_frame`.
 - `discovery.py` — volume discovery (`ts-*_Vol.mrc` + legacy `ts-*.mrc` fallback), MRC header dims, `--include`/`--exclude` glob filtering. Used by `membrain_seg.py`, `slabify.py`, `pytom_match.py`, `gapstop_match.py`, `simple_box_mask.py`.
 - `denoise_training.py` — EVN/ODD pair discovery, `ts-select.csv` defocus loading, defocus-stratified sampling. Used by `cryocare.py`, `deep_dewedge.py`, `deep_dewedge_mw.py`, `topaz_train.py`.
 - `volume_qc.py` — shared HTML/plot generation for QC reports (slabs, orthoslices, picks overlays).

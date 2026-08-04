@@ -397,6 +397,152 @@ def load_input_stacks() -> tuple:
     return mrc_files, source_info
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Frame lookup: SEC <-> acq_order/z_value bridge (see CLAUDE.md's
+# "frame_lookup" section) -- SEC/frame_b/acq_order/z_value are this
+# codebase's sanctioned frame cross-referencing keys (never tilt-angle
+# proximity, see CLAUDE.md's "Cross-referencing frames"); this table exists
+# so that correspondence is derived once, not re-parsed from .aln/_TLT.txt
+# independently in every command that needs it.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def register_frame_lookup(out_dir: Path) -> None:
+    """
+    Scan out_dir for ts-*.aln + matching ts-*_TLT.txt files and register
+    each TS's SEC <-> z_value/acq_order bridge (+ which SECs are dark) in
+    project.json under 'frame_lookup'.
+
+    Deliberately does NOT duplicate mdoc_data's per-frame content
+    (sub_frame_path etc.) -- only the SEC bridge mdoc_data can't supply on
+    its own (SEC only exists once AreTomo3 has produced .aln/_TLT.txt).
+    Filename resolution happens at read time in resolve_frame(), composed
+    with the already-registered mdoc_data section via
+    get_ts_to_original_stem().
+
+    Each entry also records 'validated': whether _TLT.txt's nominal_tilt +
+    that TS's alpha_offset agrees with .aln's TILT column (both frames and
+    dark frames) to within 0.05 deg -- see
+    parsers.py:check_nominal_tilt_consistency. This is a *validation* of
+    the SEC correspondence via tilt-angle agreement, not the correspondence
+    mechanism itself (which stays the exact SEC/frame_b keys throughout).
+
+    Safe to call multiple times / on a growing directory (e.g. TS
+    processed incrementally) -- merges into any existing per_ts entries
+    rather than replacing the whole section.
+    """
+    from aretomo3_preprocess.shared.parsers import (
+        parse_aln_file, parse_tlt_file, check_nominal_tilt_consistency,
+    )
+
+    aln_files = sorted(out_dir.glob('ts-*.aln'))
+    if not aln_files:
+        return
+
+    existing = _load().get('frame_lookup', {}).get('per_ts', {})
+    new_entries = {}
+    n_ok = n_fail = 0
+    for aln_path in aln_files:
+        ts_name = aln_path.stem
+        tlt_path = out_dir / f'{ts_name}_TLT.txt'
+        if not tlt_path.exists():
+            print(f'    SKIP  {ts_name}: no matching {tlt_path.name}')
+            n_fail += 1
+            continue
+        try:
+            aln_data = parse_aln_file(aln_path)
+            tlt_data = parse_tlt_file(tlt_path)
+            if not tlt_data:
+                raise ValueError('no rows in _TLT.txt')
+
+            sec_to_z = {str(sec): t['z_value'] for sec, t in tlt_data.items()}
+            dark_secs = sorted(df['frame_b'] for df in aln_data['dark_frames'])
+            alpha_offset = aln_data.get('alpha_offset') or 0.0
+
+            pairs = [(f['sec'], f['tilt']) for f in aln_data['frames']]
+            pairs += [(df['frame_b'], df['tilt']) for df in aln_data['dark_frames']]
+            bad = check_nominal_tilt_consistency(pairs, tlt_data, alpha_offset)
+
+            new_entries[ts_name] = {
+                'n_total':   aln_data['total_frames'],
+                'sec_to_z':  sec_to_z,
+                'dark_secs': dark_secs,
+                'validated': not bad,
+            }
+            n_ok += 1
+        except Exception as exc:
+            print(f'    FAIL  {ts_name}: {exc}')
+            n_fail += 1
+
+    if not new_entries:
+        return
+
+    merged = {**existing, **new_entries}
+    update_section('frame_lookup', {
+        'timestamp': datetime.datetime.now().isoformat(timespec='seconds'),
+        'per_ts':    merged,
+    })
+    print(f'Registered frame lookup for {n_ok} TS in project.json  [frame_lookup]'
+          + (f'  ({n_fail} skipped)' if n_fail else ''))
+
+
+def get_frame_lookup(ts_name: str) -> Optional[dict]:
+    """Raw {'n_total', 'sec_to_z', 'dark_secs', 'validated'} for ts_name
+    from the 'frame_lookup' section, or None if not registered."""
+    return _load().get('frame_lookup', {}).get('per_ts', {}).get(ts_name)
+
+
+def resolve_frame(ts_name: str, *, sec: int = None, z_value: int = None,
+                  acq_order: int = None) -> Optional[dict]:
+    """
+    Given exactly one of sec/z_value/acq_order, resolve the rest of that
+    frame's identifiers plus its filename, by composing 'frame_lookup'
+    (the SEC bridge) with 'mdoc_data' (already-registered per-frame mdoc
+    metadata, keyed by original stem + z_value -- see
+    get_ts_to_original_stem()).
+
+    Returns {'sec', 'z_value', 'acq_order', 'is_dark', 'sub_frame_path'},
+    or None if frame_lookup isn't registered for ts_name, the given id
+    isn't found, or (for sub_frame_path specifically) mdoc_data has no
+    matching entry -- sub_frame_path is None in that case rather than the
+    whole lookup failing, since frame_lookup's own data is still valid.
+    """
+    lookup = get_frame_lookup(ts_name)
+    if lookup is None:
+        return None
+
+    sec_to_z = lookup['sec_to_z']
+    if sec is not None:
+        found_sec, found_z = sec, sec_to_z.get(str(sec))
+        if found_z is None:
+            return None
+    elif z_value is not None or acq_order is not None:
+        target_z = z_value if z_value is not None else acq_order - 1
+        match = next(((int(s), z) for s, z in sec_to_z.items() if z == target_z), None)
+        if match is None:
+            return None
+        found_sec, found_z = match
+    else:
+        raise ValueError('resolve_frame: exactly one of sec/z_value/acq_order is required')
+
+    result = {
+        'sec':          found_sec,
+        'z_value':      found_z,
+        'acq_order':    found_z + 1,
+        'is_dark':      found_sec in set(lookup.get('dark_secs', [])),
+        'sub_frame_path': None,
+    }
+
+    original_stem = get_ts_to_original_stem().get(ts_name)
+    if original_stem is not None:
+        mdoc_frames = _load().get('mdoc_data', {}).get('per_ts', {}).get(
+            original_stem, {}).get('frames', {})
+        frame_entry = mdoc_frames.get(str(found_z))
+        if frame_entry is not None:
+            result['sub_frame_path'] = frame_entry.get('sub_frame_path')
+
+    return result
+
+
 def get_analysis_runs() -> list:
     """
     List of {'kind', 'output_dir', 'label', 'timestamp'} records for every
