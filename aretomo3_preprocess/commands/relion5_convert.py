@@ -594,8 +594,17 @@ def run(args):
     # ── load session JSON ─────────────────────────────────────────────────────
     session = _read_session_json(cmd0_dir / 'AreTomo3_Session.json')
     if not session:
+        # These are the ACTUAL fallback values used below (kV=300.0, Cs=2.7,
+        # AmpContrast=0.1, PixSize=1.0 Angstrom, TiltAxis=[0.0]) -- all
+        # plausible-looking real values, not obvious sentinels like 0, so a
+        # wrong pixel size here (silently corrupting thickness/shift
+        # geometry) is easy to miss without spelling out exactly what was
+        # substituted.
         print(f'WARNING: AreTomo3_Session.json not found in {cmd0_dir}')
-        print(f'         Voltage/Cs/AmpContrast/PixSize will be 0 — use --cmd0-dir to fix.')
+        print(f'         Using fallback values instead of this dataset\'s real '
+              f'ones -- verify these are correct or fix with --cmd0-dir:')
+        print(f'           kV=300.0  Cs=2.7  AmpContrast=0.1  '
+              f'PixSize=1.0 (Å)  TiltAxis=0.0')
 
     # ── discover TS names ─────────────────────────────────────────────────────
     aln_files = sorted(input_dir.glob('ts-*.aln'))
