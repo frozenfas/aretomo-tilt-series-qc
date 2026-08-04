@@ -139,15 +139,20 @@ def _relion_verdict_line(parsed: dict) -> str:
     """Human-readable "Import into RELION using ... handedness" sentence,
     matching DefocusGrad's own CONCLUSION-line phrasing (that's the
     established convention users of this pipeline already recognise) --
-    derived from ctfplotter's x/ratio via _POLARITY_TO_RELION, not printed
-    by ctfplotter itself."""
-    h, ratio = parsed.get('relion_handedness'), parsed.get('ratio')
+    derived from ctfplotter's own x/ratio via _POLARITY_TO_RELION, NOT
+    printed by ctfplotter itself. Always spells out "(RELION convention,
+    converted from ctfplotter x=...)" explicitly -- ctfplotter's raw x
+    uses the opposite sign (x=+1 <-> RELION -1, see module docstring), so
+    without saying so this reads as a plain number that could be silently
+    misread as ctfplotter's own native output."""
+    h, ratio, x = parsed.get('relion_handedness'), parsed.get('ratio'), parsed.get('polarity_x')
     if h is None:
         return 'Could not determine tilt handedness from ctfplotter output.'
+    x_note = f'RELION convention, converted from ctfplotter -testInv x={x:+d}' if x is not None else 'RELION convention'
     if not parsed.get('clear'):
         return (f'Result not clear enough (ratio {ratio} < {_CLEAR_RATIO}) -- '
-                f'best guess is {h:+d} but treat with caution.')
-    return f'Import into RELION using {h:+d} tilt handedness.  (ratio {ratio})'
+                f'best guess is {h:+d} ({x_note}) but treat with caution.')
+    return f'Import into RELION using {h:+d} tilt handedness.  ({x_note}; ratio {ratio})'
 
 
 def _parse_testinv_stdout(text: str) -> dict:
@@ -181,6 +186,15 @@ def _parse_testinv_stdout(text: str) -> dict:
 
 def _run_testinv(ctfplotter_bin, st_path, tlt_path, aangle, apix_A, scan_lo, scan_hi,
                   work_dir, env, kv, cs, ac, timeout):
+    # tlt_path (-angleFn) is the IMOD-format .tlt file from _Imod/ -- this is
+    # the raw NOMINAL (stage) tilt, NOT alpha-offset/specimen-corrected: its
+    # values are identical to the .aln file's own raw TILT column (verified
+    # directly, e.g. ts-136 both start at -48.50), and CLAUDE.md documents
+    # that AreTomo3 never bakes AlphaOffset into .aln/_st.tlt -- it's always
+    # a separate header-only value. We don't pass -taOffset (ctfplotter's
+    # own alpha-offset-equivalent option) here, so ctfplotter also treats
+    # this as nominal for its own fitting. See module docstring for why this
+    # matters and what's still an open question.
     cmd = [
         ctfplotter_bin, '-volt', f'{kv:g}', '-cs', f'{cs:g}', '-ampContrast', f'{ac:g}',
         '-input', str(st_path), '-angleFn', str(tlt_path), '-aAngle', str(aangle),
@@ -220,6 +234,12 @@ def _build_half_stacks(st_path, xf_path, work_dir, newstack_bin, env, bin_factor
 
 def _run_side_autofit(ctfplotter_bin, half_path, tlt_path, apix_A, bin_factor,
                        scan_lo, scan_hi, work_dir, env, kv, cs, ac, side, timeout):
+    # Same tlt_path (nominal tilt, see _run_testinv above) as -angleFn here.
+    # The tilt values this function returns (parsed from the .defocus
+    # file's own angle columns below) are therefore also nominal -- ctfplotter's
+    # own -taOffset doc confirms an offset "does not affect the tilt angles
+    # shown ... or saved to the defocus file" even when it IS passed, so
+    # this would stay nominal either way.
     def_path = work_dir / f'{side}.defocus'
     cmd = [
         ctfplotter_bin, '-volt', f'{kv:g}', '-cs', f'{cs:g}', '-ampContrast', f'{ac:g}',
@@ -244,7 +264,7 @@ def _run_side_autofit(ctfplotter_bin, half_path, tlt_path, apix_A, bin_factor,
             ang1, ang2, defnm = float(parts[2]), float(parts[3]), float(parts[4])
         except ValueError:
             continue
-        tilts.append((ang1 + ang2) / 2.0)
+        tilts.append((ang1 + ang2) / 2.0)  # NOMINAL tilt (deg), not alpha-offset-corrected
         defocus_A.append(defnm * 10.0)  # nm -> A, matching DefocusGrad's plot units
     return np.array(tilts), np.array(defocus_A)
 
@@ -263,6 +283,23 @@ def _make_plot(tilts_l, def_l, tilts_r, def_r, out_path):
     to swamp the smaller differential signal and make the two raw slopes
     read as same-sign ("inconclusive") even when the delta and -testInv
     both agree on a clear handedness.
+
+    NOMINAL vs ALPHA-OFFSET-CORRECTED TILT -- read before changing the x-axis.
+    tilts_l/tilts_r (and everything plotted against them) are raw NOMINAL
+    (stage) tilt, not the specimen-referenced angle CLAUDE.md's alpha_offset
+    convention describes for other consumers (relion5_convert.py etc: add
+    it explicitly to get specimen-referenced tilt). We do NOT add it here.
+    Naively, the left-right defocus gradient should be zero when the
+    SPECIMEN (not the stage) is perpendicular to the beam, i.e. at nominal
+    tilt = -alpha_offset rather than at nominal tilt = 0 -- tested this
+    directly on real data (ts-136, alpha_offset=11.50 from its .aln; ts-074,
+    alpha_offset=9.30) and did NOT confirm it: the delta plot's zero-crossing
+    came out near 0 (+1.78 / -0.99) in both cases, not near -alpha_offset
+    (-11.50 / -9.30). Left as nominal (matching what's actually in the .tlt
+    file and what -testInv itself uses, since we don't pass -taOffset) --
+    this is a genuinely open question, not a resolved design choice, and
+    the x-axis is labelled "nominal tilt" throughout so it's never silently
+    ambiguous which convention a reader is looking at.
     """
     import matplotlib
     matplotlib.use('Agg')
@@ -281,7 +318,7 @@ def _make_plot(tilts_l, def_l, tilts_r, def_r, out_path):
         ax1.scatter(tilts_r, def_r, color='orange', label='Defocus right-side', s=18)
         xs = np.linspace(tilts_r.min(), tilts_r.max(), 50)
         ax1.plot(xs, slope_r * xs + intercept_r, '--', color='orange', label='Linear fit right-side')
-    ax1.set_xlabel('Tilt angle (deg)')
+    ax1.set_xlabel('Nominal tilt angle (deg) -- not alpha-offset-corrected')
     ax1.set_ylabel('Defocus (A)')
     ax1.legend(fontsize=8)
 
@@ -318,7 +355,7 @@ def _make_plot(tilts_l, def_l, tilts_r, def_r, out_path):
         xs = np.linspace(tilts_l.min(), tilts_l.max(), 50)
         ax2.plot(xs, delta_slope * xs + delta_intercept, '--', color='green', label='Linear fit')
         ax2.axhline(0, color='gray', linewidth=0.8)
-        ax2.set_xlabel('Tilt angle (deg)')
+        ax2.set_xlabel('Nominal tilt angle (deg) -- not alpha-offset-corrected')
         ax2.set_ylabel('Defocus delta, right - left (A)')
         ax2.legend(fontsize=8)
     else:
@@ -460,8 +497,8 @@ def _test_summary_html(r: dict) -> str:
     lr_txt = ' · '.join(lr_bits) if lr_bits else _esc('not run (--skip-plots or failed)')
 
     return (f'<div class="test-summary">'
-            f'<div><span class="test-label">Built-in (-testInv):</span> {_esc(builtin_txt)}</div>'
-            f'<div><span class="test-label">Left/right (in-house):</span> {lr_txt}</div>'
+            f'<div><span class="test-label">Built-in test (-testInv), RELION convention:</span> {_esc(builtin_txt)}</div>'
+            f'<div><span class="test-label">Left/right test (in-house), RELION convention:</span> {lr_txt}</div>'
             f'</div>')
 
 
@@ -476,9 +513,9 @@ def _make_html(per_ts: dict, selection_scores: dict, consensus: str, out_path: P
         elif h is None:
             badge_cls, badge_txt = 'err', 'unparseable'
         elif not r.get('clear'):
-            badge_cls, badge_txt = 'warn', f'{h:+d} (not clear, ratio {r.get("ratio")})'
+            badge_cls, badge_txt = 'warn', f'RELION {h:+d} (not clear, ratio {r.get("ratio")})'
         else:
-            badge_cls, badge_txt = 'ok', f'{h:+d}  (ratio {r.get("ratio")})'
+            badge_cls, badge_txt = 'ok', f'RELION {h:+d}  (ratio {r.get("ratio")})'
         test_summary = _test_summary_html(r) if status == 'ok' else ''
 
         plot_html = ''
@@ -538,23 +575,29 @@ def _make_html(per_ts: dict, selection_scores: dict, consensus: str, out_path: P
     signal, which makes both tests -- and especially the left/right delta
     below -- easier to read cleanly.</p>
     <p><b>Reading the plots -- what + and - tilt mean:</b> the x-axis is
-    the tilt series' own recorded tilt angle (same sign as the .tlt file),
-    left = blue, right = orange. If the tilt handedness convention is
+    <b>nominal (stage) tilt angle</b>, not alpha-offset / specimen-corrected
+    tilt -- the same raw values as the tilt series' own .tlt file, left =
+    blue, right = orange. If the tilt handedness convention is
     <b>RELION -1</b>, the LEFT side's defocus should <b>decrease</b> towards
     positive tilt angles (a negative slope) while the RIGHT side's defocus
     <b>increases</b> towards positive tilt (a positive slope) -- an "X"
-    shape crossing near tilt = 0. The opposite pattern (left increasing,
-    right decreasing) means <b>RELION +1</b>. Same-sign slopes on both
-    sides means the two halves aren't giving a clear signal either way.</p>
+    shape. The opposite pattern (left increasing, right decreasing) means
+    <b>RELION +1</b>. Same-sign slopes on both sides means the two halves
+    aren't giving a clear signal either way.</p>
     <p><b>The delta plot</b> (bottom panel) shows right-side defocus minus
-    left-side defocus at each matching tilt angle. Subtracting removes any
-    trend the two sides share in common (e.g. focus drift over the course
-    of acquisition, unrelated to handedness), leaving just the left-right
-    difference that handedness actually predicts: it should trend from
-    negative (right &lt; left at negative tilt) to positive (right &gt; left
-    at positive tilt) for RELION -1, and the opposite for RELION +1. A
-    flatter, noisier delta line without a clear trend means this TS isn't
-    giving a clean signal.</p>
+    left-side defocus at each matching (nominal) tilt angle. Subtracting
+    removes any trend the two sides share in common (e.g. focus drift over
+    the course of acquisition, unrelated to handedness), leaving just the
+    left-right difference that handedness actually predicts: it should
+    trend from negative (right &lt; left) to positive (right &gt; left) as
+    tilt increases for RELION -1, and the opposite for RELION +1. A flatter,
+    noisier delta line without a clear trend means this TS isn't giving a
+    clean signal. <b>Where it crosses zero is still an open question</b> --
+    naively it should cross at nominal tilt = -AlphaOffset (the tilt at
+    which the specimen itself, not just the stage, is flat), but tested on
+    real data this didn't hold (crossed near 0 regardless of AlphaOffset
+    being 11.5&deg;/9.3&deg; on two different TS) -- so treat the crossing
+    point itself as unexplained for now, not as a check of AlphaOffset.</p>
   </div>"""
     html_out = f"""<!DOCTYPE html>
 <html lang="en">
@@ -595,7 +638,7 @@ def _make_html(per_ts: dict, selection_scores: dict, consensus: str, out_path: P
 </head>
 <body>
   <h1>ctf-handedness QC (IMOD ctfplotter -testInv)</h1>
-  <div class="consensus {consensus_cls}">Consensus (built-in test): <b>{_esc(consensus)}</b></div>
+  <div class="consensus {consensus_cls}">Consensus (built-in test, RELION convention): <b>{_esc(consensus)}</b></div>
   {about_html}
   <div class="grid">{''.join(cards)}</div>
 </body>
@@ -735,7 +778,7 @@ def run(args):
                 print(f'{ts_name}: {r.get("status")} — {r.get("error")}')
 
     consensus = _consensus(per_ts)
-    print(f'\nConsensus: {consensus}')
+    print(f'\nConsensus (RELION convention): {consensus}')
 
     html_path = out_dir / 'index.html'
     _make_html(per_ts, selection_scores, consensus, html_path)
