@@ -439,6 +439,32 @@ def _esc(s):
     return html.escape(str(s))
 
 
+def _test_summary_html(r: dict) -> str:
+    """Side-by-side summary of the two independent tests this command runs
+    for one TS: the built-in ctfplotter -testInv result (primary -- this is
+    the value used for the overall consensus and what project-summary
+    shows) and the left/right test (secondary/diagnostic -- built in-house
+    from half-stacks, cross-checked two ways: raw per-side slopes and the
+    right-left delta)."""
+    h, ratio, clear = r.get('relion_handedness'), r.get('ratio'), r.get('clear')
+    if h is None:
+        builtin_txt = 'unparseable'
+    else:
+        builtin_txt = f'{h:+d}  (ratio {ratio}{"" if clear else ", not clear"})'
+
+    lr_bits = []
+    if r.get('delta_relion_handedness') is not None:
+        lr_bits.append(_esc(f'delta {r["delta_relion_handedness"]:+d} (corr {r.get("delta_corr")})'))
+    if r.get('slope_relion_handedness') is not None:
+        lr_bits.append(_esc(f'slopes {r["slope_relion_handedness"]:+d}'))
+    lr_txt = ' · '.join(lr_bits) if lr_bits else _esc('not run (--skip-plots or failed)')
+
+    return (f'<div class="test-summary">'
+            f'<div><span class="test-label">Built-in (-testInv):</span> {_esc(builtin_txt)}</div>'
+            f'<div><span class="test-label">Left/right (in-house):</span> {lr_txt}</div>'
+            f'</div>')
+
+
 def _make_html(per_ts: dict, selection_scores: dict, consensus: str, out_path: Path):
     cards = []
     for ts_name, r in per_ts.items():
@@ -453,7 +479,7 @@ def _make_html(per_ts: dict, selection_scores: dict, consensus: str, out_path: P
             badge_cls, badge_txt = 'warn', f'{h:+d} (not clear, ratio {r.get("ratio")})'
         else:
             badge_cls, badge_txt = 'ok', f'{h:+d}  (ratio {r.get("ratio")})'
-        verdict_line = _relion_verdict_line(r) if status == 'ok' else ''
+        test_summary = _test_summary_html(r) if status == 'ok' else ''
 
         plot_html = ''
         if r.get('plot_path'):
@@ -461,10 +487,10 @@ def _make_html(per_ts: dict, selection_scores: dict, consensus: str, out_path: P
             try:
                 b64 = base64.b64encode(Path(r['plot_path']).read_bytes()).decode()
                 slope_note = (f"slope L={r.get('slope_left')} R={r.get('slope_right')} "
-                               f"&rarr; {r.get('slope_relion_handedness')}"
+                               f"→ {r.get('slope_relion_handedness')}"
                                if r.get('slope_relion_handedness') is not None else '')
                 delta_note = (f"delta (right-left) slope={r.get('delta_slope')} A/deg, "
-                               f"corr={r.get('delta_corr')} &rarr; {r.get('delta_relion_handedness')}"
+                               f"corr={r.get('delta_corr')} → {r.get('delta_relion_handedness')}"
                                if r.get('delta_relion_handedness') is not None else '')
                 plot_html = (f'<img src="data:image/png;base64,{b64}">'
                               f'<div class="note">{_esc(delta_note)}</div>'
@@ -484,7 +510,7 @@ def _make_html(per_ts: dict, selection_scores: dict, consensus: str, out_path: P
         cards.append(f"""
       <div class="card">
         <div class="card-title">{_esc(ts_name)} <span class="badge {badge_cls}">{badge_txt}</span></div>
-        {f'<div class="note">{_esc(verdict_line)}</div>' if verdict_line else ''}
+        {test_summary}
         <div class="note">coverage {sel.get('coverage_deg', '?')}&deg; &middot; high-tilt CTF res
           {sel.get('high_tilt_ctf_res_A', '?')}&Aring; &middot; known defocus
           {r.get('known_mean_defocus_um', '?')}&micro;m &middot; aAngle {r.get('aangle_deg', '?')}&deg;</div>
@@ -493,6 +519,43 @@ def _make_html(per_ts: dict, selection_scores: dict, consensus: str, out_path: P
       </div>""")
 
     consensus_cls = 'warn' if ('inconsist' in consensus or 'inconclus' in consensus) else 'ok'
+    about_html = """
+  <div class="about">
+    <p><b>Two independent tests are run per TS.</b> The <b>built-in test</b>
+    (IMOD ctfplotter's own <code>-testInv</code>) is the primary result --
+    it's what the Consensus above and project-summary's "defocus handedness"
+    both use. The <b>left/right test</b> is a second, in-house cross-check:
+    the raw tilt series is split into left/right halves (rotated so the
+    tilt axis is vertical, matching the DefocusGrad convention) and each
+    half's defocus is fit separately across the whole tilt range, so it can
+    be plotted and inspected visually rather than trusted as a single
+    number.</p>
+    <p><b>TS are auto-selected</b> for wide tilt coverage, good high-tilt
+    CTF resolution, and -- primarily -- a <b>flat</b> AreTomo3-reported
+    defocus-vs-tilt trend (low spread in the overall, non-split per-frame
+    defocus estimate). A flat TS is less likely to have a confounding
+    trend (focus drift, poor eucentricity, etc.) on top of the left-right
+    signal, which makes both tests -- and especially the left/right delta
+    below -- easier to read cleanly.</p>
+    <p><b>Reading the plots -- what + and - tilt mean:</b> the x-axis is
+    the tilt series' own recorded tilt angle (same sign as the .tlt file),
+    left = blue, right = orange. If the tilt handedness convention is
+    <b>RELION -1</b>, the LEFT side's defocus should <b>decrease</b> towards
+    positive tilt angles (a negative slope) while the RIGHT side's defocus
+    <b>increases</b> towards positive tilt (a positive slope) -- an "X"
+    shape crossing near tilt = 0. The opposite pattern (left increasing,
+    right decreasing) means <b>RELION +1</b>. Same-sign slopes on both
+    sides means the two halves aren't giving a clear signal either way.</p>
+    <p><b>The delta plot</b> (bottom panel) shows right-side defocus minus
+    left-side defocus at each matching tilt angle. Subtracting removes any
+    trend the two sides share in common (e.g. focus drift over the course
+    of acquisition, unrelated to handedness), leaving just the left-right
+    difference that handedness actually predicts: it should trend from
+    negative (right &lt; left at negative tilt) to positive (right &gt; left
+    at positive tilt) for RELION -1, and the opposite for RELION +1. A
+    flatter, noisier delta line without a clear trend means this TS isn't
+    giving a clean signal.</p>
+  </div>"""
     html_out = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -503,9 +566,16 @@ def _make_html(per_ts: dict, selection_scores: dict, consensus: str, out_path: P
   body {{ font-family: 'Segoe UI', sans-serif; background: #fff; color: #263238;
           padding: 32px 16px; }}
   h1 {{ color: #0d47a1; margin-bottom: 6px; }}
-  .consensus {{ font-size: 1.1em; margin-bottom: 24px; }}
+  .consensus {{ font-size: 1.1em; margin-bottom: 16px; }}
   .consensus.ok {{ color: #2e7d32; }}
   .consensus.warn {{ color: #b26a00; }}
+  .about {{
+    background: #f0f4f8; border: 1px solid #dbe3ea; border-radius: 10px;
+    padding: 14px 18px; margin-bottom: 24px; max-width: 900px;
+  }}
+  .about p {{ font-size: 0.86em; color: #37474f; margin: 0 0 10px; line-height: 1.5; }}
+  .about p:last-child {{ margin-bottom: 0; }}
+  .about code {{ background: #e0e6ea; padding: 1px 5px; border-radius: 4px; font-size: 0.95em; }}
   .grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 18px; }}
   .card {{ background: #f5f7fa; border: 1px solid #e0e6ea; border-radius: 10px; padding: 16px; }}
   .card-title {{ font-weight: 600; margin-bottom: 6px; }}
@@ -515,12 +585,18 @@ def _make_html(per_ts: dict, selection_scores: dict, consensus: str, out_path: P
   .badge.err {{ background: #ffcdd2; color: #b71c1c; }}
   .note {{ font-size: 0.8em; color: #607d8b; margin: 6px 0; }}
   .note.err {{ color: #b71c1c; }}
+  .test-summary {{
+    background: #ffffff; border: 1px solid #e0e6ea; border-radius: 6px;
+    padding: 6px 10px; margin: 8px 0; font-size: 0.82em;
+  }}
+  .test-label {{ color: #78909c; }}
   img {{ max-width: 100%; border-radius: 6px; }}
 </style>
 </head>
 <body>
   <h1>ctf-handedness QC (IMOD ctfplotter -testInv)</h1>
-  <div class="consensus {consensus_cls}">Consensus: <b>{_esc(consensus)}</b></div>
+  <div class="consensus {consensus_cls}">Consensus (built-in test): <b>{_esc(consensus)}</b></div>
+  {about_html}
   <div class="grid">{''.join(cards)}</div>
 </body>
 </html>
