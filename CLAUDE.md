@@ -108,23 +108,35 @@ in at least 7 files (`analyse.py`, `check_gain_transform.py`, `enrich.py`,
 this off for new code:
 
 - **Schema**: `project.json['frame_lookup']['per_ts'][ts_name] = {n_total,
-  sec_to_z, dark_secs, validated}`. `sec_to_z` is `{str(sec): z_value}` for
-  *every* SEC (aligned + dark) — deliberately only one direction; reverse
-  lookup is built in memory by the accessor. `dark_secs` is the list of
-  dark SECs. `validated` records whether `_TLT.txt`'s `nominal_tilt +
-  alpha_offset` agreed with `.aln`'s TILT column (both frames and
-  `DarkFrame` lines) to within 0.05° when this entry was built — a
-  consistency check via tilt-angle agreement, not the cross-referencing
+  frames, dark_secs, validated}`. `frames` is `{str(sec): {z_value,
+  sub_frame_path}}` for *every* SEC (aligned + dark). `dark_secs` is the
+  list of dark SECs. `validated` records whether `_TLT.txt`'s
+  `nominal_tilt + alpha_offset` agreed with `.aln`'s TILT column (both
+  frames and `DarkFrame` lines) to within 0.05° when this entry was built
+  — a consistency check via tilt-angle agreement, not the cross-referencing
   mechanism itself (that's still exact SEC/`frame_b` keys throughout).
-- **Deliberately thin, not a copy of `mdoc_data`**: `mdoc_data.per_ts`
-  (auto-written by `validate-mdoc`) already carries `sub_frame_path`
-  (filename) keyed by `z_value` per original stem — `frame_lookup` only
-  adds the one thing `mdoc_data` can't have yet (SEC doesn't exist until
-  AreTomo3 has run). Filename resolution composes the two at read time.
+- **Filename is captured at build time, not composed at read time.** An
+  earlier version of this design deliberately left `sub_frame_path` out of
+  `frame_lookup` (to avoid duplicating `mdoc_data`) and composed it lazily
+  in `resolve_frame()` via `get_ts_to_original_stem()` + `mdoc_data` on
+  every call. Reconsidered after hitting real fragility from it: a
+  real-project test where `mdoc_data` had been registered from a
+  non-standard directory (not the actual `rename-ts` symlink dir) made
+  `resolve_frame()` silently return `sub_frame_path=None` even though
+  `frame_lookup`'s own data was perfectly valid — a live dependency on
+  `rename_ts`/`mdoc_data` being correct *every time a frame is resolved*,
+  not just once. Baking the filename in when `register_frame_lookup()`
+  runs (composing with whatever `mdoc_data` is registered *then*) makes a
+  registered entry self-contained — `relion5_convert.py` (the main
+  filename consumer) needs only `frame_lookup`, not a live join. If
+  `mdoc_data` wasn't registered yet, `sub_frame_path` is `None` for that
+  run — re-run `enrich --frame-lookup --force` after registering
+  `mdoc_data` to backfill it.
 - **Built by** `shared/project_state.py:register_frame_lookup(out_dir)`,
   parsing that directory's `ts-*.aln` (for `dark_frames`, `alpha_offset`)
-  + matching `ts-*_TLT.txt` (for `sec_to_z`, covering all SECs in one
-  parse) per TS. Wired into `run-aretomo3 --cmd 0`'s completion (same
+  + matching `ts-*_TLT.txt` (for the SEC↔z_value bridge, covering all SECs
+  in one parse) per TS, composed with the already-registered `mdoc_data`
+  for filenames. Wired into `run-aretomo3 --cmd 0`'s completion (same
   integration point as `input_stacks`' auto-fill) and into `enrich
   --frame-lookup <dir>` (the manual/force-overwrite escape hatch, same
   pattern as `enrich`'s other sections). Safe to call repeatedly — merges
@@ -132,31 +144,47 @@ this off for new code:
 - **Read via** `get_frame_lookup(ts_name)` (raw section) or
   `resolve_frame(ts_name, sec=... | z_value=... | acq_order=...)` (give
   exactly one identifier, get `{sec, z_value, acq_order, is_dark,
-  sub_frame_path}` back, composing `frame_lookup` with `mdoc_data` via
-  `get_ts_to_original_stem()`). Returns `None` — never raises — when the
-  TS isn't registered or the given id isn't found; `sub_frame_path` alone
-  is `None` if `mdoc_data` has no matching entry, without failing the rest
-  of the lookup.
-- **Migration is intentionally partial**: `enrich.py`'s
-  `_enrich_defocus_data` was migrated as the reference example (tries
-  `resolve_frame` first, falls back to its original direct `_TLT.txt`
-  parse if `frame_lookup` isn't registered for that TS — preserves its
-  standalone/escape-hatch robustness for datasets processed outside the
-  pipeline). The other 6 files listed above still re-derive independently
-  — known candidates for a future pass, not migrated in this change (same
-  reasoning as `pytom_match.py`/`gapstop_match.py` not yet preferring IMOD
-  `_st.tlt`, flagged in the alpha_offset section below rather than
-  migrated all at once).
+  sub_frame_path}` back). Returns `None` — never raises — when the TS
+  isn't registered or the given id isn't found.
+- **Migration is intentionally partial**: the other 6 files listed above
+  (all except `enrich.py`, whose own defocus-lookup responsibility was
+  removed rather than migrated — see the `defocus_data` note below) still
+  re-derive independently — known candidates for a future pass, not
+  migrated in this change (same reasoning as `pytom_match.py`/
+  `gapstop_match.py` not yet preferring IMOD `_st.tlt`, flagged in the
+  alpha_offset section below rather than migrated all at once).
+
+**`defocus_data` (project.json section) — removed, deliberately not
+replaced by anything cached.** `enrich --defocus-data` used to parse
+per-TS reference defocus from `_CTF.txt`/`_TLT.txt` into a project.json
+section, read by `imod_mtffilter.py` (its only consumer — confirmed via a
+full-repo `get_defocus_data()` grep before removing it) as a fallback
+behind `ts-select.csv`'s optional `ref_defocus_um` column. Removed
+because a cached defocus value is a *worse* fit for this codebase's
+"don't let state go silently stale" concerns than `frame_lookup`'s
+SEC↔z_value/filename data: defocus estimates change every time AreTomo3/
+CTFFIND is re-run, unlike SEC↔z_value correspondence or filenames (which
+are structurally fixed once acquired). `imod_mtffilter.py` now calls
+`shared/parsers.py:compute_reference_defocus(ctf_dir)` directly on its own
+already-required `--input` directory, computed fresh every invocation,
+never persisted anywhere — see its docstring for the full priority order
+(`ts-select.csv` override, if present, still wins first; then this; then
+`--defocus`).
 
 **Design principle — build a centralized lookup table for any cross-file
 index correspondence used by more than one command, rather than letting
-each consumer re-derive it.** `frame_lookup` is the concrete example;
-apply the same instinct to any future correspondence problem that shows up
-in more than one file.
+each consumer re-derive it — but only for data that's genuinely stable
+once written (SEC↔z_value, filenames).** For data that changes across
+re-runs of the same tool (defocus estimates, anything CTF-refinement-
+dependent), compute fresh from the relevant already-required input
+directory instead of caching in project.json — a cache of that kind of
+data has no way to know it's gone stale. `frame_lookup` is the concrete
+example of the first case; `compute_reference_defocus` (used directly,
+never cached) is the concrete example of the second.
 
 **`shared/` modules** — parsing and cross-command utilities, not one-off
 helpers:
-- `parsers.py` — `parse_aln_file`/`parse_ctf_file`/`parse_tlt_file`/`parse_mdoc_file`/`check_nominal_tilt_consistency`. Always reuse these instead of hand-rolling `.aln`/`.mdoc` parsing.
+- `parsers.py` — `parse_aln_file`/`parse_ctf_file`/`parse_tlt_file`/`parse_mdoc_file`/`check_nominal_tilt_consistency`/`compute_reference_defocus`. Always reuse these instead of hand-rolling `.aln`/`.mdoc` parsing.
 - `project_json.py` / `project_state.py` — the state file API above, plus resolving `--select-ts`, plus `frame_lookup`'s `register_frame_lookup`/`get_frame_lookup`/`resolve_frame`.
 - `discovery.py` — volume discovery (`ts-*_Vol.mrc` + legacy `ts-*.mrc` fallback), MRC header dims, `--include`/`--exclude` glob filtering. Used by `membrain_seg.py`, `slabify.py`, `pytom_match.py`, `gapstop_match.py`, `simple_box_mask.py`.
 - `denoise_training.py` — EVN/ODD pair discovery, `ts-select.csv` defocus loading, defocus-stratified sampling. Used by `cryocare.py`, `deep_dewedge.py`, `deep_dewedge_mw.py`, `topaz_train.py`.

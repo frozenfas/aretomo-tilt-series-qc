@@ -264,12 +264,6 @@ def get_gain_check_dir() -> Optional[Path]:
     return Path(value) if value else None
 
 
-def get_defocus_data() -> Optional[dict]:
-    """Return the defocus_data.per_ts dict {ts_name: ref_defocus_um}, or None."""
-    data = _load()
-    return data.get('defocus_data', {}).get('per_ts') or None
-
-
 def resolve_selected_ts(csv_path: Optional[str] = None) -> Optional[Set[str]]:
     """
     Load the TS selection set from a ts_selection.csv file.
@@ -409,15 +403,24 @@ def load_input_stacks() -> tuple:
 def register_frame_lookup(out_dir: Path) -> None:
     """
     Scan out_dir for ts-*.aln + matching ts-*_TLT.txt files and register
-    each TS's SEC <-> z_value/acq_order bridge (+ which SECs are dark) in
-    project.json under 'frame_lookup'.
+    each TS's SEC <-> z_value/acq_order bridge (+ filename, + which SECs
+    are dark) in project.json under 'frame_lookup'.
 
-    Deliberately does NOT duplicate mdoc_data's per-frame content
-    (sub_frame_path etc.) -- only the SEC bridge mdoc_data can't supply on
-    its own (SEC only exists once AreTomo3 has produced .aln/_TLT.txt).
-    Filename resolution happens at read time in resolve_frame(), composed
-    with the already-registered mdoc_data section via
-    get_ts_to_original_stem().
+    The filename (sub_frame_path) is captured HERE, at build time, by
+    composing with the already-registered mdoc_data section (via
+    get_ts_to_original_stem()) -- not resolved lazily at read time. Tried
+    the lazy/composed-at-read-time design first and found it fragile in
+    practice: resolve_frame() silently returned sub_frame_path=None
+    whenever mdoc_data happened to be registered from a directory other
+    than the actual rename-ts symlink dir (e.g. a staging/temp mdoc copy),
+    even though frame_lookup's own data was perfectly valid -- a real
+    dependency on rename_ts/mdoc_data being correct *every time a frame is
+    resolved*, not just once. Baking the filename in at build time makes a
+    registered frame_lookup entry self-contained: relion5_convert.py (the
+    main filename consumer) needs only this section, not a live mdoc_data
+    join on every lookup. If mdoc_data wasn't registered yet when this was
+    called, sub_frame_path is None for that run -- re-run (with --force via
+    `enrich --frame-lookup`) after registering mdoc_data to backfill it.
 
     Each entry also records 'validated': whether _TLT.txt's nominal_tilt +
     that TS's alpha_offset agrees with .aln's TILT column (both frames and
@@ -438,9 +441,13 @@ def register_frame_lookup(out_dir: Path) -> None:
     if not aln_files:
         return
 
-    existing = _load().get('frame_lookup', {}).get('per_ts', {})
+    project = _load()
+    existing = project.get('frame_lookup', {}).get('per_ts', {})
+    ts_to_stem = get_ts_to_original_stem()
+    mdoc_per_ts = project.get('mdoc_data', {}).get('per_ts', {})
+
     new_entries = {}
-    n_ok = n_fail = 0
+    n_ok = n_fail = n_no_filename = 0
     for aln_path in aln_files:
         ts_name = aln_path.stem
         tlt_path = out_dir / f'{ts_name}_TLT.txt'
@@ -454,7 +461,17 @@ def register_frame_lookup(out_dir: Path) -> None:
             if not tlt_data:
                 raise ValueError('no rows in _TLT.txt')
 
-            sec_to_z = {str(sec): t['z_value'] for sec, t in tlt_data.items()}
+            mdoc_frames = mdoc_per_ts.get(ts_to_stem.get(ts_name, ''), {}).get('frames', {})
+            frames = {}
+            for sec, t in tlt_data.items():
+                mdoc_entry = mdoc_frames.get(str(t['z_value']))
+                frames[str(sec)] = {
+                    'z_value':        t['z_value'],
+                    'sub_frame_path': mdoc_entry.get('sub_frame_path') if mdoc_entry else None,
+                }
+            if not any(f['sub_frame_path'] for f in frames.values()):
+                n_no_filename += 1
+
             dark_secs = sorted(df['frame_b'] for df in aln_data['dark_frames'])
             alpha_offset = aln_data.get('alpha_offset') or 0.0
 
@@ -464,7 +481,7 @@ def register_frame_lookup(out_dir: Path) -> None:
 
             new_entries[ts_name] = {
                 'n_total':   aln_data['total_frames'],
-                'sec_to_z':  sec_to_z,
+                'frames':    frames,
                 'dark_secs': dark_secs,
                 'validated': not bad,
             }
@@ -483,11 +500,16 @@ def register_frame_lookup(out_dir: Path) -> None:
     })
     print(f'Registered frame lookup for {n_ok} TS in project.json  [frame_lookup]'
           + (f'  ({n_fail} skipped)' if n_fail else ''))
+    if n_no_filename:
+        print(f'  {n_no_filename} TS have no filename data (mdoc_data/rename_ts not yet '
+              f'registered) -- re-run enrich --frame-lookup --force after registering them.')
 
 
 def get_frame_lookup(ts_name: str) -> Optional[dict]:
-    """Raw {'n_total', 'sec_to_z', 'dark_secs', 'validated'} for ts_name
-    from the 'frame_lookup' section, or None if not registered."""
+    """Raw {'n_total', 'frames', 'dark_secs', 'validated'} for ts_name from
+    the 'frame_lookup' section, or None if not registered. 'frames' is
+    {str(sec): {'z_value', 'sub_frame_path'}} for every SEC (aligned +
+    dark)."""
     return _load().get('frame_lookup', {}).get('per_ts', {}).get(ts_name)
 
 
@@ -495,52 +517,41 @@ def resolve_frame(ts_name: str, *, sec: int = None, z_value: int = None,
                   acq_order: int = None) -> Optional[dict]:
     """
     Given exactly one of sec/z_value/acq_order, resolve the rest of that
-    frame's identifiers plus its filename, by composing 'frame_lookup'
-    (the SEC bridge) with 'mdoc_data' (already-registered per-frame mdoc
-    metadata, keyed by original stem + z_value -- see
-    get_ts_to_original_stem()).
+    frame's identifiers plus its filename from the 'frame_lookup' section
+    (filename is captured at register_frame_lookup() time, not composed
+    here -- see its docstring for why).
 
     Returns {'sec', 'z_value', 'acq_order', 'is_dark', 'sub_frame_path'},
-    or None if frame_lookup isn't registered for ts_name, the given id
-    isn't found, or (for sub_frame_path specifically) mdoc_data has no
-    matching entry -- sub_frame_path is None in that case rather than the
-    whole lookup failing, since frame_lookup's own data is still valid.
+    or None if frame_lookup isn't registered for ts_name or the given id
+    isn't found. sub_frame_path is None (not a lookup failure) if
+    mdoc_data wasn't registered yet when frame_lookup was built for this TS.
     """
     lookup = get_frame_lookup(ts_name)
     if lookup is None:
         return None
 
-    sec_to_z = lookup['sec_to_z']
+    frames = lookup['frames']
     if sec is not None:
-        found_sec, found_z = sec, sec_to_z.get(str(sec))
-        if found_z is None:
+        found_sec = sec
+        entry = frames.get(str(sec))
+        if entry is None:
             return None
     elif z_value is not None or acq_order is not None:
         target_z = z_value if z_value is not None else acq_order - 1
-        match = next(((int(s), z) for s, z in sec_to_z.items() if z == target_z), None)
+        match = next(((s, e) for s, e in frames.items() if e['z_value'] == target_z), None)
         if match is None:
             return None
-        found_sec, found_z = match
+        found_sec, entry = int(match[0]), match[1]
     else:
         raise ValueError('resolve_frame: exactly one of sec/z_value/acq_order is required')
 
-    result = {
-        'sec':          found_sec,
-        'z_value':      found_z,
-        'acq_order':    found_z + 1,
-        'is_dark':      found_sec in set(lookup.get('dark_secs', [])),
-        'sub_frame_path': None,
+    return {
+        'sec':             found_sec,
+        'z_value':         entry['z_value'],
+        'acq_order':       entry['z_value'] + 1,
+        'is_dark':         found_sec in set(lookup.get('dark_secs', [])),
+        'sub_frame_path':  entry['sub_frame_path'],
     }
-
-    original_stem = get_ts_to_original_stem().get(ts_name)
-    if original_stem is not None:
-        mdoc_frames = _load().get('mdoc_data', {}).get('per_ts', {}).get(
-            original_stem, {}).get('frames', {})
-        frame_entry = mdoc_frames.get(str(found_z))
-        if frame_entry is not None:
-            result['sub_frame_path'] = frame_entry.get('sub_frame_path')
-
-    return result
 
 
 def get_analysis_runs() -> list:

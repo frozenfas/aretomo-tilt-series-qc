@@ -74,8 +74,10 @@ def test_register_frame_lookup_basic(synthetic_cmd0_dir):
     assert entry['dark_secs'] == [6]
     assert entry['validated'] is True
 
-    expected_sec_to_z = {str(sec): acq - 1 for sec, acq, _t in _ALIGNED + [_DARK]}
-    assert entry['sec_to_z'] == expected_sec_to_z
+    expected_z = {str(sec): acq - 1 for sec, acq, _t in _ALIGNED + [_DARK]}
+    assert {sec: f['z_value'] for sec, f in entry['frames'].items()} == expected_z
+    # No mdoc_data registered in this fixture -- filenames are None, not an error.
+    assert all(f['sub_frame_path'] is None for f in entry['frames'].values())
 
 
 def test_register_frame_lookup_with_alpha_offset_still_validates(tmp_path, monkeypatch):
@@ -153,30 +155,50 @@ def test_resolve_frame_requires_exactly_one_identifier(synthetic_cmd0_dir):
         resolve_frame('ts-001')
 
 
-def test_resolve_frame_resolves_filename_via_mdoc_data(synthetic_cmd0_dir):
-    register_frame_lookup(synthetic_cmd0_dir)
-
+def test_register_frame_lookup_captures_filename_at_build_time(synthetic_cmd0_dir):
+    """Filename is captured when register_frame_lookup() runs (by composing
+    with mdoc_data then), not resolved lazily on every resolve_frame() call
+    -- so mdoc_data/rename_ts must be registered BEFORE calling
+    register_frame_lookup for filenames to be captured."""
     # SEC 2 has acq_order=1 -> z_value=0. Register the rename lookup +
-    # mdoc_data needed for resolve_frame to compose the filename, matching
-    # get_ts_to_original_stem()'s documented rename_ts.lookup shape and
-    # mdoc_data.per_ts's original-stem keying.
+    # mdoc_data matching get_ts_to_original_stem()'s documented
+    # rename_ts.lookup shape and mdoc_data.per_ts's original-stem keying.
     pj.update_section('rename_ts', {'lookup': {'ts-001.mdoc': '/frames/Position_1.mdoc'}})
     pj.update_section('mdoc_data', {'per_ts': {
         'Position_1': {'frames': {'0': {'sub_frame_path': 'Position_1_000_0.0.tiff'}}},
     }})
+
+    register_frame_lookup(synthetic_cmd0_dir)
 
     result = resolve_frame('ts-001', sec=2)
     assert result['z_value'] == 0
     assert result['sub_frame_path'] == 'Position_1_000_0.0.tiff'
 
 
-def test_resolve_frame_filename_none_when_mdoc_data_missing(synthetic_cmd0_dir):
+def test_resolve_frame_filename_none_when_mdoc_data_missing_at_build_time(synthetic_cmd0_dir):
     """frame_lookup resolves fine even with no mdoc_data/rename_ts at all --
     sub_frame_path is just None, not a failure of the whole lookup."""
     register_frame_lookup(synthetic_cmd0_dir)
     result = resolve_frame('ts-001', sec=2)
     assert result is not None
     assert result['sub_frame_path'] is None
+
+
+def test_register_frame_lookup_force_refresh_backfills_filename(synthetic_cmd0_dir):
+    """Registering mdoc_data AFTER an initial register_frame_lookup call,
+    then re-running register_frame_lookup, backfills the filename -- the
+    documented recovery path (enrich --frame-lookup --force) for when
+    mdoc_data wasn't ready yet the first time."""
+    register_frame_lookup(synthetic_cmd0_dir)
+    assert resolve_frame('ts-001', sec=2)['sub_frame_path'] is None
+
+    pj.update_section('rename_ts', {'lookup': {'ts-001.mdoc': '/frames/Position_1.mdoc'}})
+    pj.update_section('mdoc_data', {'per_ts': {
+        'Position_1': {'frames': {'0': {'sub_frame_path': 'Position_1_000_0.0.tiff'}}},
+    }})
+    register_frame_lookup(synthetic_cmd0_dir)
+
+    assert resolve_frame('ts-001', sec=2)['sub_frame_path'] == 'Position_1_000_0.0.tiff'
 
 
 def test_register_frame_lookup_merges_across_calls(tmp_path, monkeypatch):

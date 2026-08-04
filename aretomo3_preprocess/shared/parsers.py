@@ -245,6 +245,55 @@ def check_nominal_tilt_consistency(sec_tilt_pairs, tlt_data, alpha_offset=0.0, t
     return bad
 
 
+def compute_reference_defocus(ctf_dir) -> dict:
+    """
+    Parse every ts-*_CTF.txt (+ matching ts-*_TLT.txt) in ctf_dir and
+    return {ts_name: reference_defocus_um} -- the first-acquired tilt's
+    (acq_order==1, from _TLT.txt) mean_defocus_um from _CTF.txt, or the
+    median defocus across all fitted frames if _TLT.txt is missing or that
+    specific frame wasn't fit.
+
+    Computed fresh from files on disk every call -- deliberately NOT
+    cached in project.json. Defocus estimates change whenever AreTomo3/
+    CTFFIND is re-run, and a project.json cache has no way to know it's
+    gone stale (this replaced an earlier project.json-cached defocus_data
+    section, removed for exactly this reason -- see CLAUDE.md and
+    imod_mtffilter.py, its only consumer). ctf_dir is normally a command's
+    own already-required --input directory (e.g. imod-mtffilter's), not a
+    separate registration step.
+
+    TS with no parseable _CTF.txt rows are silently omitted from the
+    result, not raised -- callers report as they see fit.
+    """
+    from pathlib import Path
+    ctf_dir = Path(ctf_dir)
+    per_ts = {}
+    for ctf_path in sorted(ctf_dir.glob('ts-*_CTF.txt')):
+        ts_name = ctf_path.stem[:-len('_CTF')]
+        tlt_path = ctf_dir / f'{ts_name}_TLT.txt'
+        try:
+            ctf_data = parse_ctf_file(ctf_path)
+            if not ctf_data:
+                continue
+
+            ref_sec = None
+            if tlt_path.exists():
+                tlt_data = parse_tlt_file(tlt_path)
+                ref_sec = next(
+                    (sec for sec, t in tlt_data.items() if t['acq_order'] == 1),
+                    None,
+                )
+            defocus = ctf_data[ref_sec]['mean_defocus_um'] if ref_sec in ctf_data else None
+            if defocus is None:
+                vals = sorted(f['mean_defocus_um'] for f in ctf_data.values())
+                defocus = vals[len(vals) // 2]
+
+            per_ts[ts_name] = round(defocus, 4)
+        except Exception:
+            continue
+    return per_ts
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # mdoc parsing
 # ─────────────────────────────────────────────────────────────────────────────

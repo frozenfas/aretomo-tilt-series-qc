@@ -6,8 +6,15 @@ input directory.  The filter sharpens tomograms using a CTF-based Wiener filter
 derived from the Warp deconvolution approach (Tegunov & Cramer, 2019).
 
 Defocus values are read (in order of preference) from:
-  1. ts-select.csv  (ref_defocus_um column) via --select-ts
-  2. project.json   (defocus_data section)  via: enrich --defocus-data
+  1. ts-select.csv  (ref_defocus_um column, if present) via --select-ts --
+     optional manual override; the plain ts_name/selected-only CSV a
+     user exports straight from analyse's HTML report has no such column
+     and that's fine, this source is just skipped for those TS.
+  2. --input's own ts-*_CTF.txt (+ matching ts-*_TLT.txt), read fresh every
+     run -- --input is already required, so this always works with no
+     extra setup step. Deliberately NOT cached in project.json: defocus
+     estimates change whenever AreTomo3/CTFFIND is re-run, and a cached
+     value has no way to know it's gone stale (see CLAUDE.md).
   3. --defocus       global fallback value
 
 Pixel size is read from the MRC header of each volume (correct for binning).
@@ -29,7 +36,7 @@ import shutil
 from pathlib import Path
 import argparse
 
-from aretomo3_preprocess.shared.project_state import get_defocus_data
+from aretomo3_preprocess.shared.parsers import compute_reference_defocus
 from aretomo3_preprocess.shared.output_guard import check_output_dir
 
 
@@ -42,7 +49,11 @@ def _load_tsselect(csv_path: Path):
     Load ts-select.csv.
 
     Returns (defocus_map, selected_set) where:
-      defocus_map  — {ts_name: float µm}   (entries with non-empty ref_defocus_um)
+      defocus_map  — {ts_name: float µm}   (entries with non-empty
+                      ref_defocus_um -- an optional column; the plain
+                      ts_name/selected-only CSV exported from analyse's
+                      HTML report doesn't have it, and that's fine, this
+                      dict is just empty/partial in that case)
       selected_set — set of ts_name where selected == 1
     """
     defocus_map  = {}
@@ -191,12 +202,14 @@ def run(args):
             sys.exit(1)
         defocus_map, selected_set = _load_tsselect(csv_path)
         summary.append(f'TS selection    : {len(selected_set)} selected from {csv_path.name}')
-        summary.append(f'Defocus values  : {len(defocus_map)} from ts-select.csv')
+        if defocus_map:
+            summary.append(f'Defocus values  : {len(defocus_map)} override(s) from ts-select.csv')
 
-    # project.json defocus_data as fallback
-    proj_defocus = get_defocus_data() or {}
-    if proj_defocus and not defocus_map:
-        summary.append(f'Defocus values  : {len(proj_defocus)} from project.json (defocus_data)')
+    # Fresh from --input's own ts-*_CTF.txt/_TLT.txt (always available --
+    # --input is already required, no separate registration step needed;
+    # never cached, so it can't go stale after a later AreTomo3 re-run).
+    ctf_defocus = compute_reference_defocus(in_dir)
+    summary.append(f'Defocus values  : {len(ctf_defocus)} from {in_dir.name}/*_CTF.txt')
 
     # ── Find volume files ─────────────────────────────────────────────────────
     sfx = args.vol_suffix
@@ -303,14 +316,14 @@ def run(args):
                 continue
             apix = args.apix
 
-        # Defocus: ts-select > project.json > global --defocus
+        # Defocus: ts-select override > fresh from --input's _CTF.txt > global --defocus
         defocus = (defocus_map.get(ts_name)
-                   or proj_defocus.get(ts_name)
+                   or ctf_defocus.get(ts_name)
                    or args.defocus)
         if defocus is None:
             print(f'  SKIP  {vol_path.name}: no defocus value '
-                  f'(add via --select-ts, --defocus, or: '
-                  f'enrich --defocus-data <run_dir>)')
+                  f'(no ts-*_CTF.txt for this TS in {in_dir.name}/ -- '
+                  f'add via --select-ts override or --defocus)')
             n_skip += 1
             continue
 
