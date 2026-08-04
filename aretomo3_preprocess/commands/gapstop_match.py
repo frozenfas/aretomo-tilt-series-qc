@@ -171,9 +171,18 @@ def _read_ts_metadata(aretomo_dir, prefix, dose_override=None):
         per_frame = dose_override if dose_override is not None else row['dose_e_per_A2']
         cum += per_frame
 
-    exposure_arr = np.array([
-        acq_to_prior[tlt[f['sec']]['acq_order']] for f in frames
-    ])
+    # Same guard as pytom_match.py's equivalent lookup: a SEC present in
+    # .aln but absent from _TLT.txt used to raise an uncaught KeyError here,
+    # crashing the whole batch instead of failing just this one TS like its
+    # near-twin already does (see CLAUDE.md's pytom_match.py/gapstop_match.py
+    # note -- these two have a real history of exactly this kind of drift).
+    exposure_arr = []
+    for f in frames:
+        sec = f['sec']
+        if sec not in tlt:
+            raise ValueError(f'{prefix}: no _TLT.txt entry for sec {sec}')
+        exposure_arr.append(acq_to_prior[tlt[sec]['acq_order']])
+    exposure_arr = np.array(exposure_arr)
 
     return tilt_angles, defocus_df, exposure_arr, frames
 
