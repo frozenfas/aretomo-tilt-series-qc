@@ -56,91 +56,18 @@ from aretomo3_preprocess.shared.project_state import (
 )
 from aretomo3_preprocess.shared.landing_page import write_landing_page
 from aretomo3_preprocess.shared.output_guard import check_output_dir
+from aretomo3_preprocess.shared.tilt_series_qc import (
+    score_tilt_series as _score_tilt_series,
+    select_ts as _select_ts,
+    imod_env as _imod_env,
+    sec_to_idx as _sec_to_idx,
+    good_sections as _good_sections,
+)
 
 _DEFAULT_IMOD_DIR       = '/opt/IMOD'
 _DEFAULT_CTFFIND5_BIN   = '/opt/ctffind5/cisTEM/bin/ctffind'
 _DEFAULT_CTFFIND4_BIN   = '/opt/ctffind/bin/ctffind'
 _DEFAULT_DEFOCUSGRAD_BIN = str(Path.home() / 'local' / 'cryoet-scripts' / 'defocusgrad' / 'defocusgrad')
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# TS auto-selection
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _score_tilt_series(alignment_data: dict) -> dict:
-    """
-    {ts_name: {'coverage_deg', 'high_tilt_ctf_res', 'overall_ctf_res'}} for
-    every real TS in an already-loaded alignment_data.json -- coverage is
-    the angular range of retained (non-dark) frames; CTF resolution figures
-    are mean fit_spacing_A (lower = better), 'high tilt' meaning the top
-    tercile of |tilt| for that TS specifically (not a fixed degree cutoff,
-    since different TS cover different ranges).
-    """
-    scores = {}
-    for ts_name, data in alignment_data.items():
-        frames = [f for f in data.get('frames', []) if f.get('tilt') is not None]
-        if len(frames) < 3:
-            continue
-        tilts = [f['tilt'] for f in frames]
-        coverage_deg = max(tilts) - min(tilts)
-
-        res_all = [f['fit_spacing_A'] for f in frames if f.get('fit_spacing_A') is not None]
-        if not res_all:
-            continue
-
-        abs_tilts_sorted = sorted(abs(t) for t in tilts)
-        high_tilt_cutoff = abs_tilts_sorted[int(len(abs_tilts_sorted) * 2 / 3)]
-        res_high = [f['fit_spacing_A'] for f in frames
-                    if f.get('fit_spacing_A') is not None and abs(f['tilt']) >= high_tilt_cutoff]
-
-        scores[ts_name] = {
-            'coverage_deg':      round(coverage_deg, 1),
-            'overall_ctf_res_A': round(float(np.mean(res_all)), 2),
-            'high_tilt_ctf_res_A': round(float(np.mean(res_high)), 2) if res_high else round(float(np.mean(res_all)), 2),
-        }
-    return scores
-
-
-def _select_ts(alignment_data: dict, n_ts: int, coverage_pctile: float = 75.0) -> list:
-    """
-    Pick n_ts TS: keep those with coverage >= coverage_pctile among all TS
-    (the "high tilt coverage" qualifying filter), then rank survivors by
-    high-tilt CTF resolution ascending (best first), overall CTF resolution
-    as tie-breaker. Returns a list of (ts_name, score_dict), best first.
-    """
-    scores = _score_tilt_series(alignment_data)
-    if not scores:
-        return []
-    coverages = [s['coverage_deg'] for s in scores.values()]
-    coverage_thresh = float(np.percentile(coverages, coverage_pctile))
-    survivors = [(name, s) for name, s in scores.items() if s['coverage_deg'] >= coverage_thresh]
-    survivors.sort(key=lambda t: (t[1]['high_tilt_ctf_res_A'], t[1]['overall_ctf_res_A']))
-    return survivors[:n_ts]
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Running DefocusGrad
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _imod_env(newstack_bin: str, ctffind_bin: str) -> dict:
-    """
-    Env for the defocusgrad subprocess: it shells out to `newstack`/`ctffind`
-    by bare name, so both binaries' directories need to be on PATH, and
-    IMOD_DIR needs to be set for newstack's own wrapper script to find its
-    "realbin" -- same pattern as pytom_ribo_auto.py's _resample_volume().
-
-    MPLBACKEND=Agg is also required: the defocusgrad script calls
-    plt.show() unconditionally after plt.savefig() with no backend
-    override of its own -- without this, matplotlib picks an interactive
-    backend and plt.show() hangs forever waiting for a GUI that can never
-    appear in a subprocess (confirmed: it genuinely hung, not just slow).
-    """
-    imod_dir = str(Path(newstack_bin).resolve().parent.parent)  # .../bin/newstack -> ...
-    env = dict(os.environ)
-    env['IMOD_DIR'] = os.environ.get('IMOD_DIR', imod_dir)
-    env['PATH'] = f"{Path(newstack_bin).parent}:{Path(ctffind_bin).parent}:{env.get('PATH', '')}"
-    env['MPLBACKEND'] = 'Agg'
-    return env
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -153,44 +80,10 @@ def _imod_env(newstack_bin: str, ctffind_bin: str) -> dict:
 # trim from the two ends) we build a smaller raw stack ourselves first via a
 # separate `newstack -secs` call, plus a matching trimmed .xf/.tlt, and hand
 # *that* to defocusgrad instead of the original full stack.
-
-def _sec_to_idx(sec_numbers, n_secs):
-    """1-indexed AreTomo3 SEC numbers -> 0-indexed newstack section indices
-    -- same exact convention as trim_ts.py's sections_from_sec_numbers()
-    (sec/frame_b are AreTomo3's own tilt-sorted-stack section numbers, a
-    direct index lookup, not a tilt-angle match -- see CLAUDE.md)."""
-    return sorted({s - 1 for s in sec_numbers if 0 <= s - 1 < n_secs})
-
-
-def _good_sections(ts_data: dict, min_overlap, exclude_dark: bool) -> dict:
-    """
-    0-indexed sections to keep for one TS's alignment_data.json entry,
-    after excluding dark frames (if exclude_dark) and/or frames with
-    overlap_pct below min_overlap (if given). total_frames = len(frames) +
-    len(dark_frames) always (verified against real data).
-    """
-    frames = ts_data.get('frames', [])
-    n_total = ts_data.get('total_frames') or (len(frames) + len(ts_data.get('dark_frames', [])))
-    all_idx = set(range(n_total))
-
-    dark_idx = set()
-    if exclude_dark:
-        dark_secnums = [df['frame_b'] for df in ts_data.get('dark_frames', [])]
-        dark_idx = set(_sec_to_idx(dark_secnums, n_total))
-
-    lowov_idx = set()
-    if min_overlap is not None:
-        lowov_secnums = [f['sec'] for f in frames
-                         if f.get('overlap_pct') is not None and f['overlap_pct'] < min_overlap]
-        lowov_idx = set(_sec_to_idx(lowov_secnums, n_total)) - dark_idx
-
-    return {
-        'keep_idx':  sorted(all_idx - dark_idx - lowov_idx),
-        'n_total':   n_total,
-        'n_dark':    len(dark_idx),
-        'n_low_overlap': len(lowov_idx),
-    }
-
+#
+# _score_tilt_series/_select_ts/_imod_env/_sec_to_idx/_good_sections now
+# live in shared/tilt_series_qc.py (imported above) so ctf_handedness.py can
+# reuse the exact same TS selection for apples-to-apples comparison.
 
 def _build_filtered_inputs(ts_name, st_path, xf_path, tlt_path, keep_idx,
                            work_dir, newstack_bin, env):
