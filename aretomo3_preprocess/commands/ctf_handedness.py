@@ -295,44 +295,35 @@ def _make_plot(tilts_l, def_l, tilts_r, def_r, out_path):
     mdoc's own TiltAngle (-14.02, straight from SerialEM, no AreTomo3
     involvement) exactly matches the .aln TILT column for that same frame.
 
-    Naively, the left-right defocus gradient should be zero when the
-    SPECIMEN (not the stage) is perpendicular to the beam, i.e. at nominal
-    tilt = -alpha_offset rather than at nominal tilt = 0 -- tested this
-    directly on real data (ts-136, alpha_offset=11.50 from its .aln; ts-074,
-    alpha_offset=9.30) and did NOT confirm it: the delta plot's zero-crossing
+    Naively assumed the left-right defocus gradient should be zero at
+    nominal tilt = -alpha_offset (specimen flat, treating nominal tilt = 0
+    as the raw uncompensated stage orientation) -- tested this directly on
+    real data (ts-136, alpha_offset=11.50 from its .aln; ts-074,
+    alpha_offset=9.30) and it did NOT hold: the delta plot's zero-crossing
     came out near 0 (+1.78 / -0.99) in both cases, not near -alpha_offset
-    (-11.50 / -9.30). Two things ruled out as the explanation:
-      - Not a stale/wrong alpha_offset source: alignment_data.json's own
-        alpha_offset read 0.0 for these TS at first, which looked like a
-        bug -- turned out to be real: the --analysis dir used for TS
-        selection (run001, cmd0) was processed with -TiltCor 0 (disabled,
-        confirmed in run001.log), while the --aln-dir used for .aln/.xf/.tlt
-        (run002, cmd1) used -TiltCor 1 (confirmed in run002-cmd1.log) --
-        AlphaOffset is only ever estimated when TiltCor is on, so 0.0 vs a
-        real per-TS value across those two dirs is expected, not a bug.
-      - Not an acquisition-order artifact: ts-136's acq_order 1-10 tilts
-        (-14.02, -12.01, -16.01, -18.01, -10.01, -8.01, ...) show the
-        session used a grouped dose-symmetric scheme centred near -14 deg,
-        not 0 deg -- i.e. the microscopist already dialled in an
-        approximate pretilt compensation at acquisition time, and
-        AreTomo3's per-TS AlphaOffset (9.3-14 deg here) is plausibly a
-        refined residual on top of that, not a from-scratch estimate. This
-        is consistent with AlphaOffset being a genuine milling-pretilt-type
-        correction (supports the physical model), which makes the
-        near-zero crossing more surprising, not less.
-    Leading unconfirmed hypothesis: the defocus-gradient-vs-tilt relationship
-    is sin(tilt)-shaped, not linear, and our delta zero-crossing comes from
-    a straight-line fit over a wide (~90 deg) range -- a linear fit's zero
-    intercept isn't guaranteed to land on a sin curve's true zero away from
-    the fit's centre. Not yet verified quantitatively (e.g. by fitting a
-    restricted range near the expected crossing, or fitting sin(tilt)
-    directly instead of tilt). Until this is checked, treat the crossing
-    point as unexplained, not as evidence against the alpha_offset
-    convention itself (which independent mdoc/.aln/TiltCor checks above
-    all support). The x-axis stays nominal tilt (matching what's actually
-    in the .tlt file and what -testInv itself uses, since we don't pass
-    -taOffset), labelled explicitly throughout so it's never silently
-    ambiguous which convention a reader is looking at.
+    (-11.50 / -9.30). RESOLVED (per direct confirmation from the person who
+    ran this session, not just inference from the data): the assumption was
+    wrong, not the data. The microscope stage tilt is deliberately offset
+    *before* acquisition specifically to reverse/cancel the lamella's
+    milling angle, so recorded nominal tilt = 0 is already where the
+    specimen is flat, by construction -- not the raw, uncompensated stage
+    angle. That's exactly consistent with this session's acquisition using
+    a grouped dose-symmetric scheme centred near -14 deg rather than 0 deg
+    (ts-136's acq_order 1-10 tilts: -14.02, -12.01, -16.01, -18.01, -10.01,
+    -8.01, ...) and with the -TiltCor 0-vs-1 difference between the
+    --analysis (run001, cmd0) and --aln-dir (run002, cmd1) sources used
+    while investigating this (confirmed in both run logs) -- neither a bug.
+    AreTomo3's own separately-estimated AlphaOffset (9.3-14 deg here) is
+    therefore a refinement on top of an already-good hardware compensation,
+    not "how far nominal tilt=0 is from flat" -- so it should NOT be
+    subtracted from the plotted tilt values, and the near-zero crossing is
+    the expected, correct result. The x-axis stays nominal tilt (matching
+    what's actually in the .tlt file and what -testInv itself uses, since
+    we don't pass -taOffset), labelled explicitly throughout so it's never
+    silently ambiguous which convention a reader is looking at -- but do
+    NOT read the near-zero crossing as something needing an alpha_offset
+    correction; on a dataset acquired without this microscope-side
+    compensation, the crossing point could genuinely sit away from zero.
     """
     import matplotlib
     matplotlib.use('Agg')
@@ -625,23 +616,22 @@ def _make_html(per_ts: dict, selection_scores: dict, consensus: str, out_path: P
     trend from negative (right &lt; left) to positive (right &gt; left) as
     tilt increases for RELION -1, and the opposite for RELION +1. A flatter,
     noisier delta line without a clear trend means this TS isn't giving a
-    clean signal. <b>Where it crosses zero is still an open question</b> --
-    naively it should cross at nominal tilt = -AlphaOffset (the tilt at
-    which the specimen itself, not just the stage, is flat), but tested on
-    real data this didn't hold (crossed near 0 regardless of AlphaOffset
-    being 11.5&deg;/9.3&deg; on two different TS). Ruled out as an
-    explanation: a stale/wrong AlphaOffset source (a real -TiltCor 0 vs 1
-    difference between the two source runs, not a bug) and an
-    acquisition-order artifact (this session's dose-symmetric scheme is
-    centred near -14&deg;, close to the AlphaOffset values themselves,
-    which if anything supports AlphaOffset being a genuine pretilt
-    correction). Leading unconfirmed guess: the true defocus-vs-tilt
-    relationship is sin(tilt)-shaped, and a straight-line fit's zero
-    intercept over a wide range needn't land where a sin curve actually
-    crosses zero. See ctf_handedness.py's _make_plot() docstring for the
-    full trail -- treat the crossing point itself as unexplained for now,
-    not as a check against the AlphaOffset convention (which the mdoc/.aln/
-    TiltCor checks above all otherwise support).</p>
+    clean signal. <b>Why the crossing lands near nominal tilt = 0</b> rather
+    than at -AlphaOffset (which is where you'd naively expect it, treating
+    nominal tilt = 0 as raw uncompensated stage orientation): confirmed
+    with the microscopist that this session's stage tilt was deliberately
+    offset <i>before</i> acquisition to reverse/cancel the lamella's
+    milling angle, so recorded nominal tilt = 0 is already the specimen-flat
+    point by construction -- consistent with the acquisition's dose-
+    symmetric scheme being centred near -14&deg; rather than 0&deg; here.
+    AreTomo3's own separately-estimated AlphaOffset (9.3&deg;/11.5&deg; on
+    two TS) is therefore a refinement on top of that hardware compensation,
+    not "distance from nominal tilt=0 to flat" -- so it should NOT be
+    subtracted from the tilt values plotted here. On a dataset acquired
+    <i>without</i> this microscope-side pretilt compensation, the crossing
+    point could genuinely sit away from zero -- see
+    <code>ctf_handedness.py</code>'s <code>_make_plot()</code> docstring for
+    the full investigation trail.</p>
   </div>"""
     html_out = f"""<!DOCTYPE html>
 <html lang="en">
