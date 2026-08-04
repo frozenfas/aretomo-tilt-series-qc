@@ -301,29 +301,28 @@ def _make_plot(tilts_l, def_l, tilts_r, def_r, out_path):
     real data (ts-136, alpha_offset=11.50 from its .aln; ts-074,
     alpha_offset=9.30) and it did NOT hold: the delta plot's zero-crossing
     came out near 0 (+1.78 / -0.99) in both cases, not near -alpha_offset
-    (-11.50 / -9.30). RESOLVED (per direct confirmation from the person who
-    ran this session, not just inference from the data): the assumption was
-    wrong, not the data. The microscope stage tilt is deliberately offset
-    *before* acquisition specifically to reverse/cancel the lamella's
-    milling angle, so recorded nominal tilt = 0 is already where the
-    specimen is flat, by construction -- not the raw, uncompensated stage
-    angle. That's exactly consistent with this session's acquisition using
-    a grouped dose-symmetric scheme centred near -14 deg rather than 0 deg
-    (ts-136's acq_order 1-10 tilts: -14.02, -12.01, -16.01, -18.01, -10.01,
-    -8.01, ...) and with the -TiltCor 0-vs-1 difference between the
-    --analysis (run001, cmd0) and --aln-dir (run002, cmd1) sources used
-    while investigating this (confirmed in both run logs) -- neither a bug.
-    AreTomo3's own separately-estimated AlphaOffset (9.3-14 deg here) is
-    therefore a refinement on top of an already-good hardware compensation,
-    not "how far nominal tilt=0 is from flat" -- so it should NOT be
-    subtracted from the plotted tilt values, and the near-zero crossing is
-    the expected, correct result. The x-axis stays nominal tilt (matching
-    what's actually in the .tlt file and what -testInv itself uses, since
-    we don't pass -taOffset), labelled explicitly throughout so it's never
-    silently ambiguous which convention a reader is looking at -- but do
-    NOT read the near-zero crossing as something needing an alpha_offset
-    correction; on a dataset acquired without this microscope-side
-    compensation, the crossing point could genuinely sit away from zero.
+    (-11.50 / -9.30). STILL AN OPEN QUESTION -- confirmed with the person
+    who ran this session that the acquisition scheme being centred near
+    -14 deg (not 0 deg; ts-136's acq_order 1-10 tilts: -14.02, -12.01,
+    -16.01, -18.01, -10.01, -8.01, ...) is a SerialEM acquisition-scheme
+    parameter only (which angle the dose-symmetric scan starts/centres at)
+    -- it does NOT physically move or recalibrate the stage, so recorded
+    TiltAngle/.aln TILT values are still genuinely raw, uncompensated stage
+    tilt, not specimen-referenced. That means the naive expectation
+    (specimen flat near nominal tilt = -alpha_offset, i.e. near -9 to -14
+    deg for these TS) should still apply in principle, and the near-zero
+    crossing remains unexplained. Ruled out separately (real findings, kept
+    for reference, neither is the explanation): a stale/wrong alpha_offset
+    source (--analysis was -TiltCor 0, --aln-dir was -TiltCor 1 -- confirmed
+    in both run logs, expected given TiltCor is only estimated when on, not
+    a bug); and .tlt/.aln not matching mdoc (they do -- ts-136's
+    first-acquired frame's mdoc TiltAngle, -14.02, exactly matches its .aln
+    TILT column, confirming .tlt/.aln really is raw nominal). The x-axis
+    stays nominal tilt throughout (matching what's actually in the .tlt
+    file and what -testInv itself uses, since we don't pass -taOffset),
+    labelled explicitly so it's never silently ambiguous which convention a
+    reader is looking at -- but the crossing point itself should be read as
+    unexplained, not as confirmation that alpha_offset can be ignored.
     """
     import matplotlib
     matplotlib.use('Agg')
@@ -616,22 +615,22 @@ def _make_html(per_ts: dict, selection_scores: dict, consensus: str, out_path: P
     trend from negative (right &lt; left) to positive (right &gt; left) as
     tilt increases for RELION -1, and the opposite for RELION +1. A flatter,
     noisier delta line without a clear trend means this TS isn't giving a
-    clean signal. <b>Why the crossing lands near nominal tilt = 0</b> rather
-    than at -AlphaOffset (which is where you'd naively expect it, treating
-    nominal tilt = 0 as raw uncompensated stage orientation): confirmed
-    with the microscopist that this session's stage tilt was deliberately
-    offset <i>before</i> acquisition to reverse/cancel the lamella's
-    milling angle, so recorded nominal tilt = 0 is already the specimen-flat
-    point by construction -- consistent with the acquisition's dose-
-    symmetric scheme being centred near -14&deg; rather than 0&deg; here.
-    AreTomo3's own separately-estimated AlphaOffset (9.3&deg;/11.5&deg; on
-    two TS) is therefore a refinement on top of that hardware compensation,
-    not "distance from nominal tilt=0 to flat" -- so it should NOT be
-    subtracted from the tilt values plotted here. On a dataset acquired
-    <i>without</i> this microscope-side pretilt compensation, the crossing
-    point could genuinely sit away from zero -- see
+    clean signal. <b>Where it crosses zero is still an open question</b> --
+    naively it should cross at nominal tilt = -AlphaOffset (the tilt at
+    which the specimen itself, not just the stage, is flat), but tested on
+    real data this didn't hold (crossed near 0 regardless of AlphaOffset
+    being 11.5&deg;/9.3&deg; on two different TS). This session's
+    acquisition scheme is centred near -14&deg; rather than 0&deg;, but
+    that's a SerialEM scheme parameter only (which angle the scan starts/
+    centres at) -- it does not move or recalibrate the stage, so recorded
+    TiltAngle/.aln TILT values are still raw, uncompensated stage tilt, and
+    the naive expectation should still apply in principle. Also ruled out:
+    a stale/wrong AlphaOffset source (a real -TiltCor 0 vs 1 difference
+    between the two source runs, not a bug) and .tlt/.aln not matching
+    mdoc (it does -- independently confirmed). See
     <code>ctf_handedness.py</code>'s <code>_make_plot()</code> docstring for
-    the full investigation trail.</p>
+    the full investigation trail -- treat the crossing point as unexplained
+    for now, not as confirmation that AlphaOffset can be ignored here.</p>
   </div>"""
     html_out = f"""<!DOCTYPE html>
 <html lang="en">
