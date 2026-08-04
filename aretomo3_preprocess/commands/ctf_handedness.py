@@ -1,8 +1,7 @@
 """
 ctf-handedness — automated defocus-handedness QC via IMOD ctfplotter -testInv.
 
-A second, independent cross-check for the same question defocusgrad.py
-answers (the rlnTomoHand ±1 convention relion5-convert needs): IMOD's own
+Determines the rlnTomoHand ±1 convention relion5-convert needs: IMOD's own
 ctfplotter has a purpose-built test for this, `-testInv`, documented in
 Xiong et al. 2009 J. Struct. Biol. and the ctfplotter man page. It measures
 the defocus difference between the left/right sides of the (raw, unaligned)
@@ -16,26 +15,26 @@ means they need inverting, x=0 is ambiguous. ratio is bigger/smaller
 left-right defocus difference; the program's own criterion for a "clear"
 result is ratio >= 2.5.
 
-Mapping to DefocusGrad's ±1 convention (verified against both tools' own
-docs, not assumed): DefocusGrad's own script prints "LEFT side should have
-DECREASING defocus towards positive tilt (negative slope), RIGHT side
-INCREASING (positive slope) -> RELION -1; opposite -> +1." The IMOD manual
-says "At positive tilt angles, the right side should be more underfocused
-than the left side" when x=1 (no inversion needed) -- i.e. right increasing
-/ left decreasing, the same pattern DefocusGrad calls -1. So:
-    ctfplotter x=+1  <->  DefocusGrad/RELION -1
-    ctfplotter x=-1  <->  DefocusGrad/RELION +1
+Mapping ctfplotter's x to the RELION ±1 convention (derived from IMOD's own
+docs, not assumed): the IMOD manual says "At positive tilt angles, the
+right side should be more underfocused than the left side" when x=1 (no
+inversion needed) -- i.e. right increasing / left decreasing defocus with
+tilt. Cross-referenced against the DefocusGrad tool's (CellArchLab/
+cryoet-scripts) own published convention -- "LEFT side DECREASING defocus
+towards positive tilt, RIGHT side INCREASING -> RELION -1; opposite -> +1"
+-- the same physical pattern, giving:
+    ctfplotter x=+1  <->  RELION -1
+    ctfplotter x=-1  <->  RELION +1
     ctfplotter x=0   <->  inconclusive
-_polarity_to_relion() below encodes this so the report shows the same ±1
-number DefocusGrad would, not raw ctfplotter output that would look like a
-disagreement even when the two tools actually agree.
+_polarity_to_relion() below encodes this so the report always shows the
+RELION-convention number, not raw ctfplotter output.
 
 ctfplotter -testInv itself doesn't persist a plottable per-tilt defocus
 curve (it prints a result and exits). To get a DefocusGrad-style plot
-(defocus vs tilt, left=blue/right=orange) for visual cross-checking, this
-command optionally (on by default, --skip-plots to disable) builds the same
-left/right aligned half-stacks DefocusGrad's own script builds (newstack
--xform/-offset/-bin, tilt axis vertical after alignment) and runs
+(defocus vs tilt, left=blue/right=orange) for visual inspection, this
+command optionally (on by default, --skip-plots to disable) builds
+left/right aligned half-stacks the same way DefocusGrad's own script does
+(newstack -xform/-offset/-bin, tilt axis vertical after alignment) and runs
 `ctfplotter -autoFit 0,0` (per-view fit) on each half separately, using a
 -scan range centered on this TS's own already-known mean_defocus_um from
 alignment_data.json rather than a blind wide default -- verified this
@@ -47,14 +46,10 @@ gave clean fits (error ~0.006) tracking the known range exactly.
 Confirmed via a real subprocess test that the installed /opt/IMOD/bin/
 ctfplotter (a full Qt build, not the "standalone no-Qt" build the manual
 describes) runs correctly non-interactively with QT_QPA_PLATFORM=offscreen
-and no $DISPLAY -- exits 0, no hang, no GUI required. This was the direct,
-unverified risk flagged before implementing (an exact precedent to
-DefocusGrad's own plt.show() hang) -- confirmed safe before relying on it.
-
-Reuses the exact same TS auto-selection as defocusgrad.py (shared/
-tilt_series_qc.py) so both commands judge the same tilt series -- that's
-what makes "run both" an apples-to-apples cross-validation rather than two
-different samples of the dataset.
+and no $DISPLAY -- exits 0, no hang, no GUI required. This was a direct,
+unverified risk before implementing (an exact precedent to DefocusGrad's
+own plt.show()-hang bug encountered while evaluating that tool) --
+confirmed safe before relying on it.
 
 Example
 -------
@@ -119,6 +114,21 @@ def _scan_range_nm(ts_data: dict, pad_um: float):
     lo = max(200.0, (center_um - pad_um) * 1000.0)
     hi = (center_um + pad_um) * 1000.0
     return lo, hi, center_um
+
+
+def _relion_verdict_line(parsed: dict) -> str:
+    """Human-readable "Import into RELION using ... handedness" sentence,
+    matching DefocusGrad's own CONCLUSION-line phrasing (that's the
+    established convention users of this pipeline already recognise) --
+    derived from ctfplotter's x/ratio via _POLARITY_TO_RELION, not printed
+    by ctfplotter itself."""
+    h, ratio = parsed.get('relion_handedness'), parsed.get('ratio')
+    if h is None:
+        return 'Could not determine tilt handedness from ctfplotter output.'
+    if not parsed.get('clear'):
+        return (f'Result not clear enough (ratio {ratio} < {_CLEAR_RATIO}) -- '
+                f'best guess is {h:+d} but treat with caution.')
+    return f'Import into RELION using {h:+d} tilt handedness.  (ratio {ratio})'
 
 
 def _parse_testinv_stdout(text: str) -> dict:
@@ -298,10 +308,11 @@ def _run_one_ts(ts_name, st_path, xf_path, tlt_path, out_dir, args,
         ret, cmd = _run_testinv(ctfplotter_bin, st_path, tlt_path, aangle, apix_A,
                                  scan_lo, scan_hi, ts_out, env, args.kv, args.cs,
                                  args.amp_contrast, args.timeout)
-        (ts_out / 'testinv.log').write_text(
-            'CMD: ' + ' '.join(cmd) + '\n\n--- stdout ---\n' + ret.stdout + '\n--- stderr ---\n' + ret.stderr)
         parsed = _parse_testinv_stdout(ret.stdout)
         result.update(parsed)
+        (ts_out / 'testinv.log').write_text(
+            'CMD: ' + ' '.join(cmd) + '\n\n--- stdout ---\n' + ret.stdout + '\n--- stderr ---\n' + ret.stderr
+            + '\n--- CONCLUSION ---\n' + _relion_verdict_line(parsed) + '\n')
         if parsed['polarity_x'] is None:
             result['status'] = 'warn'
             result['error'] = 'could not parse "Angle polarity needed" line from ctfplotter stdout'
@@ -380,6 +391,7 @@ def _make_html(per_ts: dict, selection_scores: dict, consensus: str, out_path: P
             badge_cls, badge_txt = 'warn', f'{h:+d} (not clear, ratio {r.get("ratio")})'
         else:
             badge_cls, badge_txt = 'ok', f'{h:+d}  (ratio {r.get("ratio")})'
+        verdict_line = _relion_verdict_line(r) if status == 'ok' else ''
 
         plot_html = ''
         if r.get('plot_path'):
@@ -405,6 +417,7 @@ def _make_html(per_ts: dict, selection_scores: dict, consensus: str, out_path: P
         cards.append(f"""
       <div class="card">
         <div class="card-title">{_esc(ts_name)} <span class="badge {badge_cls}">{badge_txt}</span></div>
+        {f'<div class="note">{_esc(verdict_line)}</div>' if verdict_line else ''}
         <div class="note">coverage {sel.get('coverage_deg', '?')}&deg; &middot; high-tilt CTF res
           {sel.get('high_tilt_ctf_res_A', '?')}&Aring; &middot; known defocus
           {r.get('known_mean_defocus_um', '?')}&micro;m &middot; aAngle {r.get('aangle_deg', '?')}&deg;</div>
@@ -574,8 +587,7 @@ def run(args):
             r = fut.result()
             per_ts[ts_name] = r
             if r.get('status') == 'ok' and r.get('relion_handedness') is not None:
-                clear_note = '' if r.get('clear') else ' (not clear)'
-                print(f'{ts_name}: {r["relion_handedness"]:+d}{clear_note}  ratio={r.get("ratio")}')
+                print(f'{ts_name}: {_relion_verdict_line(r)}')
             else:
                 print(f'{ts_name}: {r.get("status")} — {r.get("error")}')
 

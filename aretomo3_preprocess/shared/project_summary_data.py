@@ -120,7 +120,6 @@ def gather(proj: dict) -> dict:
     }
 
     d['handedness'] = proj.get('handedness')
-    d['defocusgrad'] = proj.get('defocusgrad')
     d['ctf_handedness'] = proj.get('ctf_handedness')
     lamellae = proj.get('lamella_assignments', {})
     d['lamellae'] = None
@@ -250,25 +249,15 @@ def render_html(proj: dict) -> str:
     else:
         rows.append(_html_row('physical (mirror) handedness',
                               '<span class="ps-dim">not determined yet (pytom-ribo-auto --check-handedness)</span>'))
-    dg = d['defocusgrad']
-    if dg:
-        consensus = dg.get('consensus', '?')
-        cls = 'ps-warn' if 'inconsist' in str(consensus) or 'inconclus' in str(consensus) else 'ps-good'
-        n_ts = len(dg.get('per_ts', {}))
-        rows.append(_html_row('defocus handedness', f'<span class="{cls}">{_e(consensus)}</span>',
-                              note=f'defocusgrad, {n_ts} TS'))
-    else:
-        rows.append(_html_row('defocus handedness',
-                              '<span class="ps-dim">not checked yet (defocusgrad)</span>'))
     ch = d['ctf_handedness']
     if ch:
         consensus = ch.get('consensus', '?')
         cls = 'ps-warn' if 'inconsist' in str(consensus) or 'inconclus' in str(consensus) else 'ps-good'
         n_ts = len(ch.get('per_ts', {}))
-        rows.append(_html_row('defocus handedness (ctfplotter)', f'<span class="{cls}">{_e(consensus)}</span>',
+        rows.append(_html_row('defocus handedness (RELION convention)', f'<span class="{cls}">{_e(consensus)}</span>',
                               note=f'ctf-handedness, {n_ts} TS'))
     else:
-        rows.append(_html_row('defocus handedness (ctfplotter)',
+        rows.append(_html_row('defocus handedness (RELION convention)',
                               '<span class="ps-dim">not checked yet (ctf-handedness)</span>'))
     if d['lamellae']:
         n_lam, n_ts_assigned = d['lamellae']

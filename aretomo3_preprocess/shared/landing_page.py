@@ -28,8 +28,7 @@ _KIND_LABEL = {
     'aretomo_analyse':  ('AreTomo3 analysis',  '📊'),
     'pytom_match':      ('Pytom picking',      '🧬'),
     'gapstop_match':    ('Gapstop picking',    '🧬'),
-    'defocusgrad':      ('Defocus handedness', '🧭'),
-    'ctf_handedness':   ('CTF handedness (ctfplotter)', '🧭'),
+    'ctf_handedness':   ('Defocus handedness (ctfplotter)', '🧭'),
 }
 
 # Report file(s) each kind links to, relative to that run's own output_dir --
@@ -41,7 +40,6 @@ _KIND_FILES = {
                         ('Picks (interactive)',      'pytom_extract_qc_dev.html')],
     'gapstop_match':   [('Match QC (raw score map)', 'gapstop_match_qc.html'),
                         ('Picks (interactive)',      'gapstop_extract_qc_dev.html')],
-    'defocusgrad':     [('Report', 'index.html')],
     'ctf_handedness':  [('Report', 'index.html')],
 }
 
