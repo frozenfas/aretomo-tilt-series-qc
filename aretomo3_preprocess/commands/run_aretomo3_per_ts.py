@@ -229,9 +229,10 @@ def add_parser(subparsers):
                           '(_Vol _CTF _EVN _ODD). Pass an empty string to '
                           'disable, or add extra patterns e.g. ts-005')
     inp.add_argument('--select-ts', default=None, metavar='CSV',
-                     help='Path to ts_selection.csv from select-ts; only '
+                     help='Path to ts-select.csv from select-ts; only '
                           'selected TS are processed. '
-                          'Auto-loaded from project.json if omitted.')
+                          'Omitted = process every TS found (never '
+                          'auto-loaded from a prior select-ts run).')
 
     mic = p.add_argument_group('microscope / acquisition')
     mic.add_argument('--kv',           type=float, default=300.0,

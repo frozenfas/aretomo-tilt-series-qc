@@ -54,7 +54,15 @@ def _load_tsselect(csv_path: Path):
                       ts_name/selected-only CSV exported from analyse's
                       HTML report doesn't have it, and that's fine, this
                       dict is just empty/partial in that case)
-      selected_set — set of ts_name where selected == 1
+      selected_set — set of ts_name where selected == 1, or None if the
+                      CSV had zero such rows (stale file, wrong path,
+                      missing 'selected' column) -- matches
+                      shared/project_state.py:resolve_selected_ts()'s
+                      convention exactly (None = no filter, process
+                      everything), rather than an empty set, which the
+                      caller's own filter would otherwise read as "filter
+                      out every TS". This file used to diverge from that
+                      shared convention with its own hand-rolled loader.
     """
     defocus_map  = {}
     selected_set = set()
@@ -71,7 +79,7 @@ def _load_tsselect(csv_path: Path):
                     defocus_map[ts] = float(val)
                 except ValueError:
                     pass
-    return defocus_map, selected_set
+    return defocus_map, (selected_set or None)
 
 
 def _read_one_voxel_size(mrc_path: Path):
@@ -201,7 +209,9 @@ def run(args):
             print(f'ERROR: --select-ts {csv_path} not found')
             sys.exit(1)
         defocus_map, selected_set = _load_tsselect(csv_path)
-        summary.append(f'TS selection    : {len(selected_set)} selected from {csv_path.name}')
+        n_selected = len(selected_set) if selected_set is not None else 0
+        summary.append(f'TS selection    : {n_selected} selected from {csv_path.name}'
+                        + ('' if selected_set is not None else '  (0 selected rows -- processing all TS, not none)'))
         if defocus_map:
             summary.append(f'Defocus values  : {len(defocus_map)} override(s) from ts-select.csv')
 

@@ -1605,9 +1605,10 @@ def add_parser(subparsers):
                           '(-InSkips). Default excludes AreTomo3 side outputs. '
                           'Pass an empty string to disable.')
     inp.add_argument('--select-ts', default=None, metavar='CSV',
-                     help='Path to ts_selection.csv from select-ts; only the '
+                     help='Path to ts-select.csv from select-ts; only the '
                           'selected TS are staged for cmd=1/2 runs. '
-                          'Auto-loaded from project.json if omitted.')
+                          'Omitted = process every TS found (never '
+                          'auto-loaded from a prior select-ts run).')
     inp.add_argument('--serial', type=int, default=1,
                      help='Seconds to wait for the next tilt series; '
                           '1=offline batch (default); 0=do not wait '

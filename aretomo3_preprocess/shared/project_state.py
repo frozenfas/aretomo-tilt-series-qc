@@ -266,7 +266,14 @@ def get_gain_check_dir() -> Optional[Path]:
 
 def resolve_selected_ts(csv_path: Optional[str] = None) -> Optional[Set[str]]:
     """
-    Load the TS selection set from a ts_selection.csv file.
+    Load the TS selection set from a ts-select.csv file.
+
+    Deliberately never auto-loads a previously-recorded selection --
+    omitting --select-ts always means "process every TS found", with no
+    implicit dependency on an earlier, possibly-forgotten select-ts run
+    (e.g. a small test subset from weeks ago silently limiting a full
+    production run). Selection only ever applies when --select-ts is
+    passed explicitly.
 
     Returns the set of selected TS names (selected==1), or None if
     csv_path is None or the file cannot be read.
