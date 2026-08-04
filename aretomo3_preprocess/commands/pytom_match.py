@@ -256,13 +256,18 @@ def _read_ts_metadata(aretomo_dir, prefix, dose_override=None):
     if not frames:
         raise ValueError(f'{prefix}: no aligned frames in .aln')
 
-    # Tilt angles: the .aln TILT column is always the nominal (uncorrected)
-    # stage tilt -- AreTomo3 never bakes AlphaOffset into it, whether it came
-    # from -TiltCor's automatic estimate or was set via aln-edit.  Apply it
-    # here to get the specimen-referenced tilt (same convention as
-    # relion5_convert.py).
-    alpha_offset = aln.get('alpha_offset') or 0.0
-    tlt_out = [f['tilt'] + alpha_offset for f in frames]
+    # Tilt angles: the .aln TILT column already IS the specimen-referenced
+    # tilt when AreTomo3 was run with -TiltCor enabled (confirmed directly,
+    # dataset-wide: comparing the same TS processed with -TiltCor 0 vs 1,
+    # every TILT value in the TiltCor=1 .aln is shifted from the TiltCor=0
+    # (raw nominal, matches the source mdoc exactly) value by precisely
+    # that TS's own AlphaOffset -- see CLAUDE.md's alpha_offset convention
+    # section). AlphaOffset is only genuinely un-applied when TiltCor was
+    # off (in which case it's 0.0 anyway) or after aln-edit (which now also
+    # bakes its offset into TILT, matching AreTomo3's own behaviour) -- so
+    # the TILT column should always be used directly, never with a further
+    # alpha_offset addition on top.
+    tlt_out = [f['tilt'] for f in frames]
 
     # Defocus from _CTF.txt (optional)
     defocus_out = None

@@ -318,19 +318,25 @@ def _process_ts(ts_name: str, input_dir: Path, cmd0_dir: Path, imod_dir: Path,
         return None
 
     # alpha_offset: systematic tilt correction, either -TiltCor's automatic
-    # per-TS estimate or set by hand via aln-edit.  AreTomo3 never bakes this
-    # into the TILT column (.aln or _st.tlt) -- both always hold the nominal,
-    # uncorrected stage tilt -- so it must be applied explicitly here to get
-    # the specimen-referenced tilt used for reconstruction.
+    # per-TS estimate or set by hand via aln-edit. Confirmed dataset-wide
+    # (see CLAUDE.md's alpha_offset convention section) that when TiltCor is
+    # on, AreTomo3 bakes this correction directly into BOTH the .aln TILT
+    # column and the IMOD _st.tlt file it derives from it -- itlt_list below
+    # (IMOD's own, preferred per this codebase's "prefer IMOD-format files"
+    # design principle) is therefore already specimen-referenced and must
+    # NOT have alpha_offset added again. Only the fallback path -- AreTomo3's
+    # own _TLT.txt nominal_tilt, always raw regardless of TiltCor, used only
+    # if itlt_list is unexpectedly short -- still needs it added explicitly.
     alpha_offset = aln_data.get('alpha_offset') or 0.0
     if alpha_offset != 0.0:
-        print(f'  alpha_offset = {alpha_offset:+.2f}° (from .aln) → applied to rlnTomoYTilt')
+        print(f'  alpha_offset = {alpha_offset:+.2f}° (from .aln) -- already baked into '
+              f'IMOD _st.tlt, only added to the _TLT.txt fallback path if used')
 
     # Warn if .aln was manually edited (backup exists)
     if (aln_path.parent / f'{aln_path.name}.bak').exists():
         print(f'  WARNING: {aln_path.name}.bak found — .aln appears to have been '
-              f'manually edited (e.g. via aln-edit).  alpha_offset={alpha_offset:+.2f}° '
-              f'will be applied to rlnTomoYTilt.')
+              f'manually edited (e.g. via aln-edit); aln-edit now bakes its offset '
+              f'into IMOD _st.tlt too, so no special handling needed here.')
 
     n_tilts = len(tlt_data)
 
@@ -367,7 +373,7 @@ def _process_ts(ts_name: str, input_dir: Path, cmd0_dir: Path, imod_dir: Path,
         xf_idx    = tlt_row_idx - 1
         xf_entry  = xf_list[xf_idx] if xf_idx < len(xf_list) else {}
         y_tilt    = (itlt_list[xf_idx] if xf_idx < len(itlt_list)
-                     else tlt_entry['nominal_tilt']) + alpha_offset
+                     else tlt_entry['nominal_tilt'] + alpha_offset)
         pre_exp   = prior_dose_map.get(acq_order, 0.0)
 
         tilts_dir = output_dir / 'tilts'

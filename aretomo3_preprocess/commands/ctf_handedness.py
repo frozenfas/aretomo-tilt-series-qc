@@ -89,6 +89,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 import mrcfile
 
+from aretomo3_preprocess.shared.parsers import parse_aln_file
 from aretomo3_preprocess.shared.project_json import load as load_project, update_section, args_to_dict
 from aretomo3_preprocess.shared.project_state import (
     get_latest_analysis_dir, get_cmd0_outdir, get_run_params,
@@ -186,15 +187,14 @@ def _parse_testinv_stdout(text: str) -> dict:
 
 def _run_testinv(ctfplotter_bin, st_path, tlt_path, aangle, apix_A, scan_lo, scan_hi,
                   work_dir, env, kv, cs, ac, timeout):
-    # tlt_path (-angleFn) is the IMOD-format .tlt file from _Imod/ -- this is
-    # the raw NOMINAL (stage) tilt, NOT alpha-offset/specimen-corrected: its
-    # values are identical to the .aln file's own raw TILT column (verified
-    # directly, e.g. ts-136 both start at -48.50), and CLAUDE.md documents
-    # that AreTomo3 never bakes AlphaOffset into .aln/_st.tlt -- it's always
-    # a separate header-only value. We don't pass -taOffset (ctfplotter's
-    # own alpha-offset-equivalent option) here, so ctfplotter also treats
-    # this as nominal for its own fitting. See module docstring for why this
-    # matters and what's still an open question.
+    # tlt_path (-angleFn) is the IMOD-format .tlt file from _Imod/ -- its
+    # values are identical to the .aln file's own TILT column (verified
+    # directly). Whether that's raw nominal or already alpha-offset-
+    # corrected depends on the source run's -TiltCor setting (confirmed
+    # dataset-wide -- see CLAUDE.md's alpha_offset convention section and
+    # _make_plot()'s docstring); the caller passes source_alpha_offset
+    # through so results/plots can be labelled correctly either way. We
+    # never add anything to it ourselves -- used exactly as-is.
     cmd = [
         ctfplotter_bin, '-volt', f'{kv:g}', '-cs', f'{cs:g}', '-ampContrast', f'{ac:g}',
         '-input', str(st_path), '-angleFn', str(tlt_path), '-aAngle', str(aangle),
@@ -234,12 +234,8 @@ def _build_half_stacks(st_path, xf_path, work_dir, newstack_bin, env, bin_factor
 
 def _run_side_autofit(ctfplotter_bin, half_path, tlt_path, apix_A, bin_factor,
                        scan_lo, scan_hi, work_dir, env, kv, cs, ac, side, timeout):
-    # Same tlt_path (nominal tilt, see _run_testinv above) as -angleFn here.
-    # The tilt values this function returns (parsed from the .defocus
-    # file's own angle columns below) are therefore also nominal -- ctfplotter's
-    # own -taOffset doc confirms an offset "does not affect the tilt angles
-    # shown ... or saved to the defocus file" even when it IS passed, so
-    # this would stay nominal either way.
+    # Same tlt_path as -angleFn here, see _run_testinv above for what its
+    # values actually are (depends on the source run's -TiltCor setting).
     def_path = work_dir / f'{side}.defocus'
     cmd = [
         ctfplotter_bin, '-volt', f'{kv:g}', '-cs', f'{cs:g}', '-ampContrast', f'{ac:g}',
@@ -269,7 +265,7 @@ def _run_side_autofit(ctfplotter_bin, half_path, tlt_path, apix_A, bin_factor,
     return np.array(tilts), np.array(defocus_A)
 
 
-def _make_plot(tilts_l, def_l, tilts_r, def_r, out_path):
+def _make_plot(tilts_l, def_l, tilts_r, def_r, out_path, tilt_is_corrected):
     """
     Top panel: DefocusGrad-style left/right defocus vs tilt, as before.
     Bottom panel: delta = right - left at matching tilts (same underlying
@@ -284,51 +280,39 @@ def _make_plot(tilts_l, def_l, tilts_r, def_r, out_path):
     read as same-sign ("inconclusive") even when the delta and -testInv
     both agree on a clear handedness.
 
-    NOMINAL vs ALPHA-OFFSET-CORRECTED TILT -- read before changing the x-axis.
-    tilts_l/tilts_r (and everything plotted against them) are raw NOMINAL
-    (stage) tilt, not the specimen-referenced angle CLAUDE.md's alpha_offset
-    convention describes for other consumers (relion5_convert.py etc: add
-    it explicitly to get specimen-referenced tilt). We do NOT add it here.
+    NOMINAL vs ALPHA-OFFSET-CORRECTED TILT -- resolved, read before changing
+    this. tilts_l/tilts_r come straight from tlt_path (the IMOD _st.tlt
+    file), and whether THAT is raw nominal or already specimen-referenced
+    depends entirely on how the source AreTomo3 run was processed:
+    confirmed dataset-wide (172/172 TS of a real project, comparing the
+    same TS processed with -TiltCor 0 vs -TiltCor 1) that -TiltCor 1 bakes
+    AlphaOffset directly into both the .aln TILT column and the IMOD
+    _st.tlt derived from it -- every TILT value in the TiltCor=1 run was
+    shifted from the TiltCor=0 run (itself confirmed to match the source
+    mdoc's raw TiltAngle exactly) by precisely that TS's own AlphaOffset.
+    See CLAUDE.md's alpha_offset convention section for the full test.
+    tilt_is_corrected (source_alpha_offset != 0.0, read from aln_dir's own
+    .aln -- NOT --analysis's alignment_data.json, which can be a different
+    run processed differently) says which case applies for THIS plot, and
+    the x-axis label reflects it accordingly. We never add alpha_offset
+    ourselves either way -- the tlt_path value is used exactly as-is.
 
-    Confirmed independently that .tlt/.aln really is nominal, not something
-    AreTomo3-modified: for ts-136's first-acquired frame (mdoc ZValue=0),
-    mdoc's own TiltAngle (-14.02, straight from SerialEM, no AreTomo3
-    involvement) exactly matches the .aln TILT column for that same frame.
-
-    Naively assumed the left-right defocus gradient should be zero at
-    nominal tilt = -alpha_offset (specimen flat, treating nominal tilt = 0
-    as the raw uncompensated stage orientation) -- tested this directly on
-    real data (ts-136, alpha_offset=11.50 from its .aln; ts-074,
-    alpha_offset=9.30) and it did NOT hold: the delta plot's zero-crossing
-    came out near 0 (+1.78 / -0.99) in both cases, not near -alpha_offset
-    (-11.50 / -9.30). STILL AN OPEN QUESTION -- confirmed with the person
-    who ran this session that the acquisition scheme being centred near
-    -14 deg (not 0 deg; ts-136's acq_order 1-10 tilts: -14.02, -12.01,
-    -16.01, -18.01, -10.01, -8.01, ...) is a SerialEM acquisition-scheme
-    parameter only (which angle the dose-symmetric scan starts/centres at)
-    -- it does NOT physically move or recalibrate the stage, so recorded
-    TiltAngle/.aln TILT values are still genuinely raw, uncompensated stage
-    tilt, not specimen-referenced. That means the naive expectation
-    (specimen flat near nominal tilt = -alpha_offset, i.e. near -9 to -14
-    deg for these TS) should still apply in principle, and the near-zero
-    crossing remains unexplained. Ruled out separately (real findings, kept
-    for reference, neither is the explanation): a stale/wrong alpha_offset
-    source (--analysis was -TiltCor 0, --aln-dir was -TiltCor 1 -- confirmed
-    in both run logs, expected given TiltCor is only estimated when on, not
-    a bug); and .tlt/.aln not matching mdoc (they do -- ts-136's
-    first-acquired frame's mdoc TiltAngle, -14.02, exactly matches its .aln
-    TILT column, confirming .tlt/.aln really is raw nominal). The x-axis
-    stays nominal tilt throughout (matching what's actually in the .tlt
-    file and what -testInv itself uses, since we don't pass -taOffset),
-    labelled explicitly so it's never silently ambiguous which convention a
-    reader is looking at -- but the crossing point itself should be read as
-    unexplained, not as confirmation that alpha_offset can be ignored.
+    This also resolves what was an open question during development: on
+    the real data used above (ts-136, ts-074), the delta plot's zero-
+    crossing landed near nominal tilt = 0 rather than near -AlphaOffset,
+    which was confusing until this was understood -- the .tlt file used
+    (from a -TiltCor 1 run) was already specimen-referenced, so 0 WAS the
+    correct place for it to cross. A raw-nominal .tlt (-TiltCor 0) would be
+    expected to cross nearer -AlphaOffset instead.
     """
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(6, 7.5))
+    tilt_axis_label = ('Tilt angle (deg) -- alpha-offset corrected (-TiltCor baked in)'
+                        if tilt_is_corrected else
+                        'Nominal tilt angle (deg) -- not alpha-offset-corrected')
 
     slope_l = slope_r = None
     if len(tilts_l) >= 2:
@@ -341,7 +325,7 @@ def _make_plot(tilts_l, def_l, tilts_r, def_r, out_path):
         ax1.scatter(tilts_r, def_r, color='orange', label='Defocus right-side', s=18)
         xs = np.linspace(tilts_r.min(), tilts_r.max(), 50)
         ax1.plot(xs, slope_r * xs + intercept_r, '--', color='orange', label='Linear fit right-side')
-    ax1.set_xlabel('Nominal tilt angle (deg) -- not alpha-offset-corrected')
+    ax1.set_xlabel(tilt_axis_label)
     ax1.set_ylabel('Defocus (A)')
     ax1.legend(fontsize=8)
 
@@ -378,7 +362,7 @@ def _make_plot(tilts_l, def_l, tilts_r, def_r, out_path):
         xs = np.linspace(tilts_l.min(), tilts_l.max(), 50)
         ax2.plot(xs, delta_slope * xs + delta_intercept, '--', color='green', label='Linear fit')
         ax2.axhline(0, color='gray', linewidth=0.8)
-        ax2.set_xlabel('Nominal tilt angle (deg) -- not alpha-offset-corrected')
+        ax2.set_xlabel(tilt_axis_label)
         ax2.set_ylabel('Defocus delta, right - left (A)')
         ax2.legend(fontsize=8)
     else:
@@ -397,23 +381,23 @@ def _make_plot(tilts_l, def_l, tilts_r, def_r, out_path):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _run_one_ts(ts_name, st_path, xf_path, tlt_path, out_dir, args,
-                 ctfplotter_bin, newstack_bin, env, ts_data=None):
+                 ctfplotter_bin, newstack_bin, env, source_alpha_offset, aangle, ts_data=None):
     ts_out = out_dir / ts_name
     ts_out.mkdir(parents=True, exist_ok=True)
     result = {'ts': ts_name, 'status': 'ok', 'error': None}
-
-    aangle = None
-    if ts_data and ts_data.get('frames'):
-        aangle = ts_data['frames'][0].get('rot')
-    if aangle is None:
-        result.update(status='error', error='no frames[0].rot (tilt-axis angle) in alignment_data.json')
-        return result
 
     apix_A = _apix_A(st_path)
     scan_lo, scan_hi, center_um = _scan_range_nm(ts_data or {}, args.scan_pad_um)
     result['scan_range_um'] = [round(scan_lo / 1000, 2), round(scan_hi / 1000, 2)]
     result['known_mean_defocus_um'] = round(center_um, 2)
     result['aangle_deg'] = round(aangle, 2)
+    result['source_alpha_offset'] = round(source_alpha_offset, 3)
+    # Whether tlt_path already has AlphaOffset baked in -- confirmed
+    # dataset-wide that -TiltCor 1 bakes it into both .aln's TILT column and
+    # the IMOD _st.tlt derived from it, while -TiltCor 0 leaves both raw
+    # nominal (and AlphaOffset reads 0.0) -- see CLAUDE.md. Used purely for
+    # labelling the plot axis correctly; never added to any tilt value here.
+    result['tilt_is_corrected'] = source_alpha_offset != 0.0
 
     if args.dry_run:
         print(f'[dry-run] {ts_name}: -testInv aAngle={aangle:.2f} '
@@ -452,7 +436,7 @@ def _run_one_ts(ts_name, st_path, xf_path, tlt_path, out_dir, args,
                 scan_lo, scan_hi, ts_out, env, args.kv, args.cs, args.amp_contrast, 'right', args.timeout)
             plot_path = ts_out / f'{ts_name}_ctfplotter.png'
             slope_l, slope_r, slope_verdict, delta_slope, delta_corr, delta_verdict = _make_plot(
-                tilts_l, def_l, tilts_r, def_r, plot_path)
+                tilts_l, def_l, tilts_r, def_r, plot_path, result['tilt_is_corrected'])
             result['plot_path'] = str(plot_path)
             result['slope_left'] = None if slope_l is None else round(float(slope_l), 2)
             result['slope_right'] = None if slope_r is None else round(float(slope_r), 2)
@@ -573,7 +557,9 @@ def _make_html(per_ts: dict, selection_scores: dict, consensus: str, out_path: P
         {test_summary}
         <div class="note">coverage {sel.get('coverage_deg', '?')}&deg; &middot; high-tilt CTF res
           {sel.get('high_tilt_ctf_res_A', '?')}&Aring; &middot; known defocus
-          {r.get('known_mean_defocus_um', '?')}&micro;m &middot; aAngle {r.get('aangle_deg', '?')}&deg;</div>
+          {r.get('known_mean_defocus_um', '?')}&micro;m &middot; aAngle {r.get('aangle_deg', '?')}&deg;
+          &middot; tilt is {'alpha-offset corrected' if r.get('tilt_is_corrected') else 'raw nominal'}
+          (source AlphaOffset {r.get('source_alpha_offset', '?')}&deg;)</div>
         {lr_html}
         {plot_html}
       </div>""")
@@ -597,10 +583,14 @@ def _make_html(per_ts: dict, selection_scores: dict, consensus: str, out_path: P
     trend (focus drift, poor eucentricity, etc.) on top of the left-right
     signal, which makes both tests -- and especially the left/right delta
     below -- easier to read cleanly.</p>
-    <p><b>Reading the plots -- what + and - tilt mean:</b> the x-axis is
-    <b>nominal (stage) tilt angle</b>, not alpha-offset / specimen-corrected
-    tilt -- the same raw values as the tilt series' own .tlt file, left =
-    blue, right = orange. If the tilt handedness convention is
+    <p><b>Reading the plots -- what + and - tilt mean:</b> the x-axis label
+    on each plot says whether it's showing <b>nominal (stage) tilt</b> or
+    <b>alpha-offset-corrected tilt</b> -- this depends on whether the source
+    AreTomo3 run used <code>-TiltCor</code>: confirmed dataset-wide that
+    <code>-TiltCor 1</code> bakes the AlphaOffset correction directly into
+    the tilt values (both the .aln TILT column and the IMOD _st.tlt file
+    used here), while <code>-TiltCor 0</code> leaves them raw. Left = blue,
+    right = orange either way. If the tilt handedness convention is
     <b>RELION -1</b>, the LEFT side's defocus should <b>decrease</b> towards
     positive tilt angles (a negative slope) while the RIGHT side's defocus
     <b>increases</b> towards positive tilt (a positive slope) -- an "X"
@@ -608,29 +598,19 @@ def _make_html(per_ts: dict, selection_scores: dict, consensus: str, out_path: P
     <b>RELION +1</b>. Same-sign slopes on both sides means the two halves
     aren't giving a clear signal either way.</p>
     <p><b>The delta plot</b> (bottom panel) shows right-side defocus minus
-    left-side defocus at each matching (nominal) tilt angle. Subtracting
-    removes any trend the two sides share in common (e.g. focus drift over
-    the course of acquisition, unrelated to handedness), leaving just the
-    left-right difference that handedness actually predicts: it should
-    trend from negative (right &lt; left) to positive (right &gt; left) as
-    tilt increases for RELION -1, and the opposite for RELION +1. A flatter,
-    noisier delta line without a clear trend means this TS isn't giving a
-    clean signal. <b>Where it crosses zero is still an open question</b> --
-    naively it should cross at nominal tilt = -AlphaOffset (the tilt at
-    which the specimen itself, not just the stage, is flat), but tested on
-    real data this didn't hold (crossed near 0 regardless of AlphaOffset
-    being 11.5&deg;/9.3&deg; on two different TS). This session's
-    acquisition scheme is centred near -14&deg; rather than 0&deg;, but
-    that's a SerialEM scheme parameter only (which angle the scan starts/
-    centres at) -- it does not move or recalibrate the stage, so recorded
-    TiltAngle/.aln TILT values are still raw, uncompensated stage tilt, and
-    the naive expectation should still apply in principle. Also ruled out:
-    a stale/wrong AlphaOffset source (a real -TiltCor 0 vs 1 difference
-    between the two source runs, not a bug) and .tlt/.aln not matching
-    mdoc (it does -- independently confirmed). See
-    <code>ctf_handedness.py</code>'s <code>_make_plot()</code> docstring for
-    the full investigation trail -- treat the crossing point as unexplained
-    for now, not as confirmation that AlphaOffset can be ignored here.</p>
+    left-side defocus at each matching tilt angle. Subtracting removes any
+    trend the two sides share in common (e.g. focus drift over the course
+    of acquisition, unrelated to handedness), leaving just the left-right
+    difference that handedness actually predicts: it should trend from
+    negative (right &lt; left) to positive (right &gt; left) as tilt
+    increases for RELION -1, and the opposite for RELION +1, crossing zero
+    at whatever tilt the specimen itself is flat -- at nominal tilt = 0 if
+    the plot is already alpha-offset-corrected, or at nominal tilt =
+    -AlphaOffset if it's still raw nominal. A flatter, noisier delta line
+    without a clear trend means this TS isn't giving a clean signal. See
+    <code>ctf_handedness.py</code>'s <code>_make_plot()</code> docstring and
+    CLAUDE.md's alpha_offset convention section for the dataset-wide test
+    behind this.</p>
   </div>"""
     html_out = f"""<!DOCTYPE html>
 <html lang="en">
@@ -776,21 +756,39 @@ def run(args):
         imod_ts_dir = aln_dir / f'{ts_name}_Imod'
         xf_path = imod_ts_dir / f'{ts_name}_st.xf'
         tlt_path = imod_ts_dir / f'{ts_name}_st.tlt'
-        missing = [str(p) for p in (st_path, tlt_path) if not p.exists()]
+        # AlphaOffset read from THIS run's own .aln (not alignment_data.json,
+        # which may come from a different --analysis run processed with a
+        # different -TiltCor setting, see CLAUDE.md's alpha_offset
+        # convention section) -- tells us whether this .tlt already has the
+        # correction baked in (-TiltCor 1, confirmed dataset-wide) or is raw
+        # nominal (-TiltCor 0), so the plot axis can be labelled correctly.
+        aln_source_path = aln_dir / f'{ts_name}.aln'
+        missing = [str(p) for p in (st_path, tlt_path, aln_source_path) if not p.exists()]
         if not args.skip_plots and not xf_path.exists():
             missing.append(str(xf_path))
         if missing:
             print(f'SKIP {ts_name}: missing input(s): {missing}')
             continue
-        jobs.append((ts_name, st_path, xf_path, tlt_path))
+        # Parsed once from aln_dir's own .aln (NOT --analysis's
+        # alignment_data.json, which can be a different AreTomo3 run --
+        # e.g. cmd0 vs cmd1 -- with a different tilt-axis rotation; using
+        # the wrong run's aAngle would subtly bias the left/right split).
+        aln_source = parse_aln_file(aln_source_path)
+        source_alpha_offset = aln_source.get('alpha_offset') or 0.0
+        source_aangle = aln_source['frames'][0]['rot'] if aln_source.get('frames') else None
+        if source_aangle is None:
+            print(f'SKIP {ts_name}: no frames in {aln_source_path}')
+            continue
+        jobs.append((ts_name, st_path, xf_path, tlt_path, source_alpha_offset, source_aangle))
 
     if not jobs:
         sys.exit('ctf-handedness: no selected TS had all required input files')
 
     if args.dry_run:
-        for ts_name, st_path, xf_path, tlt_path in jobs:
+        for ts_name, st_path, xf_path, tlt_path, source_alpha_offset, source_aangle in jobs:
             _run_one_ts(ts_name, st_path, xf_path, tlt_path, out_dir, args,
-                        ctfplotter_bin, newstack_bin, env, ts_data=alignment_data.get(ts_name))
+                        ctfplotter_bin, newstack_bin, env, source_alpha_offset, source_aangle,
+                        ts_data=alignment_data.get(ts_name))
         return
 
     per_ts = {}
@@ -798,8 +796,9 @@ def run(args):
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {
             pool.submit(_run_one_ts, ts_name, st_path, xf_path, tlt_path, out_dir, args,
-                        ctfplotter_bin, newstack_bin, env, ts_data=alignment_data.get(ts_name)): ts_name
-            for ts_name, st_path, xf_path, tlt_path in jobs
+                        ctfplotter_bin, newstack_bin, env, source_alpha_offset, source_aangle,
+                        ts_data=alignment_data.get(ts_name)): ts_name
+            for ts_name, st_path, xf_path, tlt_path, source_alpha_offset, source_aangle in jobs
         }
         for fut in as_completed(futures):
             ts_name = futures[fut]

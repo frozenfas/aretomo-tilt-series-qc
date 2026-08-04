@@ -89,12 +89,17 @@ def plot_tilt_series(ts_name, data, threshold, out_path, global_ranges,
     W, H        = data['width'], data['height']
     dark_frames = data['dark_frames']
 
-    # Deliberately nominal, not alpha-corrected: this plot is for QC pattern
-    # detection (which frames are bad), and alpha_offset can change between
-    # refinements/re-runs.  Nominal tilt is stable across runs so overlays
-    # and repeated analyse passes stay comparable.  (Correction matters for
-    # tomogram/picking geometry -- relion5_convert.py, pytom_match.py,
-    # gapstop_match.py -- not for this QC view.)
+    # Deliberately whatever's in .aln, not further alpha-corrected: this
+    # plot is for QC pattern detection (which frames are bad), not
+    # reconstruction geometry (relion5_convert.py, pytom_match.py,
+    # gapstop_match.py apply/rely on the correction for that). NOTE: the
+    # original rationale here ("nominal tilt is stable across re-runs") only
+    # fully holds when the source run used -TiltCor 0. Confirmed dataset-
+    # wide that -TiltCor 1 bakes AlphaOffset into .aln's TILT column (and
+    # DarkFrame tilt fields) directly -- see CLAUDE.md's alpha_offset
+    # convention section -- so for -TiltCor 1 data these plotted values can
+    # shift between re-runs if AreTomo3's own AlphaOffset estimate changes,
+    # same as any other .aln-derived value would.
     tilts    = np.array([f['tilt']         for f in frames])
     overlaps = np.array([f['overlap_pct']  for f in frames])
     is_ref   = np.array([f['is_reference'] for f in frames])
@@ -436,8 +441,12 @@ def _validate_ts(data, tlt_data, mdoc_data, mrc_path=None):
 
     Checks performed:
       1. MRC header nx/ny/nz vs .aln width/height/total_frames
-      2. _TLT.txt nominal_tilt ≈ .aln TILT  (both nominal -- AreTomo3 never
-         bakes AlphaOffset into either)  (per frame)
+      2. _TLT.txt nominal_tilt + alpha_offset ≈ .aln TILT  (per frame) --
+         _TLT.txt is always raw nominal, but .aln TILT already has
+         alpha_offset baked in whenever -TiltCor produced a nonzero
+         AlphaOffset (confirmed dataset-wide, see CLAUDE.md's alpha_offset
+         convention section); alpha_offset=0.0 (no TiltCor) reduces this to
+         a plain equality check
       3. Every aligned frame's z_value maps to a key in the mdoc
       4. _TLT.txt rows are fully covered by aligned SECs ∪ dark frame_bs
       5. Mdoc TiltAngle ≈ _TLT.txt nominal_tilt  (via z_value linkage)
@@ -464,20 +473,24 @@ def _validate_ts(data, tlt_data, mdoc_data, mrc_path=None):
         except Exception as e:
             warnings.append(f'MRC header read failed: {e}')
 
-    # 2. Nominal tilt cross-check: _TLT.txt nominal_tilt ≈ .aln TILT.  Both
-    # are always nominal (uncorrected) -- AlphaOffset lives only in the
-    # header and is never baked into either file by AreTomo3 or aln-edit.
+    # 2. Nominal tilt cross-check: _TLT.txt nominal_tilt + alpha_offset ≈
+    # .aln TILT.  _TLT.txt is always raw nominal; .aln TILT already has
+    # alpha_offset baked in whenever -TiltCor produced a nonzero
+    # AlphaOffset (confirmed dataset-wide -- see CLAUDE.md's alpha_offset
+    # convention section). alpha_offset defaults to 0.0 (no TiltCor), which
+    # reduces this to a plain equality check.
     if tlt_data:
+        alpha_offset = data.get('alpha_offset') or 0.0
         bad = []
         for f in data['frames']:
             tlt = tlt_data.get(f['sec'])
             if tlt is None:
                 continue
-            if abs(tlt['nominal_tilt'] - f['tilt']) > 0.05:
+            if abs(tlt['nominal_tilt'] + alpha_offset - f['tilt']) > 0.05:
                 bad.append(f['sec'])
         if bad:
             warnings.append(
-                f'{len(bad)} frame(s) |TLT nominal − .aln tilt| > 0.05°: '
+                f'{len(bad)} frame(s) |TLT nominal + alpha_offset − .aln tilt| > 0.05°: '
                 f'SEC {bad}')
 
     # 3. ZValue linkage: every frame's z_value must appear in mdoc
