@@ -143,6 +143,84 @@ def _imod_env(newstack_bin: str, ctffind_bin: str) -> dict:
     return env
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Excluding dark / low-overlap sections before handing off to DefocusGrad
+# ─────────────────────────────────────────────────────────────────────────────
+# DefocusGrad's own internal newstack calls have no -secs option -- they
+# always use every section of whatever --st stack they're given. To exclude
+# specific dark/low-overlap sections (which can be anywhere in the tilt
+# series, not just at the ends -- --exclude_negative/--exclude_positive only
+# trim from the two ends) we build a smaller raw stack ourselves first via a
+# separate `newstack -secs` call, plus a matching trimmed .xf/.tlt, and hand
+# *that* to defocusgrad instead of the original full stack.
+
+def _sec_to_idx(sec_numbers, n_secs):
+    """1-indexed AreTomo3 SEC numbers -> 0-indexed newstack section indices
+    -- same exact convention as trim_ts.py's sections_from_sec_numbers()
+    (sec/frame_b are AreTomo3's own tilt-sorted-stack section numbers, a
+    direct index lookup, not a tilt-angle match -- see CLAUDE.md)."""
+    return sorted({s - 1 for s in sec_numbers if 0 <= s - 1 < n_secs})
+
+
+def _good_sections(ts_data: dict, min_overlap, exclude_dark: bool) -> dict:
+    """
+    0-indexed sections to keep for one TS's alignment_data.json entry,
+    after excluding dark frames (if exclude_dark) and/or frames with
+    overlap_pct below min_overlap (if given). total_frames = len(frames) +
+    len(dark_frames) always (verified against real data).
+    """
+    frames = ts_data.get('frames', [])
+    n_total = ts_data.get('total_frames') or (len(frames) + len(ts_data.get('dark_frames', [])))
+    all_idx = set(range(n_total))
+
+    dark_idx = set()
+    if exclude_dark:
+        dark_secnums = [df['frame_b'] for df in ts_data.get('dark_frames', [])]
+        dark_idx = set(_sec_to_idx(dark_secnums, n_total))
+
+    lowov_idx = set()
+    if min_overlap is not None:
+        lowov_secnums = [f['sec'] for f in frames
+                         if f.get('overlap_pct') is not None and f['overlap_pct'] < min_overlap]
+        lowov_idx = set(_sec_to_idx(lowov_secnums, n_total)) - dark_idx
+
+    return {
+        'keep_idx':  sorted(all_idx - dark_idx - lowov_idx),
+        'n_total':   n_total,
+        'n_dark':    len(dark_idx),
+        'n_low_overlap': len(lowov_idx),
+    }
+
+
+def _build_filtered_inputs(ts_name, st_path, xf_path, tlt_path, keep_idx,
+                           work_dir, newstack_bin, env):
+    """
+    Extract a raw sub-stack containing only keep_idx sections (newstack
+    -secs, no xform/bin -- just selection) plus matching trimmed .xf/.tlt.
+    sec numbers are already exactly the 1-indexed line numbers in the
+    original tilt-sorted .xf/.tlt (same ordering, see CLAUDE.md's frame
+    cross-referencing convention), so trimming them is a direct line
+    selection, not a re-derivation -- same principle trim_ts.py's
+    write_trimmed()/write_tlt() already rely on for the equivalent
+    acquisition-order case.
+    """
+    filt_st  = work_dir / f'{ts_name}_filtered_st.mrc'
+    filt_xf  = work_dir / f'{ts_name}_filtered_st.xf'
+    filt_tlt = work_dir / f'{ts_name}_filtered_st.tlt'
+
+    secs_arg = ','.join(str(i) for i in keep_idx)
+    cmd = [newstack_bin, '-in', str(st_path), '-ou', str(filt_st), '-secs', secs_arg]
+    ret = subprocess.run(cmd, env=env, capture_output=True, text=True)
+    if ret.returncode != 0:
+        raise RuntimeError(f'newstack -secs failed for {ts_name}: {ret.stderr.strip()}')
+
+    xf_lines  = Path(xf_path).read_text().splitlines()
+    tlt_lines = Path(tlt_path).read_text().splitlines()
+    filt_xf.write_text('\n'.join(xf_lines[i] for i in keep_idx) + '\n')
+    filt_tlt.write_text('\n'.join(tlt_lines[i] for i in keep_idx) + '\n')
+    return filt_st, filt_xf, filt_tlt
+
+
 _RE_HANDEDNESS   = re.compile(r'Import into RELION using ([+-]1) tilt handedness')
 _RE_INCONCLUSIVE = re.compile(r'results inconclusive')
 _RE_CORR_LEFT    = re.compile(r'Correlation coefficient for left-side fit:\s*([\d.]+)')
@@ -220,13 +298,43 @@ def _read_ctf_diagnostics(ts_out: Path, strootname: str) -> dict:
 
 
 def _run_one_ts(ts_name, st_path, xf_path, tlt_path, out_dir, args,
-                defocusgrad_bin, newstack_bin, ctffind_bin):
+                defocusgrad_bin, newstack_bin, ctffind_bin, ts_data=None):
     ts_out = out_dir / ts_name
     ts_out.mkdir(parents=True, exist_ok=True)
+    env = _imod_env(newstack_bin, ctffind_bin)
+
+    filter_info = None
+    eff_st, eff_xf, eff_tlt = st_path, xf_path, tlt_path
+    filtered_paths = None
+    if (args.exclude_dark or args.min_overlap is not None) and ts_data is not None:
+        filter_info = _good_sections(ts_data, args.min_overlap, args.exclude_dark)
+        n_keep = len(filter_info['keep_idx'])
+        print(f'[{ts_name}] excluding {filter_info["n_dark"]} dark + '
+              f'{filter_info["n_low_overlap"]} low-overlap section(s) of '
+              f'{filter_info["n_total"]} -> {n_keep} kept')
+        if n_keep < 5:
+            print(f'  ERROR: only {n_keep} sections left for {ts_name} after filtering -- too few, skipping')
+            return {'handedness': None, 'error': 'too few sections after filtering', 'filter': filter_info}
+        if args.dry_run:
+            # Show what the real command would look like without building
+            # anything -- these paths won't exist, dry-run stops before
+            # subprocess.run() either way.
+            eff_st  = ts_out / f'{ts_name}_filtered_st.mrc'
+            eff_xf  = ts_out / f'{ts_name}_filtered_st.xf'
+            eff_tlt = ts_out / f'{ts_name}_filtered_st.tlt'
+        else:
+            try:
+                filtered_paths = _build_filtered_inputs(
+                    ts_name, st_path, xf_path, tlt_path, filter_info['keep_idx'],
+                    ts_out, newstack_bin, env)
+            except Exception as exc:
+                print(f'  ERROR: failed to build filtered inputs for {ts_name}: {exc}')
+                return {'handedness': None, 'error': f'filter build failed: {exc}', 'filter': filter_info}
+            eff_st, eff_xf, eff_tlt = filtered_paths
 
     cmd = [
         defocusgrad_bin,
-        '--st', str(st_path), '--xf', str(xf_path), '--tlt', str(tlt_path),
+        '--st', str(eff_st), '--xf', str(eff_xf), '--tlt', str(eff_tlt),
         '--bin', str(args.bin),
         '--kV', str(args.kv), '--Cs', str(args.cs), '--Ac', str(args.amp_contrast),
         '--exclude_negative', str(args.exclude_negative),
@@ -237,9 +345,8 @@ def _run_one_ts(ts_name, st_path, xf_path, tlt_path, out_dir, args,
 
     print(f'\n[{ts_name}] + {" ".join(cmd)}')
     if args.dry_run:
-        return {'handedness': None, 'dry_run': True}
+        return {'handedness': None, 'dry_run': True, 'filter': filter_info}
 
-    env = _imod_env(newstack_bin, ctffind_bin)
     log_path = ts_out / f'{ts_name}_defocusgrad.log'
     try:
         ret = subprocess.run(cmd, cwd=str(ts_out), env=env,
@@ -248,20 +355,25 @@ def _run_one_ts(ts_name, st_path, xf_path, tlt_path, out_dir, args,
         log_path.write_text((exc.stdout or '') + '\n--- stderr ---\n' + (exc.stderr or '')
                             + f'\n--- TIMED OUT after {args.timeout}s ---\n')
         print(f'  ERROR: defocusgrad timed out after {args.timeout}s for {ts_name} -- see {log_path}')
-        return {'handedness': None, 'error': 'timeout', 'log': str(log_path)}
+        return {'handedness': None, 'error': 'timeout', 'log': str(log_path), 'filter': filter_info}
+    finally:
+        if filtered_paths:
+            for p in filtered_paths:
+                Path(p).unlink(missing_ok=True)
 
     log_path.write_text((ret.stdout or '') + '\n--- stderr ---\n' + (ret.stderr or ''))
 
     if ret.returncode != 0:
         print(f'  ERROR: defocusgrad exited {ret.returncode} for {ts_name} -- see {log_path}')
-        return {'handedness': None, 'error': f'exit {ret.returncode}', 'log': str(log_path)}
+        return {'handedness': None, 'error': f'exit {ret.returncode}', 'log': str(log_path), 'filter': filter_info}
 
     result = _parse_defocusgrad_stdout(ret.stdout)
-    plot_name = f'{Path(st_path).stem}_defocusgrad.png'
+    plot_name = f'{Path(eff_st).stem}_defocusgrad.png'
     plot_path = ts_out / plot_name
     result['plot_path'] = str(plot_path) if plot_path.exists() else None
     result['log'] = str(log_path)
-    result.update(_read_ctf_diagnostics(ts_out, Path(st_path).stem))
+    result['filter'] = filter_info
+    result.update(_read_ctf_diagnostics(ts_out, Path(eff_st).stem))
     if result['handedness'] is None and 'error' not in result:
         print(f'  WARNING: could not parse a handedness verdict from defocusgrad output for {ts_name}')
     for side in ('ctf_left', 'ctf_right'):
@@ -313,6 +425,15 @@ def _consensus(per_ts: dict) -> str:
     return f'inconsistent ({dict(counts)}){suffix}'
 
 
+def _filter_html(filter_info, esc) -> str:
+    if not filter_info:
+        return ''
+    return (f'<div class="why">frames: {esc(filter_info["n_total"])} total, '
+           f'{esc(filter_info["n_dark"])} dark excluded, '
+           f'{esc(filter_info["n_low_overlap"])} low-overlap excluded, '
+           f'{esc(len(filter_info["keep_idx"]))} used</div>')
+
+
 def _make_html(per_ts: dict, selection_scores: dict, consensus: str, out_path: Path):
     import html as _html
     def esc(x):
@@ -356,6 +477,7 @@ def _make_html(per_ts: dict, selection_scores: dict, consensus: str, out_path: P
         <div class="why">selected for: coverage={esc(s.get('coverage_deg'))}&deg;,
           high-tilt CTF res={esc(s.get('high_tilt_ctf_res_A'))}&Aring;,
           overall CTF res={esc(s.get('overall_ctf_res_A'))}&Aring;</div>
+        {_filter_html(r.get('filter'), esc)}
       </div>''')
 
     html_out = f"""<!DOCTYPE html>
@@ -435,6 +557,15 @@ def add_parser(subparsers):
                         'selected TS, i.e. fully parallel; each defocusgrad '
                         'invocation is itself CPU-light aside from CTFFIND, so '
                         'this scales fine on a multi-core machine)')
+    p.add_argument('--exclude-dark', action='store_true', dest='exclude_dark',
+                   help='Exclude dark frames (by AreTomo3 SEC number, not tilt-angle '
+                        'matching) from the stack before handing it to defocusgrad, '
+                        'instead of feeding it every raw section')
+    p.add_argument('--min-overlap', type=float, default=None, metavar='PCT',
+                   help='Also exclude frames with tracking overlap below this percent '
+                        '(e.g. 90) -- independent of whatever --threshold "analyse" '
+                        'was run with; frames anywhere in the tilt series, not just at '
+                        'the ends (--exclude_negative/positive only trim the ends)')
 
     ctf = p.add_argument_group('CTFFIND options (default from run_aretomo3_params in project.json)')
     ctf.add_argument('--kv', type=float, default=None, help='Acceleration voltage in kV')
@@ -567,7 +698,8 @@ def run(args):
     if args.dry_run:
         for ts_name, st_path, xf_path, tlt_path in jobs:
             _run_one_ts(ts_name, st_path, xf_path, tlt_path, out_dir, args,
-                       defocusgrad_bin, newstack_bin, ctffind_bin)
+                       defocusgrad_bin, newstack_bin, ctffind_bin,
+                       ts_data=alignment_data.get(ts_name))
         print('\n[dry-run: no defocusgrad invocations were made]')
         return
 
@@ -579,7 +711,8 @@ def run(args):
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {
             pool.submit(_run_one_ts, ts_name, st_path, xf_path, tlt_path, out_dir, args,
-                       defocusgrad_bin, newstack_bin, ctffind_bin): ts_name
+                       defocusgrad_bin, newstack_bin, ctffind_bin,
+                       ts_data=alignment_data.get(ts_name)): ts_name
             for ts_name, st_path, xf_path, tlt_path in jobs
         }
         for future in as_completed(futures):
