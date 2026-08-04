@@ -198,7 +198,7 @@ class TestParseMdoc:
         frame = mdoc[0]
         assert frame['sub_frame_path'] == \
             'Position_1_001_14.00_20260213_171849_fractions.tiff'
-        assert frame['mdoc_defocus']   == pytest.approx(3.66, abs=0.01)
+        assert frame['nominal_defocus'] == pytest.approx(3.66, abs=0.01)
         assert frame['target_defocus'] == pytest.approx(-3.0,  abs=0.01)
         assert frame['num_subframes']  == 8
         assert frame['stage_x']        == pytest.approx(-430.61, abs=0.01)

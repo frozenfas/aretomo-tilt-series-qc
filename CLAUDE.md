@@ -249,6 +249,19 @@ existing one changes.
   acquisition time, never touched by AreTomo3. Indexed by `ZValue`
   (0-indexed acquisition order) = `acq_order - 1`.
 
+**Same nominal-vs-measured distinction applies to defocus, not just tilt.**
+`parse_mdoc_file`'s `nominal_defocus` (mdoc's `Defocus` field) and
+`target_defocus` (mdoc's `TargetDefocus`) are both straight from
+SerialEM, never touched by AreTomo3/CTFFIND — same category as
+`nominal_tilt`. The actual measured defocus for a frame is
+`parse_ctf_file`'s `mean_defocus_um` (CTFFIND's fit, via `_CTF.txt`) — a
+different thing, keep them conceptually separate. `nominal_defocus` was
+renamed from `mdoc_defocus` for exactly this reason (2026-08): a bare
+`defocus`-ish name next to a real CTFFIND measurement risks the same
+ambiguity that already caused a real bug for tilt. General rule for any
+future field: if it's read directly from the mdoc, unprocessed, prefix it
+`nominal_`; if it's something this codebase measured or computed, don't.
+
 This codebase prefers IMOD-format files over AreTomo3-native ones where
 both carry the same information, because IMOD's formats are simpler and
 more consistently specified across tool versions — the alpha_offset bug

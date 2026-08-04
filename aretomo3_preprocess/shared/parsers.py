@@ -304,7 +304,7 @@ def parse_mdoc_file(filepath):
 
     Returns a tuple (frames, pixel_spacing, acquisition) where:
       frames        — dict keyed by ZValue (0-indexed acquisition order):
-                        {'tilt_angle', 'sub_frame_path', 'mdoc_defocus',
+                        {'tilt_angle', 'sub_frame_path', 'nominal_defocus',
                          'target_defocus', 'datetime', 'stage_x/y/z',
                          'image_shift_x/y', 'exposure_time', 'num_subframes',
                          'exposure_dose'}
@@ -312,6 +312,19 @@ def parse_mdoc_file(filepath):
                         (e/Å², per this tilt's exposure/frame-set) -- distinct
                         from `parse_tlt_file`'s dose_e_per_A2, which is
                         AreTomo3's own per-frame dose from _TLT.txt.
+
+                        'nominal_defocus' (mdoc's Defocus field) and
+                        'target_defocus' (mdoc's TargetDefocus field) are
+                        both straight from SerialEM, never touched by
+                        AreTomo3/CTFFIND -- the same "nominal" category as
+                        `parse_tlt_file`'s nominal_tilt, not a measurement.
+                        The actual measured defocus for a frame is
+                        `parse_ctf_file`'s mean_defocus_um (CTFFIND's fit,
+                        via AreTomo3's _CTF.txt) -- keep these three
+                        conceptually separate; see CLAUDE.md's alpha_offset
+                        convention section for why this nominal-vs-measured
+                        distinction matters (the same class of bug already
+                        found once for tilt).
       pixel_spacing — float (Å/px) from the first row's PixelSpacing field,
                         or None if not present.
       acquisition   — {'width', 'height', 'file_type', 'voltage'} from the
@@ -359,7 +372,7 @@ def parse_mdoc_file(filepath):
         result[z] = {
             'tilt_angle':     _float_or_none(row.get('TiltAngle')),
             'sub_frame_path': Path(sub).name if sub and not isinstance(sub, float) else None,
-            'mdoc_defocus':   _float_or_none(row.get('Defocus')),
+            'nominal_defocus': _float_or_none(row.get('Defocus')),
             'target_defocus': _float_or_none(row.get('TargetDefocus')),
             'datetime':       row.get('DateTime') or None,
             'stage_x':        float(stage[0]) if stage and not isinstance(stage, float) else None,

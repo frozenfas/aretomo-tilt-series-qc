@@ -2502,7 +2502,7 @@ def run(args):
                 cum_dose_by_acq[r['acq_order']] = running
                 running += r['dose_e_per_A2']
 
-        _MDOC_KEYS = ('tilt_angle', 'sub_frame_path', 'mdoc_defocus',
+        _MDOC_KEYS = ('tilt_angle', 'sub_frame_path', 'nominal_defocus',
                       'target_defocus', 'datetime', 'stage_x', 'stage_y',
                       'stage_z', 'image_shift_x', 'image_shift_y',
                       'exposure_time', 'num_subframes')
