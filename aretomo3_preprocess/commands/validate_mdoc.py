@@ -152,6 +152,41 @@ def _extract_exptime(line):
     return True, _atof(line[idx + 1:])
 
 
+def _frame_basename(raw_path: str) -> str:
+    """
+    SubFramePath is whatever the acquisition PC wrote -- typically a
+    Windows/UNC path (\\\\server\\...\\file.eer) that no longer resolves on
+    the processing machine. AreTomo3 only ever looks for the referenced
+    movie alongside the mdoc itself (rename-ts's own symlinks are created
+    "alongside the originals" for exactly this reason), so only the
+    filename component is useful here.
+    """
+    return re.split(r'[\\/]+', raw_path.strip())[-1]
+
+
+def check_frames_found(mdoc_path, lines) -> dict:
+    """
+    Verify every SubFramePath-referenced movie file actually exists next to
+    mdoc_path. AreTomo3 requires raw movies and their mdoc to be co-located,
+    so the frames directory is always mdoc_path's own parent -- never
+    whatever directory SubFramePath itself encodes.
+
+    Returns {'n_frames': int, 'n_found': int, 'missing': [filename, ...]}.
+    """
+    frames_dir = Path(mdoc_path).resolve().parent
+    missing = []
+    n_frames = 0
+    for line in lines:
+        raw = _extract_frame_path(line)
+        if raw is None:
+            continue
+        n_frames += 1
+        fname = _frame_basename(raw)
+        if not (frames_dir / fname).exists():
+            missing.append(fname)
+    return {'n_frames': n_frames, 'n_found': n_frames - len(missing), 'missing': missing}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Simulate CReadMdoc::DoIt
 # ─────────────────────────────────────────────────────────────────────────────
@@ -805,7 +840,8 @@ def _rebuild_from_subframes(lines, subframes_path, dose):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def validate_file(path, fix_dose=False, fix_exptime=False, fix_order=False,
-                  fix_subframes=None, dose=4.16, exptime=1.0):
+                  fix_subframes=None, dose=4.16, exptime=1.0,
+                  check_frames=False):
     """
     Validate one mdoc file.  Optionally apply fixes.
 
@@ -816,6 +852,10 @@ def validate_file(path, fix_dose=False, fix_exptime=False, fix_order=False,
                     or removed, only reordered)
     fix_subframes — path to a directory of SubFramePaths .txt files;
                     used to rebuild mdocs that are too short (--fix-subframes)
+    check_frames  — verify every SubFramePath-referenced movie actually
+                    exists next to this mdoc (--check-frames). Not fixable
+                    by any --fix-* flag, so a missing frame always keeps
+                    success False regardless of which other fixes succeed.
 
     Order is checked independently of presence/absence: a field can be
     present in every section and AreTomo3 will still silently corrupt the
@@ -860,12 +900,26 @@ def validate_file(path, fix_dose=False, fix_exptime=False, fix_order=False,
     if order_msg:
         issues.append(order_msg)
 
+    frame_check = check_frames_found(path, lines) if check_frames else None
+    frames_ok = True
+    if frame_check and frame_check['missing']:
+        frames_ok = False
+        preview = ', '.join(frame_check['missing'][:5])
+        if len(frame_check['missing']) > 5:
+            preview += ', ...'
+        issues.append(
+            '{} of {} referenced movie file(s) not found in {}: {}'.format(
+                len(frame_check['missing']), frame_check['n_frames'],
+                Path(path).resolve().parent, preview))
+
     result = dict(
         path=path,
         # A file that "passes" the simulation but has an order problem is
         # NOT actually fine -- it's exactly the case that produces
-        # corrupted-but-successful output. Report it as failing.
-        success=(failure is None and not order_issues),
+        # corrupted-but-successful output. Report it as failing. Same for
+        # a movie file that can't be found -- AreTomo3 will fail on it
+        # regardless of how clean the mdoc's own fields are.
+        success=(failure is None and not order_issues and frames_ok),
         n_tilts=n_tilts,
         failure=failure,
         issues=issues,
@@ -877,6 +931,8 @@ def validate_file(path, fix_dose=False, fix_exptime=False, fix_order=False,
         fix_types=[],
         n_injected=0,
         backed_up=False,
+        n_frames_expected=frame_check['n_frames'] if frame_check else None,
+        n_frames_found=frame_check['n_found'] if frame_check else None,
         **conformance,
     )
 
@@ -924,7 +980,21 @@ def validate_file(path, fix_dose=False, fix_exptime=False, fix_order=False,
         result['fixed'] = True
         result['fix_types'] = ['subframes']
         result['n_injected'] = n_sections
-        result['success'] = True
+        # --fix-subframes rewrites SubFramePath entirely from the .txt file,
+        # so re-check against the NEW filenames, not the stale frames_ok
+        # computed against the original (about-to-be-discarded) ones.
+        if check_frames:
+            frame_check_after = check_frames_found(path, new_lines)
+            result['success'] = not frame_check_after['missing']
+            result['n_frames_expected'] = frame_check_after['n_frames']
+            result['n_frames_found'] = frame_check_after['n_found']
+            if frame_check_after['missing']:
+                result['issues'].append(
+                    '{} of {} rebuilt movie file(s) still not found: {}'.format(
+                        len(frame_check_after['missing']), frame_check_after['n_frames'],
+                        ', '.join(frame_check_after['missing'][:5])))
+        else:
+            result['success'] = True
         result['n_tilts'] = n_after
         result['failure'] = None
         result['order_issues'] = []
@@ -997,7 +1067,9 @@ def validate_file(path, fix_dose=False, fix_exptime=False, fix_order=False,
     result['fixed'] = True
     result['fix_types'] = fix_types
     result['n_injected'] = n_injected_total
-    result['success'] = True
+    # reorder/dose/exptime never touch SubFramePath, so frames_ok (checked
+    # against the original lines above) still applies unchanged.
+    result['success'] = frames_ok
     result['n_tilts'] = n_after
     result['failure'] = None
     result['order_issues'] = []
@@ -1068,6 +1140,18 @@ def add_parser(subparsers):
              'Used by --fix-exptime.',
     )
     p.add_argument(
+        '--check-frames', dest='check_frames', action='store_true', default=True,
+        help='Verify every SubFramePath-referenced movie file actually '
+             'exists next to the mdoc (AreTomo3 requires raw movies and '
+             'their mdoc to be co-located). On by default; use '
+             '--no-check-frames to skip (e.g. validating mdocs before '
+             'movies finish transferring).',
+    )
+    p.add_argument(
+        '--no-check-frames', dest='check_frames', action='store_false',
+        help=argparse.SUPPRESS,
+    )
+    p.add_argument(
         '--calibrated-apix', type=float, default=None, metavar='ANGPIX',
         help='Record the real, calibrated pixel size (Å/px) up front, at '
              'the start of the pipeline. The mdoc\'s own PixelSpacing is '
@@ -1088,7 +1172,7 @@ def run(args):
     fix_subframes = args.fix_subframes
     any_fix = fix_order or fix_dose or fix_exptime or fix_subframes
     n_pass = n_fail = n_fixed = 0
-    n_fail_dose = n_fail_exptime = n_fail_order = n_fail_short = 0
+    n_fail_dose = n_fail_exptime = n_fail_order = n_fail_short = n_fail_frames = 0
     col_w = max(len(Path(p).name) for p in paths)
 
     print()
@@ -1102,7 +1186,8 @@ def run(args):
         fname = Path(path).name
         r = validate_file(path, fix_dose=fix_dose, fix_exptime=fix_exptime,
                           fix_order=fix_order, fix_subframes=fix_subframes,
-                          dose=args.dose, exptime=args.exptime)
+                          dose=args.dose, exptime=args.exptime,
+                          check_frames=args.check_frames)
 
         if r['success'] and not r.get('fixed'):
             status = 'PASS'
@@ -1124,6 +1209,8 @@ def run(args):
                 n_fail_exptime += 1
             if r.get('order_issues'):
                 n_fail_order += 1
+            if r.get('n_frames_found') is not None and r['n_frames_found'] < r['n_frames_expected']:
+                n_fail_frames += 1
 
         note_parts = []
         if r['failure'] and not r['fixed']:
@@ -1188,6 +1275,9 @@ def run(args):
                 print('    aretomo3-preprocess validate-mdoc <files> --fix-subframes <dir>')
                 print('  where <dir> contains a .txt file per mdoc listing the correct')
                 print('  fraction filenames (one per line).')
+            if n_fail_frames:
+                print('  {:3d} referenced movie file(s) not found next to the mdoc '
+                      '(see └─ lines above)'.format(n_fail_frames))
     print()
 
     # ── Save mdoc metadata to project.json for all passing files ──────────────
@@ -1243,6 +1333,12 @@ def _save_mdoc_to_project(paths):
                 'angpix':      angpix,
                 'acquisition': acquisition,
                 'frames':      {str(k): v for k, v in mdoc_data.items()},
+                # AreTomo3 requires movies co-located with their mdoc, so
+                # p's own directory IS the frames directory -- recorded once
+                # per TS here rather than per frame. Consumed by
+                # register_frame_lookup() to bake a full frame_path into
+                # resolve_frame()'s return value.
+                'frames_dir':  str(p.resolve().parent),
             }
 
     if new_entries:

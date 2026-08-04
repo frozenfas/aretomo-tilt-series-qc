@@ -81,7 +81,7 @@ from aretomo3_preprocess.shared.parsers import (
     parse_aln_file, parse_ctf_file, parse_tlt_file, parse_mdoc_file,
 )
 from aretomo3_preprocess.shared.project_state import (
-    resolve_selected_ts, resolve_original_mdoc_path,
+    resolve_selected_ts, get_ts_to_original_stem, resolve_original_mdoc_path,
 )
 
 
@@ -177,24 +177,34 @@ def _load_mdoc_from_project(project: dict, ts_name: str) -> tuple:
 
     Returns (frames_dict, frames_dir) where:
       frames_dict : {z_value (int): {'sub_frame_path', 'target_defocus', ...}}
-      frames_dir  : Path to the frames directory (parent of the original mdoc),
-                    or None if not determinable.
+      frames_dir  : Path to the frames directory, read directly from
+                    mdoc_data.per_ts[stem].frames_dir -- validate-mdoc's own
+                    resolved parent directory for this TS's mdoc (AreTomo3
+                    requires raw movies to be co-located with their mdoc,
+                    see CLAUDE.md's frame_lookup section), or None if not
+                    determinable.
 
-    Returns ({}, None) if the TS is not found.
+    Returns ({}, None) if the TS is not found. frames_dir prefers
+    mdoc_data's own recorded value; projects validated before that field
+    existed fall back to deriving it via rename_ts.lookup (the original
+    mechanism) so already-processed real projects don't need a
+    re-validate-mdoc run just to keep working.
     """
-    rename_lookup = project.get('rename_ts', {}).get('lookup', {})
-    original_mdoc_path = resolve_original_mdoc_path(rename_lookup, ts_name)
-
-    if original_mdoc_path is None:
-        return {}, None
-
-    original_stem = original_mdoc_path.stem   # e.g. 'Position_1'
-    frames_dir    = original_mdoc_path.parent
+    ts_to_stem = get_ts_to_original_stem()
+    original_stem = ts_to_stem.get(ts_name, '')
 
     per_ts = project.get('mdoc_data', {}).get('per_ts', {})
     ts_data = per_ts.get(original_stem)
     if ts_data is None:
-        return {}, frames_dir
+        return {}, None
+
+    frames_dir_str = ts_data.get('frames_dir')
+    if frames_dir_str:
+        frames_dir = Path(frames_dir_str)
+    else:
+        rename_lookup = project.get('rename_ts', {}).get('lookup', {})
+        original_mdoc_path = resolve_original_mdoc_path(rename_lookup, ts_name)
+        frames_dir = original_mdoc_path.parent if original_mdoc_path else None
 
     # frames keyed by string z_value in JSON → convert to int
     raw_frames = ts_data.get('frames', {})

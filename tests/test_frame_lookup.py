@@ -201,6 +201,39 @@ def test_register_frame_lookup_force_refresh_backfills_filename(synthetic_cmd0_d
     assert resolve_frame('ts-001', sec=2)['sub_frame_path'] == 'Position_1_000_0.0.tiff'
 
 
+def test_resolve_frame_path_none_when_frames_dir_missing(synthetic_cmd0_dir):
+    """frames_dir wasn't recorded (mdoc validated before the field existed) --
+    frame_path is None, not a lookup failure."""
+    pj.update_section('rename_ts', {'lookup': {'ts-001.mdoc': '/frames/Position_1.mdoc'}})
+    pj.update_section('mdoc_data', {'per_ts': {
+        'Position_1': {'frames': {'0': {'sub_frame_path': 'Position_1_000_0.0.tiff'}}},
+    }})
+    register_frame_lookup(synthetic_cmd0_dir)
+
+    result = resolve_frame('ts-001', sec=2)
+    assert result['sub_frame_path'] == 'Position_1_000_0.0.tiff'
+    assert result['frame_path'] is None
+
+
+def test_resolve_frame_path_joins_frames_dir_with_basename(synthetic_cmd0_dir):
+    """frame_path combines frames_dir with sub_frame_path's own FILENAME
+    only -- sub_frame_path's directory (a stale Windows/UNC acquisition-PC
+    path here) must be discarded, not used."""
+    pj.update_section('rename_ts', {'lookup': {'ts-001.mdoc': '/frames/Position_1.mdoc'}})
+    pj.update_section('mdoc_data', {'per_ts': {
+        'Position_1': {
+            'frames': {'0': {
+                'sub_frame_path': r'\\ACQPC\staging\Position_1_000_0.0.tiff',
+            }},
+            'frames_dir': '/frames',
+        },
+    }})
+    register_frame_lookup(synthetic_cmd0_dir)
+
+    result = resolve_frame('ts-001', sec=2)
+    assert result['frame_path'] == '/frames/Position_1_000_0.0.tiff'
+
+
 def test_register_frame_lookup_merges_across_calls(tmp_path, monkeypatch):
     """Calling register_frame_lookup again (e.g. TS processed incrementally)
     adds/refreshes entries rather than dropping previously-registered TS."""

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import csv as _csv_module
 import datetime
+import re
 from pathlib import Path
 from typing import Optional, Set
 
@@ -40,9 +41,34 @@ def get_schema_version() -> int:
 
 
 def get_frames_dir() -> Optional[Path]:
-    """Return the frames directory recorded by rename-ts, or None."""
+    """
+    Return the frames directory recorded by rename-ts, or None.
+
+    rename-ts records the input directory per grid
+    (rename_ts.grids.<N>.input_dir -- each invocation/grid can use a
+    different --input), never a single top-level value. This accessor's
+    one caller (run-aretomo3-per-ts's --mdocdir default) only supports a
+    single directory for the whole run (it's passed straight through to
+    AreTomo3's own -Mdoc flag), so this returns the latest grid's
+    input_dir and warns if grids disagree, rather than silently picking
+    an arbitrary one. For a genuinely per-TS answer, resolve_frame()'s
+    frame_path (via frame_lookup/mdoc_data.frames_dir) is correct even
+    across multiple grids -- use that instead when the caller has a
+    ts_name in hand.
+    """
     data = _load()
-    value = data.get('rename_ts', {}).get('input')
+    grids = data.get('rename_ts', {}).get('grids', {})
+    if not grids:
+        return None
+    dirs = {g['input_dir'] for g in grids.values() if g.get('input_dir')}
+    if not dirs:
+        return None
+    if len(dirs) > 1:
+        print(f'WARNING: get_frames_dir: {len(grids)} grids recorded with '
+              f'different input dirs {sorted(dirs)}; using the latest '
+              f'grid\'s -- pass --mdocdir explicitly if that\'s wrong')
+    latest_grid = max(grids, key=int)
+    value = grids[latest_grid].get('input_dir')
     return Path(value) if value else None
 
 
@@ -413,11 +439,11 @@ def register_frame_lookup(out_dir: Path) -> None:
     each TS's SEC <-> z_value/acq_order bridge (+ filename, + which SECs
     are dark) in project.json under 'frame_lookup'.
 
-    The filename (sub_frame_path) is captured HERE, at build time, by
-    composing with the already-registered mdoc_data section (via
-    get_ts_to_original_stem()) -- not resolved lazily at read time. Tried
-    the lazy/composed-at-read-time design first and found it fragile in
-    practice: resolve_frame() silently returned sub_frame_path=None
+    The filename (sub_frame_path) and frames_dir are captured HERE, at
+    build time, by composing with the already-registered mdoc_data section
+    (via get_ts_to_original_stem()) -- not resolved lazily at read time.
+    Tried the lazy/composed-at-read-time design first and found it fragile
+    in practice: resolve_frame() silently returned sub_frame_path=None
     whenever mdoc_data happened to be registered from a directory other
     than the actual rename-ts symlink dir (e.g. a staging/temp mdoc copy),
     even though frame_lookup's own data was perfectly valid -- a real
@@ -426,8 +452,17 @@ def register_frame_lookup(out_dir: Path) -> None:
     registered frame_lookup entry self-contained: relion5_convert.py (the
     main filename consumer) needs only this section, not a live mdoc_data
     join on every lookup. If mdoc_data wasn't registered yet when this was
-    called, sub_frame_path is None for that run -- re-run (with --force via
-    `enrich --frame-lookup`) after registering mdoc_data to backfill it.
+    called, sub_frame_path/frames_dir are None for that run -- re-run (with
+    --force via `enrich --frame-lookup`) after registering mdoc_data to
+    backfill them.
+
+    frames_dir is mdoc_data.per_ts[stem].frames_dir -- the directory the
+    mdoc validated by validate-mdoc actually lived in (recorded there
+    because AreTomo3 requires raw movies and their mdoc to be co-located,
+    confirmed by rename-ts's own symlinks being created "alongside the
+    originals", and now checkable directly via validate-mdoc
+    --check-frames). One value per TS, not per frame -- same directory for
+    every frame in a TS.
 
     Each entry also records 'validated': whether _TLT.txt's nominal_tilt +
     that TS's alpha_offset agrees with .aln's TILT column (both frames and
@@ -468,7 +503,9 @@ def register_frame_lookup(out_dir: Path) -> None:
             if not tlt_data:
                 raise ValueError('no rows in _TLT.txt')
 
-            mdoc_frames = mdoc_per_ts.get(ts_to_stem.get(ts_name, ''), {}).get('frames', {})
+            mdoc_entry_for_ts = mdoc_per_ts.get(ts_to_stem.get(ts_name, ''), {})
+            mdoc_frames = mdoc_entry_for_ts.get('frames', {})
+            frames_dir = mdoc_entry_for_ts.get('frames_dir')
             frames = {}
             for sec, t in tlt_data.items():
                 mdoc_entry = mdoc_frames.get(str(t['z_value']))
@@ -487,10 +524,11 @@ def register_frame_lookup(out_dir: Path) -> None:
             bad = check_nominal_tilt_consistency(pairs, tlt_data, alpha_offset)
 
             new_entries[ts_name] = {
-                'n_total':   aln_data['total_frames'],
-                'frames':    frames,
-                'dark_secs': dark_secs,
-                'validated': not bad,
+                'n_total':    aln_data['total_frames'],
+                'frames':     frames,
+                'dark_secs':  dark_secs,
+                'validated':  not bad,
+                'frames_dir': frames_dir,
             }
             n_ok += 1
         except Exception as exc:
@@ -513,10 +551,10 @@ def register_frame_lookup(out_dir: Path) -> None:
 
 
 def get_frame_lookup(ts_name: str) -> Optional[dict]:
-    """Raw {'n_total', 'frames', 'dark_secs', 'validated'} for ts_name from
-    the 'frame_lookup' section, or None if not registered. 'frames' is
-    {str(sec): {'z_value', 'sub_frame_path'}} for every SEC (aligned +
-    dark)."""
+    """Raw {'n_total', 'frames', 'dark_secs', 'validated', 'frames_dir'}
+    for ts_name from the 'frame_lookup' section, or None if not registered.
+    'frames' is {str(sec): {'z_value', 'sub_frame_path'}} for every SEC
+    (aligned + dark)."""
     return _load().get('frame_lookup', {}).get('per_ts', {}).get(ts_name)
 
 
@@ -524,14 +562,20 @@ def resolve_frame(ts_name: str, *, sec: int = None, z_value: int = None,
                   acq_order: int = None) -> Optional[dict]:
     """
     Given exactly one of sec/z_value/acq_order, resolve the rest of that
-    frame's identifiers plus its filename from the 'frame_lookup' section
-    (filename is captured at register_frame_lookup() time, not composed
-    here -- see its docstring for why).
+    frame's identifiers plus its filename and full path from the
+    'frame_lookup' section (both captured at register_frame_lookup() time,
+    not composed here -- see its docstring for why).
 
-    Returns {'sec', 'z_value', 'acq_order', 'is_dark', 'sub_frame_path'},
-    or None if frame_lookup isn't registered for ts_name or the given id
-    isn't found. sub_frame_path is None (not a lookup failure) if
-    mdoc_data wasn't registered yet when frame_lookup was built for this TS.
+    Returns {'sec', 'z_value', 'acq_order', 'is_dark', 'sub_frame_path',
+    'frame_path'}, or None if frame_lookup isn't registered for ts_name or
+    the given id isn't found. sub_frame_path/frame_path are None (not a
+    lookup failure) if mdoc_data wasn't registered yet when frame_lookup
+    was built for this TS. frame_path is frames_dir joined with
+    sub_frame_path's basename (never sub_frame_path's own directory --
+    that's typically a stale acquisition-PC path, see check_frames_found's
+    docstring in validate_mdoc.py); None if frames_dir wasn't recorded
+    (mdoc validated before the frames_dir field existed -- re-run
+    validate-mdoc to backfill).
     """
     lookup = get_frame_lookup(ts_name)
     if lookup is None:
@@ -552,12 +596,23 @@ def resolve_frame(ts_name: str, *, sec: int = None, z_value: int = None,
     else:
         raise ValueError('resolve_frame: exactly one of sec/z_value/acq_order is required')
 
+    frames_dir = lookup.get('frames_dir')
+    sub_frame_path = entry['sub_frame_path']
+    frame_path = None
+    if frames_dir and sub_frame_path:
+        # sub_frame_path's own directory is typically a stale acquisition-PC
+        # path (Windows/UNC); only its filename is meaningful once combined
+        # with frames_dir, which is where the movie actually lives.
+        basename = re.split(r'[\\/]+', sub_frame_path.strip())[-1]
+        frame_path = str(Path(frames_dir) / basename)
+
     return {
         'sec':             found_sec,
         'z_value':         entry['z_value'],
         'acq_order':       entry['z_value'] + 1,
         'is_dark':         found_sec in set(lookup.get('dark_secs', [])),
-        'sub_frame_path':  entry['sub_frame_path'],
+        'sub_frame_path':  sub_frame_path,
+        'frame_path':      frame_path,
     }
 
 

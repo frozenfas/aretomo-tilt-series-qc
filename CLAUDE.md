@@ -108,44 +108,74 @@ in at least 7 files (`analyse.py`, `check_gain_transform.py`, `enrich.py`,
 this off for new code:
 
 - **Schema**: `project.json['frame_lookup']['per_ts'][ts_name] = {n_total,
-  frames, dark_secs, validated}`. `frames` is `{str(sec): {z_value,
-  sub_frame_path}}` for *every* SEC (aligned + dark). `dark_secs` is the
-  list of dark SECs. `validated` records whether `_TLT.txt`'s
+  frames, dark_secs, validated, frames_dir}`. `frames` is `{str(sec):
+  {z_value, sub_frame_path}}` for *every* SEC (aligned + dark). `dark_secs`
+  is the list of dark SECs. `validated` records whether `_TLT.txt`'s
   `nominal_tilt + alpha_offset` agreed with `.aln`'s TILT column (both
   frames and `DarkFrame` lines) to within 0.05° when this entry was built
   — a consistency check via tilt-angle agreement, not the cross-referencing
   mechanism itself (that's still exact SEC/`frame_b` keys throughout).
-- **Filename is captured at build time, not composed at read time.** An
-  earlier version of this design deliberately left `sub_frame_path` out of
-  `frame_lookup` (to avoid duplicating `mdoc_data`) and composed it lazily
-  in `resolve_frame()` via `get_ts_to_original_stem()` + `mdoc_data` on
-  every call. Reconsidered after hitting real fragility from it: a
-  real-project test where `mdoc_data` had been registered from a
-  non-standard directory (not the actual `rename-ts` symlink dir) made
-  `resolve_frame()` silently return `sub_frame_path=None` even though
-  `frame_lookup`'s own data was perfectly valid — a live dependency on
-  `rename_ts`/`mdoc_data` being correct *every time a frame is resolved*,
-  not just once. Baking the filename in when `register_frame_lookup()`
-  runs (composing with whatever `mdoc_data` is registered *then*) makes a
-  registered entry self-contained — `relion5_convert.py` (the main
-  filename consumer) needs only `frame_lookup`, not a live join. If
-  `mdoc_data` wasn't registered yet, `sub_frame_path` is `None` for that
-  run — re-run `enrich --frame-lookup --force` after registering
-  `mdoc_data` to backfill it.
+- **Filename and frames_dir are captured at build time, not composed at
+  read time.** An earlier version of this design deliberately left
+  `sub_frame_path` out of `frame_lookup` (to avoid duplicating
+  `mdoc_data`) and composed it lazily in `resolve_frame()` via
+  `get_ts_to_original_stem()` + `mdoc_data` on every call. Reconsidered
+  after hitting real fragility from it: a real-project test where
+  `mdoc_data` had been registered from a non-standard directory (not the
+  actual `rename-ts` symlink dir) made `resolve_frame()` silently return
+  `sub_frame_path=None` even though `frame_lookup`'s own data was
+  perfectly valid — a live dependency on `rename_ts`/`mdoc_data` being
+  correct *every time a frame is resolved*, not just once. Baking the
+  filename in when `register_frame_lookup()` runs (composing with
+  whatever `mdoc_data` is registered *then*) makes a registered entry
+  self-contained — a consumer that only needs ONE frame at a time (e.g.
+  `enrich.py`'s SEC-for-a-given-`acq_order` lookup) can read only
+  `frame_lookup`, no live join needed. `relion5_convert.py` itself still
+  reads `mdoc_data` directly (all frames for a TS in one dict, since it
+  needs every frame's `target_defocus` too, a field `frame_lookup`
+  deliberately doesn't carry — see the migration note below) rather than
+  calling `resolve_frame()` per-frame in its per-tilt loop, which would
+  mean one project.json re-read per tilt instead of one per TS. If
+  `mdoc_data` wasn't registered yet, `sub_frame_path`/`frames_dir` are
+  `None` for that run — re-run `enrich --frame-lookup --force` after
+  registering `mdoc_data` to backfill them.
+- **frames_dir + the co-location assumption.** AreTomo3 requires raw movie
+  files to live in the same directory as their mdoc — confirmed both by
+  `rename-ts`'s own symlinks being created "alongside the originals" (see
+  its docstring) and, directly, by `validate-mdoc --check-frames` (below).
+  `frames_dir` is recorded once per TS in `mdoc_data.per_ts[stem]` by
+  `validate-mdoc` (the validated mdoc's own resolved parent directory —
+  never whatever directory `SubFramePath` itself encodes, which is
+  typically a stale acquisition-PC Windows/UNC path), and copied into
+  `frame_lookup` by `register_frame_lookup()`. `resolve_frame()` composes
+  `frames_dir` with `sub_frame_path`'s filename (basename only — its own
+  directory is discarded) into a `frame_path` key: a full, real, usable
+  movie path with no further plumbing needed downstream.
+- **`validate-mdoc --check-frames`** verifies every `SubFramePath`-
+  referenced movie actually exists next to the mdoc — a real, fixable
+  problem (a missing/moved/not-yet-transferred movie) that no other check
+  catches, since the mdoc's own fields can be perfectly well-formed while
+  referencing a movie that isn't there. On by default at the CLI (use
+  `--no-check-frames` for workflows that validate mdocs before movies
+  finish transferring); `validate_file()`'s own function-level default
+  stays `False` so other callers (e.g. `run-aretomo3`'s preflight, which
+  doesn't pass `check_frames`) are unaffected. Not fixable by any other
+  `--fix-*` flag, so it always keeps `success=False` regardless of which
+  other fixes succeed on the same run.
 - **Built by** `shared/project_state.py:register_frame_lookup(out_dir)`,
   parsing that directory's `ts-*.aln` (for `dark_frames`, `alpha_offset`)
   + matching `ts-*_TLT.txt` (for the SEC↔z_value bridge, covering all SECs
   in one parse) per TS, composed with the already-registered `mdoc_data`
-  for filenames. Wired into `run-aretomo3 --cmd 0`'s completion (same
-  integration point as `input_stacks`' auto-fill) and into `enrich
-  --frame-lookup <dir>` (the manual/force-overwrite escape hatch, same
-  pattern as `enrich`'s other sections). Safe to call repeatedly — merges
-  into existing `per_ts` entries.
+  for filenames and `frames_dir`. Wired into `run-aretomo3 --cmd 0`'s
+  completion (same integration point as `input_stacks`' auto-fill) and
+  into `enrich --frame-lookup <dir>` (the manual/force-overwrite escape
+  hatch, same pattern as `enrich`'s other sections). Safe to call
+  repeatedly — merges into existing `per_ts` entries.
 - **Read via** `get_frame_lookup(ts_name)` (raw section) or
   `resolve_frame(ts_name, sec=... | z_value=... | acq_order=...)` (give
   exactly one identifier, get `{sec, z_value, acq_order, is_dark,
-  sub_frame_path}` back). Returns `None` — never raises — when the TS
-  isn't registered or the given id isn't found.
+  sub_frame_path, frame_path}` back). Returns `None` — never raises —
+  when the TS isn't registered or the given id isn't found.
 - **Migration is intentionally partial**: the other 6 files listed above
   (all except `enrich.py`, whose own defocus-lookup responsibility was
   removed rather than migrated — see the `defocus_data` note below) still
@@ -153,6 +183,12 @@ this off for new code:
   migrated in this change (same reasoning as `pytom_match.py`/
   `gapstop_match.py` not yet preferring IMOD `_st.tlt`, flagged in the
   alpha_offset section below rather than migrated all at once).
+  `relion5_convert.py`'s `_load_mdoc_from_project()` is a partial
+  exception: it still reads `mdoc_data` directly rather than
+  `frame_lookup` (see above for why), but its `frames_dir` resolution now
+  prefers `mdoc_data.per_ts[stem].frames_dir` directly, falling back to
+  the older `rename_ts.lookup`-derived path only for projects validated
+  before that field existed.
 
 **`defocus_data` (project.json section) — removed, deliberately not
 replaced by anything cached.** `enrich --defocus-data` used to parse
