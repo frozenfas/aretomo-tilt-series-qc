@@ -7,6 +7,12 @@ MRC dimensions, and printing a formatted command.
 import re
 import struct
 
+# AreTomo3 side-output stem substrings to exclude from input discovery --
+# was three independent hardcoded literals (run_aretomo3.py,
+# run_aretomo3_per_ts.py, enrich.py), all meant to stay identical but with
+# nothing enforcing that.
+DEFAULT_IN_SKIPS = ['_CTF', '_Vol', '_EVN', '_ODD']
+
 
 def print_cmd(cmd):
     """Print command multi-line, one flag+value per line."""

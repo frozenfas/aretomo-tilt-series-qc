@@ -14,7 +14,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from aretomo3_preprocess.shared.discovery import mrc_pixel_size, ts_name_from_vol
+from aretomo3_preprocess.shared.discovery import (
+    mrc_pixel_size, ts_name_from_vol, DEFAULT_IN_SKIPS,
+)
 
 
 def _write_fake_mrc_header(path: Path, nx: int, cell_x: float):
@@ -66,3 +68,51 @@ def test_ts_name_from_vol(filename, vol_suffix, expected):
 
 def test_ts_name_from_vol_no_match_returns_stem_unchanged():
     assert ts_name_from_vol(Path('ts-001_other.mrc'), '_Vol') == 'ts-001_other'
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DEFAULT_IN_SKIPS -- was three independent hardcoded literals
+# (run_aretomo3.py, run_aretomo3_per_ts.py, enrich.py)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_default_in_skips_value():
+    assert set(DEFAULT_IN_SKIPS) == {'_CTF', '_Vol', '_EVN', '_ODD'}
+
+
+def test_all_three_cli_parsers_share_the_same_in_skips_default():
+    import argparse
+    from aretomo3_preprocess.commands import run_aretomo3, run_aretomo3_per_ts, enrich
+
+    defaults = {}
+    for mod in (run_aretomo3, run_aretomo3_per_ts, enrich):
+        p = argparse.ArgumentParser()
+        sub = p.add_subparsers()
+        mod.add_parser(sub)
+        cmd_parser = next(iter(sub.choices.values()))
+        action = next(a for a in cmd_parser._actions if a.dest == 'in_skips')
+        defaults[mod.__name__] = action.default
+
+    values = list(defaults.values())
+    assert all(set(v) == set(DEFAULT_IN_SKIPS) for v in values), defaults
+
+
+def test_in_skips_defaults_are_independent_list_objects():
+    """Each add_argument() call must get its own list copy -- sharing the
+    same list object across parsers would let one command's argparse
+    mutate another's default."""
+    import argparse
+    from aretomo3_preprocess.commands import run_aretomo3, enrich
+
+    p1 = argparse.ArgumentParser()
+    sub1 = p1.add_subparsers()
+    run_aretomo3.add_parser(sub1)
+    action1 = next(a for a in next(iter(sub1.choices.values()))._actions
+                   if a.dest == 'in_skips')
+
+    p2 = argparse.ArgumentParser()
+    sub2 = p2.add_subparsers()
+    enrich.add_parser(sub2)
+    action2 = next(a for a in next(iter(sub2.choices.values()))._actions
+                   if a.dest == 'in_skips')
+
+    assert action1.default is not action2.default

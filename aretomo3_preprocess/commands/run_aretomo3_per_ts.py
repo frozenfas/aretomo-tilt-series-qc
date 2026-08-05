@@ -46,6 +46,7 @@ from aretomo3_preprocess.shared.project_state import (
     register_input_stacks, load_input_stacks, resolve_selected_ts,
     resolve_tool_path,
 )
+from aretomo3_preprocess.shared.discovery import DEFAULT_IN_SKIPS
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -222,12 +223,12 @@ def add_parser(subparsers):
                           'before running; required when --cmd 2 (reconstruction '
                           'only) and --output is a fresh directory')
     inp.add_argument('--in-skips', nargs='+',
-                     default=['_Vol', '_CTF', '_EVN', '_ODD'],
+                     default=list(DEFAULT_IN_SKIPS),
                      metavar='PATTERN',
                      help='Stem substrings to exclude from --mrcdir; '
-                          'default excludes AreTomo3 side files '
-                          '(_Vol _CTF _EVN _ODD). Pass an empty string to '
-                          'disable, or add extra patterns e.g. ts-005')
+                          f'default excludes AreTomo3 side files '
+                          f'({" ".join(DEFAULT_IN_SKIPS)}). Pass an empty string to '
+                          f'disable, or add extra patterns e.g. ts-005')
     inp.add_argument('--select-ts', default=None, metavar='CSV',
                      help='Path to ts-select.csv from select-ts; only '
                           'selected TS are processed. '

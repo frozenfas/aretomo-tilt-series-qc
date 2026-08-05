@@ -95,6 +95,7 @@ from aretomo3_preprocess.shared.project_state import (
     register_input_stacks, register_frame_lookup, resolve_selected_ts, resolve_tool_path,
 )
 from aretomo3_preprocess.shared.output_guard import check_disk_space
+from aretomo3_preprocess.shared.discovery import DEFAULT_IN_SKIPS
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1620,10 +1621,10 @@ def add_parser(subparsers):
     inp.add_argument('--in-suffix', default='mdoc',
                      help='Input file suffix for batch discovery (-InSuffix)')
     inp.add_argument('--in-skips', nargs='*', metavar='PATTERN',
-                     default=['_CTF', '_Vol', '_EVN', '_ODD'],
+                     default=list(DEFAULT_IN_SKIPS),
                      help='Filename stem substrings to exclude from input discovery '
-                          '(-InSkips). Default excludes AreTomo3 side outputs. '
-                          'Pass an empty string to disable.')
+                          f'(-InSkips). Default excludes AreTomo3 side outputs '
+                          f'({" ".join(DEFAULT_IN_SKIPS)}). Pass an empty string to disable.')
     inp.add_argument('--select-ts', default=None, metavar='CSV',
                      help='Path to ts-select.csv from select-ts; only the '
                           'selected TS are staged for cmd=1/2 runs. '

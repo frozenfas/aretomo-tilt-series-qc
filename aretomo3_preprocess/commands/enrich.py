@@ -76,6 +76,7 @@ from aretomo3_preprocess.shared.project_json import (
 from aretomo3_preprocess.shared.project_state import (
     register_input_stacks, record_tool_path, register_mdoc_data,
 )
+from aretomo3_preprocess.shared.discovery import DEFAULT_IN_SKIPS
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -261,9 +262,9 @@ def add_parser(subparsers):
                         'CLAUDE.md).  '
                         'Normally populated automatically by run-aretomo3 --cmd 0.')
     p.add_argument('--in-skips', nargs='*', metavar='PATTERN',
-                   default=['_CTF', '_Vol', '_EVN', '_ODD'],
+                   default=list(DEFAULT_IN_SKIPS),
                    help='Stem substrings to exclude when scanning --mrc-data '
-                        '(default: _CTF _Vol _EVN _ODD).')
+                        f'(default: {" ".join(DEFAULT_IN_SKIPS)}).')
     tools = p.add_argument_group('external tool paths')
     tools.add_argument('--set-path-aretomo3', default=None, metavar='PATH',
                        help='Remember an AreTomo3 binary/path for this project '
