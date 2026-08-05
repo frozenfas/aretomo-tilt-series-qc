@@ -98,6 +98,7 @@ from aretomo3_preprocess.shared.project_state import (
 from aretomo3_preprocess.shared.landing_page import write_landing_page
 from aretomo3_preprocess.shared.output_guard import check_output_dir
 from aretomo3_preprocess.shared.tilt_series_qc import select_ts as _select_ts, imod_env as _imod_env
+from aretomo3_preprocess.shared.discovery import mrc_pixel_size
 
 _DEFAULT_IMOD_DIR = '/opt/IMOD'
 
@@ -118,8 +119,10 @@ _RE_LR_INVERT  = re.compile(r'With angles inverted:\s*left\s*([\d.]+)\s*right\s*
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _apix_A(mrc_path) -> float:
-    with mrcfile.open(str(mrc_path), permissive=True, header_only=True) as mrc:
-        return float(mrc.voxel_size.x)
+    apix = mrc_pixel_size(mrc_path)
+    if apix is None:
+        raise ValueError(f'cannot read pixel size from {mrc_path}')
+    return apix
 
 
 def _scan_range_nm(ts_data: dict, pad_um: float):

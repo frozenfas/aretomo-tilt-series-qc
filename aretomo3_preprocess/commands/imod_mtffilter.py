@@ -17,8 +17,8 @@ Defocus values are read (in order of preference) from:
      value has no way to know it's gone stale (see CLAUDE.md).
   3. --defocus       global fallback value
 
-Pixel size is read from the MRC header of each volume (correct for binning).
-Falls back to --apix if mrcfile is not installed.
+Pixel size is read from the MRC header of each volume (correct for binning,
+no mrcfile dependency). Falls back to --apix if a header can't be read.
 
 Example
 -------
@@ -38,6 +38,9 @@ import argparse
 
 from aretomo3_preprocess.shared.parsers import compute_reference_defocus
 from aretomo3_preprocess.shared.output_guard import check_output_dir
+from aretomo3_preprocess.shared.discovery import (
+    ts_name_from_vol as _ts_name_from_vol, mrc_pixel_size,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -80,44 +83,6 @@ def _load_tsselect(csv_path: Path):
                 except ValueError:
                     pass
     return defocus_map, (selected_set or None)
-
-
-def _read_one_voxel_size(mrc_path: Path):
-    """Read pixel size (Å) from a single MRC header; return None on failure."""
-    try:
-        import mrcfile
-        with mrcfile.open(mrc_path, mode='r', permissive=True) as m:
-            ps = float(m.voxel_size.x)
-            if ps > 0:
-                return ps
-    except Exception:
-        pass
-    return None
-
-
-def _ts_name_from_vol(vol_path: Path, vol_suffix: str) -> str:
-    """
-    Extract ts_name from a volume Path.
-
-    Handles both AreTomo3 naming conventions:
-      ts-001_Vol.mrc      (single-bin main)  → ts-001
-      ts-001_EVN_Vol.mrc  (single-bin EVN)   → ts-001
-      ts-001_ODD_Vol.mrc  (single-bin ODD)   → ts-001
-      ts-001_b4.mrc       (multi-bin main)   → ts-001
-      ts-001_b4_EVN.mrc   (multi-bin EVN)    → ts-001
-      ts-001_b4_ODD.mrc   (multi-bin ODD)    → ts-001
-    """
-    stem = vol_path.stem
-    for tag in (
-        f'_EVN{vol_suffix}',   # e.g. _EVN_Vol  (single-bin EVN)
-        f'_ODD{vol_suffix}',   # e.g. _ODD_Vol  (single-bin ODD)
-        f'{vol_suffix}_EVN',   # e.g. _b4_EVN   (multi-bin EVN)
-        f'{vol_suffix}_ODD',   # e.g. _b4_ODD   (multi-bin ODD)
-        vol_suffix,            # e.g. _Vol, _b4 (main volume)
-    ):
-        if tag and stem.endswith(tag):
-            return stem[: -len(tag)]
-    return stem
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -265,9 +230,9 @@ def run(args):
     # below (correct even when a batch mixes bin levels/pixel sizes);
     # --apix is used only for volumes whose header can't be read. This
     # upfront check just fails fast when neither source is available at all.
-    first_apix = _read_one_voxel_size(vol_files[0])
+    first_apix = mrc_pixel_size(vol_files[0])
     if first_apix is None and args.apix is None:
-        print('ERROR: cannot determine pixel size — install mrcfile or supply --apix')
+        print(f'ERROR: cannot read pixel size from {vol_files[0]} — supply --apix')
         sys.exit(1)
     if first_apix is not None:
         summary.append(f'Pixel size        : read per-volume from MRC header '
@@ -317,7 +282,7 @@ def run(args):
         out_path = out_dir / vol_path.name
 
         # Pixel size: this volume's own MRC header > global --apix
-        apix = _read_one_voxel_size(vol_path)
+        apix = mrc_pixel_size(vol_path)
         if apix is None:
             if args.apix is None:
                 print(f'  SKIP  {vol_path.name}: cannot determine pixel size '

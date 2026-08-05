@@ -94,7 +94,16 @@ from aretomo3_preprocess.shared.discovery import (
     print_cmd as _print_cmd,
     find_volumes as _find_volumes,
     filter_by_include_exclude,
+    mrc_pixel_size,
 )
+
+
+def _read_voxel_size(mrc_path):
+    apix = mrc_pixel_size(mrc_path)
+    if apix is None:
+        raise ValueError(f'cannot read pixel size from {mrc_path}')
+    return apix
+
 
 _IMOD_DIR   = '/opt/IMOD'
 _BINVOL_BIN = f'{_IMOD_DIR}/bin/binvol'
@@ -178,12 +187,6 @@ _PARTICLES = {
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
-
-def _read_voxel_size(mrc_path):
-    import mrcfile
-    with mrcfile.open(mrc_path, permissive=True) as m:
-        return float(m.voxel_size.x)
-
 
 def _detect_gpus():
     """Auto-detect GPU indices via nvidia-smi; [] if none found."""

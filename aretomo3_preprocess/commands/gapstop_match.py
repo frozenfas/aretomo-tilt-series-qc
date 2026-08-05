@@ -49,7 +49,6 @@ Typical usage
 import re
 import os
 import sys
-import struct
 import shutil
 import datetime
 import subprocess
@@ -77,6 +76,7 @@ from aretomo3_preprocess.shared.discovery import (
     print_cmd as _print_cmd,
     find_volumes as _find_volumes,
     mrc_dims as _mrc_dims,
+    mrc_pixel_size as _mrc_angpix,
     filter_by_include_exclude,
 )
 
@@ -110,17 +110,6 @@ def _find_gapstop_python(gapstop_dir=None):
         if Path(c).exists():
             return c
     return shutil.which('python3')
-
-
-def _mrc_angpix(mrc_path):
-    """Read pixel size (Å/px) from MRC header cell_a.x / nx."""
-    with open(mrc_path, 'rb') as f:
-        hdr = f.read(1024)
-    nx = struct.unpack_from('<i', hdr, 0)[0]
-    cell_x = struct.unpack_from('<f', hdr, 40)[0]  # bytes 40-43 = xlen
-    if nx > 0 and cell_x > 0:
-        return cell_x / nx
-    return None
 
 
 def _read_ts_metadata(aretomo_dir, prefix, dose_override=None):

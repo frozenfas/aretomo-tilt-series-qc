@@ -48,22 +48,7 @@ from aretomo3_preprocess.shared.project_json import load_or_create
 from aretomo3_preprocess.commands.topaz_train import _find_latest_model
 from aretomo3_preprocess.shared.project_state import resolve_selected_ts
 from aretomo3_preprocess.shared.output_guard import check_output_dir
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _ts_name_from_vol(vol_path: Path, vol_suffix: str) -> str:
-    stem = vol_path.stem
-    for tag in (
-        f'_EVN{vol_suffix}', f'_ODD{vol_suffix}',
-        f'{vol_suffix}_EVN', f'{vol_suffix}_ODD',
-        vol_suffix,
-    ):
-        if tag and stem.endswith(tag):
-            return stem[: -len(tag)]
-    return stem
+from aretomo3_preprocess.shared.discovery import ts_name_from_vol as _ts_name_from_vol
 
 
 PRETRAINED_MODELS = {'unet-3d', 'unet-3d-10a', 'unet-3d-20a'}

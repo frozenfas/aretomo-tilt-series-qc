@@ -45,11 +45,68 @@ def find_volumes(in_dir, vol_suffix=None):
     return [(_prefix(v), v) for v in vols]
 
 
+def ts_name_from_vol(vol_path, vol_suffix: str) -> str:
+    """
+    Extract ts_name from a volume Path, stripping vol_suffix and, if
+    present, an adjacent _EVN/_ODD denoising-split tag in either order.
+
+    Handles both AreTomo3 naming conventions (vol_suffix='_Vol' by default,
+    but may be any user-supplied trailing tag, e.g. '_b4' for a multi-bin
+    output with no separate _Vol tag at all):
+      ts-001_Vol.mrc      (single-bin main)  -> ts-001
+      ts-001_EVN_Vol.mrc  (single-bin EVN)   -> ts-001
+      ts-001_ODD_Vol.mrc  (single-bin ODD)   -> ts-001
+      ts-001_b4.mrc       (multi-bin main)   -> ts-001
+      ts-001_b4_EVN.mrc   (multi-bin EVN)    -> ts-001
+      ts-001_b4_ODD.mrc   (multi-bin ODD)    -> ts-001
+
+    Consolidates two byte-for-byte identical copies (imod_mtffilter.py,
+    topaz_denoise3d.py). Distinct from find_volumes()'s own internal
+    prefix-stripping: that one only ever sees already-EVN/ODD-filtered
+    filenames and a narrower vol_suffix meaning (a bin tag inserted before
+    a literal '_Vol', not an arbitrary user-supplied trailing tag), so it
+    isn't a meaningful duplicate of this.
+    """
+    stem = vol_path.stem
+    for tag in (
+        f'_EVN{vol_suffix}',   # e.g. _EVN_Vol  (single-bin EVN)
+        f'_ODD{vol_suffix}',   # e.g. _ODD_Vol  (single-bin ODD)
+        f'{vol_suffix}_EVN',   # e.g. _b4_EVN   (multi-bin EVN)
+        f'{vol_suffix}_ODD',   # e.g. _b4_ODD   (multi-bin ODD)
+        vol_suffix,            # e.g. _Vol, _b4 (main volume)
+    ):
+        if tag and stem.endswith(tag):
+            return stem[: -len(tag)]
+    return stem
+
+
 def mrc_dims(mrc_path):
     """Read (nx, ny, nz) from an MRC header without a mrcfile dependency."""
     with open(mrc_path, 'rb') as f:
         hdr = f.read(12)
     return struct.unpack_from('<3i', hdr, 0)
+
+
+def mrc_pixel_size(mrc_path):
+    """
+    Read pixel size (Angstrom/px) from an MRC header without a mrcfile
+    dependency (cella.x / nx -- nx and mx agree in every file this codebase
+    produces, confirmed against real data). Returns None if the header
+    can't be read or yields a non-positive size; never raises.
+
+    Consolidates 4 independent implementations that had drifted apart
+    (gapstop_match.py's own struct-based reader, plus three separate
+    mrcfile-based ones in ctf_handedness.py/imod_mtffilter.py/
+    pytom_ribo_auto.py) -- verified numerically identical to mrcfile's own
+    voxel_size.x (to float32 rounding) before consolidating.
+    """
+    with open(mrc_path, 'rb') as f:
+        hdr = f.read(1024)
+    nx = struct.unpack_from('<i', hdr, 0)[0]
+    cell_x = struct.unpack_from('<f', hdr, 40)[0]  # bytes 40-43 = xlen
+    if nx > 0 and cell_x > 0:
+        return cell_x / nx
+    return None
 
 
 def filter_by_include_exclude(prefixes, include, exclude):
