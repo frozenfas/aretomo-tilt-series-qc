@@ -476,6 +476,17 @@ the pre-fix (wrong) understanding.
   again" true after a manual correction too — the old header-only
   behavior would have left a correction recorded but never actually
   applied anywhere, since no consumer adds it anymore.
+- **`aln-edit`'s `.aln`/`.tlt` pair update is now crash-safe.** Each file
+  write goes through `_atomic_write_text()` (temp file + `os.replace()`,
+  mirroring `project_json.py`'s own pattern) so a killed process can no
+  longer truncate either file. True two-file atomicity across the `.aln`
+  and its IMOD companion isn't achievable without a transaction log, so
+  instead `_find_half_applied_pairs()` detects the half-applied state a
+  crash *between* the two writes would leave (the `.aln` has a `.bak` —
+  meaning it was already offset — while its IMOD companion exists but has
+  no `.bak` of its own, meaning that half of the pair was never reached)
+  and refuses to proceed until it's resolved by hand, rather than risk
+  silently compounding an inconsistent pair.
 - **`ctf_handedness.py`** reads `alpha_offset` directly from `--aln-dir`'s
   own `.aln` (not from `--analysis`'s `alignment_data.json`, which can be
   a *different* AreTomo3 run processed with a different `-TiltCor`

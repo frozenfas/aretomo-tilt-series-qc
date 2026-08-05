@@ -36,12 +36,59 @@ Usage
 """
 
 import argparse
+import os
 import re
 import shutil
 import sys
 from pathlib import Path
 
 _ALPHA_RE = re.compile(r'^(#\s*AlphaOffset\s*=\s*)([-\d.]+)(.*)')
+
+
+def _atomic_write_text(path: Path, text: str):
+    """
+    Write atomically: full contents land in a same-directory temp file
+    first, then one os.replace() swaps it into place -- mirrors
+    shared/project_json.py's own atomic-write pattern. A plain
+    write_text() would leave a truncated, corrupt .aln/.tlt file behind
+    if the write is interrupted (killed process, out of disk) partway
+    through.
+
+    This protects each INDIVIDUAL file against truncation, but not the
+    .aln/.tlt PAIR against a crash between the two separate writes (one
+    file already offset, the other not) -- see _find_half_applied_pairs()
+    for how that's detected instead, since true two-file atomicity isn't
+    available without a transaction log across the filesystem.
+    """
+    tmp_path = path.with_suffix(path.suffix + f'.tmp{os.getpid()}')
+    try:
+        tmp_path.write_text(text)
+        os.replace(tmp_path, path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def _find_half_applied_pairs(aln_files: list) -> list:
+    """
+    Detect a TS left in a half-applied state by a previous run crashing
+    between the .aln write and its paired IMOD _st.tlt write (or between
+    backing up one and the other) -- .bak files are always created
+    together, right before their matching primary write, in the same
+    run, so aln_path.bak existing while the IMOD file exists but its own
+    .bak does not is unambiguous evidence that an earlier run got partway
+    through this TS's pair and stopped.
+
+    Returns a list of aln_path for every TS in this inconsistent state.
+    """
+    half_applied = []
+    for aln_path in aln_files:
+        aln_bak = aln_path.with_suffix(aln_path.suffix + '.bak')
+        imod_path = _imod_tlt_path(aln_path)
+        imod_bak = imod_path.with_suffix(imod_path.suffix + '.bak')
+        if aln_bak.exists() and imod_path.exists() and not imod_bak.exists():
+            half_applied.append(aln_path)
+    return half_applied
 
 
 def add_parser(subparsers):
@@ -137,6 +184,23 @@ def _rewrite_imod_tlt(src_text: str, offset: float) -> tuple:
 def _apply_offset(aln_files: list, offset: float, dry_run: bool):
     prefix = '[DRY RUN] ' if dry_run else ''
 
+    # A previous run that crashed between backing up/writing the .aln and
+    # doing the same for its paired IMOD _st.tlt would otherwise go
+    # undetected -- one file offset, the other not, with no marker of
+    # that half-applied state. Refuse to proceed until it's resolved by
+    # hand rather than risk compounding it.
+    half_applied = _find_half_applied_pairs(aln_files)
+    if half_applied:
+        print(f'ERROR: {len(half_applied)} TS appear to be in a half-applied state '
+              f'from an interrupted previous run (the .aln has a .bak but its paired '
+              f'IMOD _st.tlt does not, even though the _st.tlt file exists):')
+        for f in half_applied:
+            print(f'  {f.name}')
+        print('\nInspect these by hand -- restore the .aln from its .bak (--restore '
+              'reverts every TS, not just these) and re-run --apply-offset once the '
+              'pair is consistent again.')
+        sys.exit(1)
+
     already_backed_up = [f for f in aln_files
                          if f.with_suffix(f.suffix + '.bak').exists()]
     if already_backed_up:
@@ -174,7 +238,7 @@ def _apply_offset(aln_files: list, offset: float, dry_run: bool):
         print(f'{prefix}Offset : {aln_path.name}  (AlphaOffset header + TILT column, '
               f'{n_rows} tilts, {offset:+.4f}°)')
         if not dry_run:
-            aln_path.write_text(new_text)
+            _atomic_write_text(aln_path, new_text)
 
         imod_path = _imod_tlt_path(aln_path)
         if not imod_path.exists():
@@ -190,7 +254,7 @@ def _apply_offset(aln_files: list, offset: float, dry_run: bool):
         new_imod_text, n_imod_rows = _rewrite_imod_tlt(imod_src.read_text(), offset)
         print(f'{prefix}Offset : {imod_path.name}  ({n_imod_rows} tilts, {offset:+.4f}°)')
         if not dry_run:
-            imod_path.write_text(new_imod_text)
+            _atomic_write_text(imod_path, new_imod_text)
 
     print()
     if dry_run:
