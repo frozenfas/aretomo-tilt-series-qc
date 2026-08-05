@@ -75,6 +75,20 @@ downstream output with no warning: re-running `analyse` with a different
 invalidated or regenerated automatically. Re-run `trim-ts`/`select-ts` after
 any `analyse` re-run rather than assuming their output is still current.
 
+**`trim-ts --threshold` is informational only, never a live filter.** The
+actual overlap-based exclusion (`is_flagged`, driving `clean_keep`) is
+already baked into `alignment_data.json` by `analyse`'s own `--threshold`
+at analysis time — `trim-ts --threshold` never re-filters anything itself.
+Before 2026-08 this was silently misleading: `trim-ts --threshold 70`
+against data built with `analyse --threshold 80` printed "70%" in the run
+summary while every actual exclusion still came from the 80% `analyse`
+used. `_resolve_effective_threshold()` now reads the real value from
+`project.json`'s `analyse.args.threshold`, warns on a mismatch against
+the CLI value, and the run summary always prints the value actually in
+effect (falling back to the CLI value with no warning if no recorded
+`analyse` run is found, e.g. `alignment_data.json` from an external
+source).
+
 **Cross-referencing frames — use the identifiers already in the data,
 don't re-derive a match.** Every frame dict in `alignment_data.json` (and
 the `.aln`/`_TLT.txt`/mdoc files it's built from) carries AreTomo3's own

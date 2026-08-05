@@ -33,6 +33,7 @@ import subprocess
 from pathlib import Path
 
 from aretomo3_preprocess.shared.project_state import get_input_stacks, resolve_selected_ts
+from aretomo3_preprocess.shared.project_json import load as load_project
 
 try:
     from tqdm import tqdm as _tqdm
@@ -229,11 +230,16 @@ def add_parser(subparsers):
     p.add_argument('--output',    '-o', default='run002_analysis',
                    help='Analysis output directory (must contain alignment_data.json)')
     p.add_argument('--threshold', '-t', type=float, default=80.0,
-                   help='Overlap threshold used in the analyse step')
+                   help='Informational only -- NOT applied here. The actual '
+                        'overlap-based exclusion (which frames are '
+                        'is_flagged) was already baked into '
+                        'alignment_data.json by analyse\'s own --threshold '
+                        'at analysis time; this just lets a mismatch against '
+                        'that recorded value be caught and warned about.')
     p.add_argument('--bin',       '-b', type=int, default=8,
                    help='BinByFactor for newstack')
     p.add_argument('--select-ts', default=None, metavar='CSV',
-                   help='Path to ts_selection.csv from select-ts; only the '
+                   help='Path to ts-select.csv from select-ts; only the '
                         'selected TS are processed.')
     p.add_argument('--run-submfg', choices=['none', 'nodark', 'clean', 'both'],
                    default='none',
@@ -251,6 +257,32 @@ def add_parser(subparsers):
     return p
 
 
+def _resolve_effective_threshold(args, project, json_path):
+    """
+    --threshold is informational only -- the real overlap-based exclusion
+    (is_flagged, used to build clean_keep) was already computed and baked
+    into alignment_data.json by analyse's own --threshold at analysis
+    time. Re-running trim-ts --threshold 70 against data built with
+    analyse --threshold 80 used to silently print "70%" while every
+    actual exclusion still came from the 80% analyse used.
+
+    Returns (effective_threshold, recorded_threshold, warning_or_None).
+    recorded_threshold is None if project.json has no analyse.args.threshold
+    (e.g. alignment_data.json came from an external/older source) -- falls
+    back to args.threshold with no warning in that case.
+    """
+    recorded = project.get('analyse', {}).get('args', {}).get('threshold')
+    effective = recorded if recorded is not None else args.threshold
+    warning = None
+    if recorded is not None and recorded != args.threshold:
+        warning = (f'--threshold {args.threshold} differs from the '
+                   f'{recorded}% actually used by the analyse run that '
+                   f'built {json_path.name} -- {recorded}% is what is '
+                   f'actually in effect (is_flagged was computed with it), '
+                   f'not the value given here.')
+    return effective, recorded, warning
+
+
 def run(args):
     in_dir  = Path(args.input).resolve()
     out_dir = Path(args.output).resolve()
@@ -262,6 +294,12 @@ def run(args):
 
     with open(json_path) as fh:
         all_parsed = json.load(fh)
+
+    # ── Overlap threshold consistency check ───────────────────────────────────
+    effective_thres, recorded_thres, thres_warning = _resolve_effective_threshold(
+        args, load_project(), json_path)
+    if thres_warning:
+        print(f'WARNING: {thres_warning}\n')
 
     # ── TS selection filter ───────────────────────────────────────────────────
     selected_ts = resolve_selected_ts(getattr(args, 'select_ts', None))
@@ -303,7 +341,9 @@ def run(args):
     print(f'{tag}Trimming IMOD support files into : {out_dir}')
     print(f'{tag}Source _Imod directories         : {in_dir}')
     print(f'{tag}Bin factor                       : {args.bin}')
-    print(f'{tag}Overlap threshold                : {args.threshold}%\n')
+    print(f'{tag}Overlap threshold                : {effective_thres}%'
+          + ('' if recorded_thres is not None
+             else '  (assumed -- no recorded analyse run found)') + '\n')
 
     sep = '─' * 68
     n_done = n_skip = 0
