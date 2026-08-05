@@ -388,8 +388,28 @@ def _build_cmd(args) -> list:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _read_mdoc_metadata(mdoc_path: Path) -> dict:
-    """Extract PixelSpacing, Voltage, and SubFramePath from a mdoc file
-    (first occurrence of each)."""
+    """
+    Extract PixelSpacing, Voltage, and SubFramePath from a mdoc file
+    (first occurrence of each) via a cheap line-by-line regex scan,
+    stopping as soon as all three are found.
+
+    Deliberately NOT shared/parsers.py:parse_mdoc_file -- this is called
+    in a loop over every mdoc in the batch (see the PixelSpacing/Voltage
+    cross-file consistency check below), potentially hundreds of files,
+    purely to compare 3 first-occurrence scalar values that don't vary
+    meaningfully within one mdoc. parse_mdoc_file's mdocfile-based parse
+    reads every ZValue section (needed for the rich per-frame data it
+    populates project.json's mdoc_data with) -- correct for that job, but
+    unnecessary overhead multiplied across a whole batch just to read 3
+    values from near the top of each file. See CLAUDE.md/validate_mdoc.py
+    for the (separate, and separately reconciled) relationship between
+    validate_mdoc.py's own destructive-parser simulation and
+    parse_mdoc_file: validate_file()'s check_mdocfile_agreement() cross-
+    checks those two directly, since a mismatch there is the class of bug
+    that actually matters (project.json getting populated with data that
+    doesn't match what AreTomo3 will do) -- not a 3-way merge with this
+    function, which never populates project.json at all.
+    """
     fields = {}
     try:
         with open(mdoc_path) as fh:

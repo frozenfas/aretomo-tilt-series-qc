@@ -222,7 +222,7 @@ never cached) is the concrete example of the second.
 helpers:
 - `parsers.py` — `parse_aln_file`/`parse_ctf_file`/`parse_tlt_file`/`parse_mdoc_file`/`check_nominal_tilt_consistency`/`compute_reference_defocus`. Always reuse these instead of hand-rolling `.aln`/`.mdoc` parsing.
 - `project_json.py` / `project_state.py` — the state file API above, plus resolving `--select-ts`, plus `frame_lookup`'s `register_frame_lookup`/`get_frame_lookup`/`resolve_frame`.
-- `discovery.py` — volume discovery (`ts-*_Vol.mrc` + legacy `ts-*.mrc` fallback), MRC header dims, `--include`/`--exclude` glob filtering. Used by `membrain_seg.py`, `slabify.py`, `pytom_match.py`, `gapstop_match.py`, `simple_box_mask.py`.
+- `discovery.py` — volume discovery (`ts-*_Vol.mrc` + legacy `ts-*.mrc` fallback), MRC header dims (`mrc_dims`) and pixel size (`mrc_pixel_size`, struct-based, no `mrcfile` dependency), ts-name-from-volume-filename extraction (`ts_name_from_vol`, EVN/ODD-aware), `--include`/`--exclude` glob filtering. Used by `membrain_seg.py`, `slabify.py`, `pytom_match.py`, `gapstop_match.py`, `simple_box_mask.py`, `ctf_handedness.py`, `imod_mtffilter.py`, `pytom_ribo_auto.py`, `topaz_denoise3d.py`.
 - `denoise_training.py` — EVN/ODD pair discovery, `ts-select.csv` defocus loading, defocus-stratified sampling. Used by `cryocare.py`, `deep_dewedge.py`, `deep_dewedge_mw.py`, `topaz_train.py`.
 - `volume_qc.py` — shared HTML/plot generation for QC reports (slabs, orthoslices, picks overlays).
 - `output_guard.py`, `geometry.py`, `colours.py` — smaller single-purpose helpers.
@@ -230,6 +230,38 @@ helpers:
 If you're about to copy a helper function into a new command file, check
 `shared/` first — this codebase has a history of the same function drifting
 into 5+ near-identical copies before being consolidated.
+
+**Three mdoc parsers exist on purpose — not unreconciled duplication, but
+each answering a genuinely different question:**
+1. **`validate_mdoc.py`'s `_simulate_aretomo3`** — a hand-rolled state
+   machine that faithfully mimics AreTomo3's own destructive C++ mdoc
+   parser (including its bugs, e.g. field-order sensitivity), to predict
+   whether AreTomo3 itself will successfully load a given file. This one
+   *cannot* be replaced by a "real" parser without losing the entire
+   point of the check.
+2. **`shared/parsers.py:parse_mdoc_file`** — the real, robust parse via
+   the `mdocfile` library. The only one of the three that actually
+   populates `mdoc_data` in project.json; every downstream command reads
+   *this* parser's output, never the other two's.
+3. **`run_aretomo3.py:_read_mdoc_metadata`** — a cheap first-occurrence
+   regex scan for exactly 3 scalar fields (PixelSpacing/Voltage/
+   SubFramePath), used in a loop over every mdoc in a batch (potentially
+   hundreds of files) purely for cross-file consistency warnings. Using
+   `parse_mdoc_file` here would mean parsing every `ZValue` section of
+   every file just to read 3 values that don't vary within one mdoc —
+   real, unnecessary overhead at batch scale, not laziness.
+
+**The one real risk this split creates** — a file that "passes" #1's
+simulation but that #2 parses differently, meaning project.json's
+`mdoc_data` might not reflect what AreTomo3 will actually do with the
+file — is what `validate_mdoc.py:check_mdocfile_agreement()` (added
+2026-08) directly guards against: when a file passes the simulation +
+order checks, it's cross-checked against `parse_mdoc_file`'s own section
+count, and a disagreement blocks `success` the same way a missing frame
+(`--check-frames`) does. Verified zero disagreements across 484 real
+mdocs before making this blocking, so it's a defensive guard against a
+previously-flagged theoretical risk, not a currently-observed failure
+mode.
 
 **External tool wrappers.** Most non-core commands (`pytom_match.py`,
 `gapstop_match.py`, `membrain_seg.py`, `cryocare.py`, `deep_dewedge*.py`,

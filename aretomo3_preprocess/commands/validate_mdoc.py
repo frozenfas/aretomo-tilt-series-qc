@@ -164,6 +164,37 @@ def _frame_basename(raw_path: str) -> str:
     return re.split(r'[\\/]+', raw_path.strip())[-1]
 
 
+def check_mdocfile_agreement(mdoc_path) -> dict:
+    """
+    Cross-check this file's own destructive-simulation section count
+    against shared/parsers.py:parse_mdoc_file's real, mdocfile-library
+    parse -- the SAME function that actually populates mdoc_data in
+    project.json (via _save_mdoc_to_project below). These are two
+    independent implementations with genuinely different purposes
+    (_simulate_aretomo3 faithfully mimics AreTomo3's own destructive C++
+    parser; parse_mdoc_file does a robust real parse via the mdocfile
+    library), so agreement isn't guaranteed by construction --
+    disagreement means the data actually saved to project.json may not
+    reflect what AreTomo3 will do with this file, a distinct risk from
+    either parser being independently "wrong" (run_aretomo3.py's own code
+    comments already flagged this as a known, previously-unchecked risk).
+
+    Empirically verified zero disagreements across 484 real mdocs that
+    otherwise pass validate-mdoc's checks before making this blocking
+    (2026-08) -- a theoretical risk worth guarding against even though it
+    wasn't observed to currently manifest.
+
+    Returns {'n_mdocfile': int|None}. None means mdocfile isn't installed
+    (parse_mdoc_file degrades gracefully to an empty dict in that case) --
+    treated by the caller as "can't check", not a disagreement.
+    """
+    from aretomo3_preprocess.shared.parsers import parse_mdoc_file, _HAS_MDOCFILE
+    if not _HAS_MDOCFILE:
+        return {'n_mdocfile': None}
+    frames, _, _ = parse_mdoc_file(mdoc_path)
+    return {'n_mdocfile': len(frames)}
+
+
 def check_frames_found(mdoc_path, lines) -> dict:
     """
     Verify every SubFramePath-referenced movie file actually exists next to
@@ -912,14 +943,32 @@ def validate_file(path, fix_dose=False, fix_exptime=False, fix_order=False,
                 len(frame_check['missing']), frame_check['n_frames'],
                 Path(path).resolve().parent, preview))
 
+    # Only worth cross-checking against the mdocfile-based parser once the
+    # simulation+order checks already look clean -- a file already known
+    # broken doesn't need a second opinion.
+    mdocfile_ok = True
+    if failure is None and not order_issues:
+        agreement = check_mdocfile_agreement(path)
+        n_mdocfile = agreement['n_mdocfile']
+        if n_mdocfile is not None and n_mdocfile != n_tilts:
+            mdocfile_ok = False
+            issues.append(
+                'Passes AreTomo3-parser simulation ({} tilts) but the '
+                'mdocfile library (the parser that actually populates '
+                'project.json mdoc_data) parses {} sections -- the data '
+                'saved to project.json may not match what AreTomo3 '
+                'actually does with this file.'.format(n_tilts, n_mdocfile))
+
     result = dict(
         path=path,
         # A file that "passes" the simulation but has an order problem is
         # NOT actually fine -- it's exactly the case that produces
         # corrupted-but-successful output. Report it as failing. Same for
         # a movie file that can't be found -- AreTomo3 will fail on it
-        # regardless of how clean the mdoc's own fields are.
-        success=(failure is None and not order_issues and frames_ok),
+        # regardless of how clean the mdoc's own fields are. Same for a
+        # section-count disagreement with the mdocfile-based parser that
+        # actually populates project.json.
+        success=(failure is None and not order_issues and frames_ok and mdocfile_ok),
         n_tilts=n_tilts,
         failure=failure,
         issues=issues,
@@ -1068,8 +1117,19 @@ def validate_file(path, fix_dose=False, fix_exptime=False, fix_order=False,
     result['fix_types'] = fix_types
     result['n_injected'] = n_injected_total
     # reorder/dose/exptime never touch SubFramePath, so frames_ok (checked
-    # against the original lines above) still applies unchanged.
-    result['success'] = frames_ok
+    # against the original lines above) still applies unchanged. The
+    # mdocfile-agreement check does need re-checking against n_after
+    # (the fix commonly changes the simulation's own recovered tilt
+    # count -- that's the point of --fix-order) even though SubFramePath
+    # itself is untouched so the mdocfile-parsed count won't have moved.
+    agreement_after = check_mdocfile_agreement(path)
+    n_mdocfile_after = agreement_after['n_mdocfile']
+    mdocfile_ok_after = n_mdocfile_after is None or n_mdocfile_after == n_after
+    if not mdocfile_ok_after:
+        result['issues'].append(
+            'Fix applied, but mdocfile library still parses {} sections vs '
+            '{} tilts recovered by the simulation.'.format(n_mdocfile_after, n_after))
+    result['success'] = frames_ok and mdocfile_ok_after
     result['n_tilts'] = n_after
     result['failure'] = None
     result['order_issues'] = []
