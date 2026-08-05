@@ -118,6 +118,55 @@ _RE_LR_INVERT  = re.compile(r'With angles inverted:\s*left\s*([\d.]+)\s*right\s*
 # Small helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _resolve_aln_dir(args, analysis_dir: Path, proj: dict) -> tuple:
+    """
+    Resolve --aln-dir, verifying it actually corresponds to the analyse
+    run that built --analysis's own alignment_data.json.
+
+    When --aln-dir is omitted, the old fallback (proj.get('analyse', {})
+    ['args']['input'], the CURRENT working directory's live project.json)
+    is the MOST RECENTLY RUN analyse invocation, which is not necessarily
+    the one that built THIS --analysis dir -- if the user ran analyse
+    multiple times into different --output dirs (e.g. different
+    -TiltCor settings), this could silently point --aln-dir at a
+    different run's .aln files. Exactly the run-mismatch class this
+    module's own extensive comments already warn about, previously
+    unguarded in the one place it could actually happen silently.
+
+    update_section()'s backup_dir mechanism (see project_json.py) already
+    writes a full project.json snapshot into analyse's own --output dir
+    on every run, so analysis_dir/aretomo3_project.json's own
+    analyse.args.input is a self-describing, guaranteed-correct source
+    for THIS specific run -- preferred over the CWD's live project.json,
+    which only ever holds the single most-recently-run analyse's args.
+
+    Returns (aln_dir: Path, warning: str | None).
+    """
+    if args.aln_dir:
+        return Path(args.aln_dir), None
+
+    backup_json = analysis_dir / 'aretomo3_project.json'
+    if backup_json.exists():
+        try:
+            backup_proj = json.loads(backup_json.read_text())
+            recorded = backup_proj.get('analyse', {}).get('args', {}).get('input')
+            if recorded:
+                return Path(recorded), None
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    recorded = proj.get('analyse', {}).get('args', {}).get('input')
+    if recorded:
+        return Path(recorded), (
+            f'--aln-dir not given and no aretomo3_project.json backup found in '
+            f'{analysis_dir} -- falling back to the CURRENT working directory\'s '
+            f'most-recently-run analyse invocation, which may not be the one '
+            f'that built {analysis_dir}/alignment_data.json if analyse has been '
+            f'run more than once (e.g. different -TiltCor settings). Pass '
+            f'--aln-dir explicitly to remove this ambiguity.')
+
+    return None, None
+
 def _apix_A(mrc_path) -> float:
     apix = mrc_pixel_size(mrc_path)
     if apix is None:
@@ -674,7 +723,11 @@ def add_parser(subparsers):
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 
     p.add_argument('--analysis', '-A', help='analyse output dir (has alignment_data.json); default: latest recorded')
-    p.add_argument('--aln-dir', help='dir with ts-XXX_Imod/ subdirs (analyse\'s own --input); default from project.json')
+    p.add_argument('--aln-dir', help='dir with ts-XXX_Imod/ subdirs (analyse\'s own '
+                   '--input); default: the analyse run recorded in --analysis\'s own '
+                   'aretomo3_project.json backup if present (guaranteed to match), '
+                   'else the most recently run analyse in the current project.json '
+                   '(may not match --analysis if analyse has been run more than once)')
     p.add_argument('--cmd0-dir', help='run-aretomo3 --cmd 0 output dir (has ts-XXX.mrc); default from project.json')
     p.add_argument('--output', '-o', default='ctf_handedness_qc', help='output directory (default: ctf_handedness_qc)')
 
@@ -712,10 +765,11 @@ def run(args):
         sys.exit(f'ctf-handedness: {alignment_json} not found')
     alignment_data = json.loads(alignment_json.read_text())
 
-    aln_dir = args.aln_dir or proj.get('analyse', {}).get('args', {}).get('input')
+    aln_dir, aln_dir_warning = _resolve_aln_dir(args, analysis_dir, proj)
     if not aln_dir:
         sys.exit('ctf-handedness: --aln-dir not given and analyse.args.input not recorded in project.json')
-    aln_dir = Path(aln_dir)
+    if aln_dir_warning:
+        print(f'WARNING: {aln_dir_warning}')
 
     cmd0_dir = Path(args.cmd0_dir) if args.cmd0_dir else get_cmd0_outdir()
     if not cmd0_dir:

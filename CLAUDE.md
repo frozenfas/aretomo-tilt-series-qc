@@ -496,6 +496,22 @@ the pre-fix (wrong) understanding.
   observation (a defocus-vs-tilt delta plot crossing zero at nominal tilt
   ≈ 0 instead of the naively-expected ≈ `-AlphaOffset` — expected once you
   know the plotted `.tlt` was already alpha-offset-corrected).
+- **`ctf_handedness.py`'s `--aln-dir` default is now verified against
+  `--analysis`, not just the most-recently-run `analyse`.** When
+  `--aln-dir` is omitted, the old fallback read the CURRENT working
+  directory's live `project.json` — the single most-recently-run
+  `analyse` invocation, not necessarily the one that built the given
+  `--analysis`'s own `alignment_data.json`. Running `analyse` more than
+  once into different `--output` dirs (e.g. different `-TiltCor`
+  settings, exactly the mismatch this file's own comments above already
+  warn about) could silently point `--aln-dir` at the wrong run.
+  `_resolve_aln_dir()` now prefers `--analysis`'s own
+  `aretomo3_project.json` backup snapshot (written into every `analyse`
+  output dir by `update_section()`'s `backup_dir` mechanism — see
+  `project_json.py`), which is self-describing and guaranteed to match;
+  only falls back to the CWD's live `project.json` (with an explicit
+  warning, since that match can no longer be verified) when no such
+  snapshot exists in `--analysis`'s own directory.
 
 ### Test methodology (how this was actually confirmed, not just reasoned about)
 
