@@ -109,6 +109,25 @@ def mrc_pixel_size(mrc_path):
     return None
 
 
+def most_recent_glob(directory, glob_pat):
+    """
+    Newest-by-mtime match for glob_pat in directory, or None if no match.
+
+    Not just the literal filename (e.g. 'ts_ratings.csv') -- picks up any
+    timestamped/renamed copy someone drops in the directory (e.g.
+    'ts_ratings_2026-08-01.csv', a common export-tool naming pattern) and
+    always prefers the freshest. Consolidates analyse.py's own local
+    _most_recent() closure and fixes select_ts.py, which used to check
+    only the literal 'ts_ratings.csv' name -- a timestamped ratings
+    export showed up correctly in analyse's HTML report but was silently
+    ignored by select-ts --select-by-rating, which fell through to
+    "treat every TS as unrated" and excluded all of them.
+    """
+    from pathlib import Path
+    matches = sorted(Path(directory).glob(glob_pat), key=lambda p: p.stat().st_mtime)
+    return matches[-1] if matches else None
+
+
 def load_threshold_csv(csv_path):
     """
     Return {ts_name: threshold} from a per-TS threshold override CSV

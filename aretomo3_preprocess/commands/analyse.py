@@ -57,6 +57,7 @@ from aretomo3_preprocess.shared.colours import (
     OVL_CMAP, OVL_NORM, RES_CMAP,
     _ovl_colour, _ovl_sm, _res_sm,
 )
+from aretomo3_preprocess.shared.discovery import most_recent_glob
 
 def _percentile_range(vals, pad_frac=0.05):
     """2nd/98th-percentile x-range for a histogram, so a handful of corrupted
@@ -2948,16 +2949,8 @@ def run(args):
               f'"Load ts-select.csv" button if you want to view it.\n')
     selection = None
 
-    def _most_recent(glob_pat):
-        """Newest-by-mtime match for glob_pat in out_dir, or None. Not just
-        the literal ts_ratings.csv/ts_comments.csv name -- picks up any
-        timestamped/renamed copy someone drops in the analysis directory
-        (e.g. ts_ratings_2026-08-01.csv) and always prefers the freshest."""
-        matches = sorted(out_dir.glob(glob_pat), key=lambda p: p.stat().st_mtime)
-        return matches[-1] if matches else None
-
     # ── Load ratings — most recently modified ts_ratings*.csv if present ──────
-    ratings_csv   = _most_recent('ts_ratings*.csv')
+    ratings_csv   = most_recent_glob(out_dir, 'ts_ratings*.csv')
     saved_ratings = {}
     if ratings_csv is not None:
         import csv as _csv
@@ -2970,7 +2963,7 @@ def run(args):
         print(f'Loaded {len(saved_ratings)} ratings from {ratings_csv.name}')
 
     # ── Load comments — most recently modified ts_comments*.csv if present ────
-    comments_csv   = _most_recent('ts_comments*.csv')
+    comments_csv   = most_recent_glob(out_dir, 'ts_comments*.csv')
     saved_comments = {}
     if comments_csv is not None:
         import csv as _csv

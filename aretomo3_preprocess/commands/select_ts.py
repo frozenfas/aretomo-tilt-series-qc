@@ -11,8 +11,10 @@ CSV columns:
   n_frames  total aligned frames in the .aln (AreTomo3 dark frames excluded)
   n_tilts   frames with overlap_pct >= --overlap-thres (usable after overlap
             filtering); equals n_frames when --overlap-thres is not given
-  rating    star rating from ts_ratings.csv in the analysis dir (empty if
-            not rated or file not present)
+  rating    star rating from ts_ratings.csv (or the newest ts_ratings*.csv,
+            e.g. a timestamped export -- same lookup analyse's own HTML
+            report uses) in the analysis dir (empty if not rated or no
+            such file present)
 """
 
 import csv
@@ -23,6 +25,7 @@ import argparse
 import json
 
 from aretomo3_preprocess.shared.project_json import load as load_project
+from aretomo3_preprocess.shared.discovery import most_recent_glob
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -32,11 +35,16 @@ from aretomo3_preprocess.shared.project_json import load as load_project
 def _load_ratings(analysis_dir: Path, ratings_file=None) -> dict:
     """Load a ratings CSV; return {ts_name: int} or {}.
 
-    If ratings_file is given, use that path.  Otherwise fall back to
-    ts_ratings.csv in analysis_dir.
+    If ratings_file is given, use that path. Otherwise fall back to the
+    most recently modified ts_ratings*.csv in analysis_dir -- matching
+    analyse.py's own HTML report, which prefers the newest match rather
+    than only the literal 'ts_ratings.csv' name (a timestamped export,
+    e.g. ts_ratings_2026-08-01.csv, used to show up correctly in the HTML
+    report but be silently ignored here, --select-by-rating falling
+    through to "treat every TS as unrated" and excluding all of them).
     """
-    path = Path(ratings_file) if ratings_file else analysis_dir / 'ts_ratings.csv'
-    if not path.exists():
+    path = Path(ratings_file) if ratings_file else most_recent_glob(analysis_dir, 'ts_ratings*.csv')
+    if path is None or not path.exists():
         return {}
     ratings = {}
     with open(path, newline='') as fh:
@@ -201,7 +209,8 @@ def add_parser(subparsers):
     p.add_argument('--output', '-o', default=None,
                    help='Output CSV file path (default: <analysis_dir>/ts-select.csv)')
     p.add_argument('--ratings', default=None, metavar='CSV',
-                   help='Path to ts_ratings.csv (default: ts_ratings.csv in --analysis dir)')
+                   help='Path to a ratings CSV (default: the newest '
+                        'ts_ratings*.csv in --analysis dir)')
     p.add_argument('--input', '-i', default=None, metavar='DIR',
                    help='Directory containing ts-*_CTF.txt/_TLT.txt (the same '
                         'directory analyse\'s own --input pointed at). When '
@@ -225,7 +234,7 @@ def add_parser(subparsers):
     sel.add_argument('--select-by-rating', type=float, nargs=2,
                      metavar=('MIN', 'MAX'),
                      help='Keep TS with star rating in [MIN, MAX] '
-                          '(reads ts_ratings.csv from the analysis directory; '
+                          '(reads the ratings CSV -- see --ratings; '
                           'TS without a rating are excluded)')
     sel.add_argument('--select-by-tilts', type=float, nargs=2,
                      metavar=('MIN', 'MAX'),
@@ -279,7 +288,9 @@ def run(args):
               f'({n_found}/{len(ts_names)} TS found)')
 
     # ── Load ratings ─────────────────────────────────────────────────────────
-    ratings_path = Path(args.ratings) if args.ratings else analysis_dir / 'ts_ratings.csv'
+    ratings_path = (Path(args.ratings) if args.ratings
+                    else most_recent_glob(analysis_dir, 'ts_ratings*.csv')
+                    or analysis_dir / 'ts_ratings.csv')
     ratings = _load_ratings(analysis_dir, args.ratings)
     if ratings:
         print(f'Loaded ratings for {len(ratings)} tilt series from {ratings_path}')
