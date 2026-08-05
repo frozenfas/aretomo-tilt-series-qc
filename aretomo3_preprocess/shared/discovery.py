@@ -109,6 +109,37 @@ def mrc_pixel_size(mrc_path):
     return None
 
 
+FRACTION_FNAME_RE = re.compile(
+    r'_(\d{3})_([-\d]+\.\d+)_\d{8}_\d{6}_fractions\.tiff?$',
+    re.IGNORECASE,
+)
+
+
+def parse_fraction_filename(name):
+    """
+    Parse a SerialEM fraction movie filename's acq_order and tilt_angle.
+
+    Expected pattern: ..._NNN_TILT_YYYYMMDD_HHMMSS_fractions.tif[f]
+                            ^^^  ^^^^  acq   tilt
+
+    Accepts both .tif and .tiff (case-insensitive); requires a proper
+    decimal tilt-angle token (e.g. 14.00, -6.00) -- a real SerialEM tilt
+    token always has a decimal point, so a bare integer or otherwise
+    malformed token is never actually valid, only ever an accidental
+    match on the wrong text.
+
+    Returns (acq_order: int, tilt_angle: float), or (None, None) if name
+    doesn't match. Consolidates check_gain_transform.py's and
+    validate_mdoc.py's own independent regexes, which used to accept
+    different strings (one required exactly '.tiff' with a looser tilt
+    token; see CLAUDE.md).
+    """
+    m = FRACTION_FNAME_RE.search(name)
+    if not m:
+        return None, None
+    return int(m.group(1)), float(m.group(2))
+
+
 def most_recent_glob(directory, glob_pat):
     """
     Newest-by-mtime match for glob_pat in directory, or None if no match.

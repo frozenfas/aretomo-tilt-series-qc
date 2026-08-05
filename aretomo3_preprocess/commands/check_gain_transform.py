@@ -58,7 +58,6 @@ Output
   aretomo3_project.json     — project state updated (backup copy written here)
 """
 
-import re
 import sys
 import json
 import random
@@ -68,6 +67,7 @@ import numpy as np
 from aretomo3_preprocess.shared.project_json import update_section, args_to_dict
 from aretomo3_preprocess.shared.project_state import record_analysis_run
 from aretomo3_preprocess.shared.landing_page import write_landing_page
+from aretomo3_preprocess.shared.discovery import parse_fraction_filename
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -109,24 +109,14 @@ _MRC_MODE_NAMES = {
 }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Filename parsing
-# Expected pattern: ..._001_14.00_20260213_171849_fractions.tiff
-#                        ^^^  ^^^^^  acq   tilt
-# ─────────────────────────────────────────────────────────────────────────────
-
-_FNAME_RE = re.compile(
-    r'_(\d{3})_([-\d]+\.\d+)_\d{8}_\d{6}_fractions\.tiff?$',
-    re.IGNORECASE,
-)
-
-
 def _parse_movie_name(path):
-    """Return (acq_order: int, tilt_angle: float) from filename, or (None, None)."""
-    m = _FNAME_RE.search(path.name)
-    if not m:
-        return None, None
-    return int(m.group(1)), float(m.group(2))
+    """Return (acq_order: int, tilt_angle: float) from filename, or (None, None).
+
+    See shared/discovery.py:parse_fraction_filename() for the expected
+    pattern -- shared with validate_mdoc.py's --fix-subframes rebuild so
+    the two can't silently accept different filenames again.
+    """
+    return parse_fraction_filename(path.name)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

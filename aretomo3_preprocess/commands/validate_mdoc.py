@@ -80,6 +80,8 @@ import shutil
 import argparse
 from pathlib import Path
 
+from aretomo3_preprocess.shared.discovery import parse_fraction_filename
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # AreTomo3 parser constants (from CReadMdoc.cpp)
@@ -751,23 +753,27 @@ def _inject_exptime(lines, exptime_value):
 # Fix: rebuild mdoc from a SubFramePaths file (too-short / restarted series)
 # ─────────────────────────────────────────────────────────────────────────────
 
-_SFNAME_RE = re.compile(
-    r'^(.+_(\d{3})_([-\d.]+)_\d{8}_\d{6}_fractions\.tiff)\s*$',
-    re.IGNORECASE,
-)
-
-
 def _parse_subframes_file(path):
     """
     Read a SubFramePaths .txt file (one filename per line).
     Returns a list of (acq_order, tilt_angle, filename) sorted by acq_order.
-    Filename format: <PositionName>_NNN_TILT_DATE_TIME_fractions.tiff
+    Filename format: <PositionName>_NNN_TILT_DATE_TIME_fractions.tif[f]
+
+    Uses shared/discovery.py:parse_fraction_filename() for the acq_order/
+    tilt extraction -- previously a second, independent regex here
+    (_SFNAME_RE) accepted a different set of strings than
+    check_gain_transform.py's own copy (this one required exactly
+    '.tiff' with a looser tilt-angle token; see CLAUDE.md). Each line is
+    just the filename itself (one per line, per the format above), so
+    the stripped line doubles as both the string to parse and the
+    filename to record once it matches.
     """
     entries = []
     for line in Path(path).read_text(encoding='latin-1').splitlines():
-        m = _SFNAME_RE.match(line.strip())
-        if m:
-            entries.append((int(m.group(2)), float(m.group(3)), m.group(1)))
+        fname = line.strip()
+        acq_order, tilt_angle = parse_fraction_filename(fname)
+        if acq_order is not None:
+            entries.append((acq_order, tilt_angle, fname))
     entries.sort(key=lambda x: x[0])
     return entries
 
