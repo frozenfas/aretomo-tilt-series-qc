@@ -81,6 +81,26 @@ def run(args):
     existing_grids = existing.get('grids', {})
     grid_no       = max((int(g) for g in existing_grids), default=0) + 1
 
+    # Pre-flight: check every target path for a collision BEFORE creating
+    # any symlink, so an overlapping --start against a partially-completed
+    # prior run is reported cleanly and exits with nothing on disk -- not
+    # partway through the loop below, which used to raise an uncaught
+    # FileExistsError after already creating some of this run's symlinks
+    # but before project.json's update_section() ever ran, leaving orphan
+    # symlinks with no lookup/grid record of them.
+    if not args.dry_run:
+        planned = [in_dir / f'ts-{i:0{digits}d}.mdoc'
+                   for i in range(args.start, args.start + n)]
+        collisions = [p for p in planned if p.is_symlink() or p.exists()]
+        if collisions:
+            print(f'Error: {len(collisions)} target path(s) already exist in {in_dir}/ '
+                  f'-- no symlinks were created:')
+            for p in collisions:
+                print(f'  {p}')
+            print(f'\nAdjust --start (currently {args.start}) past the highest existing '
+                  f'ts-XXXX, or remove the conflicting symlink(s) first if they are stale.')
+            sys.exit(1)
+
     print(f'{prefix}Grid {grid_no} — creating {n} symlinks in {in_dir}/')
     print()
 
@@ -91,9 +111,19 @@ def run(args):
         resolved = mdoc_path.resolve()
 
         if not args.dry_run:
-            if symlink_path.is_symlink() or symlink_path.exists():
-                raise FileExistsError(f'Symlink already exists: {symlink_path}')
-            symlink_path.symlink_to(resolved)
+            try:
+                symlink_path.symlink_to(resolved)
+            except FileExistsError:
+                # Belt-and-suspenders against a collision created after the
+                # pre-flight scan above (e.g. a concurrent process) --
+                # still cleaner than a raw traceback, though the run is now
+                # partially applied; re-run is safe (already-linked TS are
+                # skipped by the *.mdoc glob's `not p.is_symlink()` filter).
+                print(f'\nError: {symlink_path} was created after the pre-flight check '
+                      f'(concurrent run?) -- {i - args.start} symlink(s) created so far, '
+                      f'not recorded in project.json. Re-run rename-ts; already-linked '
+                      f'originals are automatically skipped.')
+                sys.exit(1)
 
         lookup[ts_name] = str(resolved)
         print(f'  {prefix}{ts_name} -> {resolved.name}')
