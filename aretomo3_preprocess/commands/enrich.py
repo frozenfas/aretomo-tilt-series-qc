@@ -102,13 +102,13 @@ def _enrich_mdoc_data(frames_dir: Path, force: bool):
     if not _HAS_MDOCFILE:
         print('  ERROR: mdocfile not installed — cannot parse mdoc files')
         print('         Install with: pip install mdocfile')
-        return
+        return False
 
     existing = _load_project().get('mdoc_data', {}).get('per_ts')
     if existing and not force:
         print(f'  mdoc_data already registered ({len(existing)} TS).')
         print(f'  Use --force to overwrite.')
-        return
+        return True
 
     ts_mdocs = sorted(frames_dir.glob('ts-*.mdoc'))
     if ts_mdocs:
@@ -119,17 +119,18 @@ def _enrich_mdoc_data(frames_dir: Path, force: bool):
         mdoc_files = sorted(frames_dir.glob('*.mdoc'))
     if not mdoc_files:
         print(f'  ERROR: no .mdoc files found in {frames_dir}')
-        return
+        return False
 
     result = register_mdoc_data(mdoc_files)
     if result['n_ok'] == 0:
         print(f'  ERROR: no mdoc data extracted from {frames_dir}')
-        return
+        return False
     print(f'  mdoc_data: {result["n_ok"]} TS parsed'
           + (f' ({result["merged_count"]} total in project.json)'
              if result['merged_count'] > result['n_ok'] else ''))
     if result['n_fail']:
         print(f'  {result["n_fail"]} files could not be parsed')
+    return True
 
 
 def _enrich_mrc_data(mrc_dir: Path, in_skips: list, force: bool):
@@ -138,8 +139,11 @@ def _enrich_mrc_data(mrc_dir: Path, in_skips: list, force: bool):
     if existing and not force:
         print(f'  input_stacks already registered ({len(existing)} stacks).')
         print(f'  Use --force to overwrite.')
-        return
-    register_input_stacks(mrc_dir, in_skips=in_skips)
+        return True
+    found = register_input_stacks(mrc_dir, in_skips=in_skips)
+    if not found:
+        print(f'  ERROR: no ts-*.mrc stacks found in {mrc_dir} (after --in-skips filtering)')
+    return found
 
 
 def _enrich_tlt_data(tlt_dir: Path, force: bool):
@@ -148,12 +152,12 @@ def _enrich_tlt_data(tlt_dir: Path, force: bool):
     if existing and not force:
         print(f'  tlt_dir already registered: {existing}')
         print(f'  Use --force to overwrite.')
-        return
+        return True
 
     tlt_files = list(tlt_dir.glob('*_TLT.txt'))
     if not tlt_files:
         print(f'  ERROR: no _TLT.txt files found in {tlt_dir}')
-        return
+        return False
 
     # Merge into existing input_stacks section (preserve stacks, cmd0_outdir, etc.)
     proj             = _load_project()
@@ -162,6 +166,7 @@ def _enrich_tlt_data(tlt_dir: Path, force: bool):
     section['timestamp'] = datetime.datetime.now().isoformat(timespec='seconds')
     update_section('input_stacks', section)
     print(f'  tlt_dir: {tlt_dir.resolve()}  ({len(tlt_files)} _TLT.txt files)')
+    return True
 
 
 def _enrich_frame_lookup(aln_dir: Path, force: bool):
@@ -175,10 +180,13 @@ def _enrich_frame_lookup(aln_dir: Path, force: bool):
     if existing and not force:
         print(f'  frame_lookup already registered ({len(existing)} TS).')
         print(f'  Use --force to overwrite/refresh.')
-        return
+        return True
 
     from aretomo3_preprocess.shared.project_state import register_frame_lookup
-    register_frame_lookup(aln_dir)
+    found = register_frame_lookup(aln_dir)
+    if not found:
+        print(f'  ERROR: no ts-*.aln + matching ts-*_TLT.txt pairs found in {aln_dir}')
+    return found
 
 
 def _enrich_lamellae(csv_path: Path, force: bool):
@@ -187,7 +195,7 @@ def _enrich_lamellae(csv_path: Path, force: bool):
     if existing and not force:
         print(f'  lamella_assignments already registered ({len(existing)} TS).')
         print(f'  Use --force to overwrite.')
-        return
+        return True
 
     positions = {}
     with open(csv_path, newline='') as fh:
@@ -203,7 +211,7 @@ def _enrich_lamellae(csv_path: Path, force: bool):
     if not positions:
         print(f'  ERROR: no lamella assignments found in {csv_path}')
         print(f'         Expected columns: ts_name, lamella')
-        return
+        return False
 
     update_section('lamella_assignments', {
         'timestamp': datetime.datetime.now().isoformat(timespec='seconds'),
@@ -211,6 +219,7 @@ def _enrich_lamellae(csv_path: Path, force: bool):
         'positions': positions,
     })
     print(f'  lamella_assignments: {len(positions)} TS registered from {csv_path.name}')
+    return True
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -284,6 +293,14 @@ def add_parser(subparsers):
 
 def run(args):
     did_anything = False
+    # Distinct from did_anything: did_anything just means "at least one
+    # section was requested" (true even if every handler failed to find
+    # anything). all_ok tracks whether every REQUESTED handler actually
+    # succeeded -- a handler that prints its own "ERROR: nothing found"
+    # and returns False used to still count as done_anything=True, so
+    # `enrich --mdoc-data empty_dir/` exited 0 despite registering
+    # nothing, giving a scripted pipeline chain no signal.
+    all_ok = True
 
     if args.mdoc_data is not None:
         frames_dir = Path(args.mdoc_data)
@@ -291,7 +308,7 @@ def run(args):
             print(f'ERROR: --mdoc-data {frames_dir} is not a directory')
             sys.exit(1)
         print(f'Populating mdoc_data from {frames_dir}/')
-        _enrich_mdoc_data(frames_dir, args.force)
+        all_ok &= bool(_enrich_mdoc_data(frames_dir, args.force))
         did_anything = True
 
     if args.mrc_data is not None:
@@ -300,7 +317,7 @@ def run(args):
             print(f'ERROR: --mrc-data {mrc_dir} is not a directory')
             sys.exit(1)
         print(f'Registering MRC stacks from {mrc_dir}/')
-        _enrich_mrc_data(mrc_dir, in_skips=args.in_skips, force=args.force)
+        all_ok &= bool(_enrich_mrc_data(mrc_dir, in_skips=args.in_skips, force=args.force))
         did_anything = True
 
     if args.tlt_data is not None:
@@ -309,7 +326,7 @@ def run(args):
             print(f'ERROR: --tlt-data {tlt_dir} is not a directory')
             sys.exit(1)
         print(f'Registering TLT dir from {tlt_dir}/')
-        _enrich_tlt_data(tlt_dir, args.force)
+        all_ok &= bool(_enrich_tlt_data(tlt_dir, args.force))
         did_anything = True
 
     if args.frame_lookup is not None:
@@ -318,7 +335,7 @@ def run(args):
             print(f'ERROR: --frame-lookup {aln_dir} is not a directory')
             sys.exit(1)
         print(f'Registering frame lookup from {aln_dir}/')
-        _enrich_frame_lookup(aln_dir, args.force)
+        all_ok &= bool(_enrich_frame_lookup(aln_dir, args.force))
         did_anything = True
 
     if args.lamellae is not None:
@@ -327,7 +344,7 @@ def run(args):
             print(f'ERROR: --lamellae {csv_path} not found')
             sys.exit(1)
         print(f'Loading lamella assignments from {csv_path}')
-        _enrich_lamellae(csv_path, args.force)
+        all_ok &= bool(_enrich_lamellae(csv_path, args.force))
         did_anything = True
 
     for tool_name, cli_flag in (('aretomo3', args.set_path_aretomo3),
@@ -342,4 +359,9 @@ def run(args):
     if not did_anything:
         print('ERROR: at least one of --mdoc-data, --mrc-data, --tlt-data, '
               '--frame-lookup, --lamellae, --set-path-* must be given.')
+        sys.exit(1)
+
+    if not all_ok:
+        print('\nERROR: one or more requested sections found nothing to register '
+              '(see ERROR lines above).')
         sys.exit(1)

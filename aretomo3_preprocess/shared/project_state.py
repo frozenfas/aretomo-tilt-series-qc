@@ -340,6 +340,10 @@ def register_input_stacks(out_dir: Path, in_skips: list = None,
     in_skips  : list  Stem substrings to exclude (e.g. ['_Vol', '_CTF', '_EVN', '_ODD'])
     tlt_dir   : Path  Directory containing _TLT.txt files (cmd=0 output dir);
                       saved so that analyse can find them automatically.
+
+    Returns True if any stacks were found and registered, False if none
+    matched (out_dir empty, or in_skips filtered everything out) -- lets
+    a caller (enrich.py) distinguish that from a silent no-op.
     """
     try:
         import mrcfile
@@ -351,7 +355,7 @@ def register_input_stacks(out_dir: Path, in_skips: list = None,
     stack_files = [f for f in all_mrc
                    if not any(s in f.stem for s in skips)]
     if not stack_files:
-        return
+        return False
 
     stacks = {}
     for f in stack_files:
@@ -387,6 +391,7 @@ def register_input_stacks(out_dir: Path, in_skips: list = None,
     print(f'Registered {len(stacks)} input stacks in project.json  [input_stacks]')
     if tlt_dir is not None:
         print(f'Registered TLT directory     in project.json  [input_stacks.tlt_dir]')
+    return True
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -501,11 +506,15 @@ def register_mdoc_data(mdoc_files: list) -> dict:
 # independently in every command that needs it.
 # ─────────────────────────────────────────────────────────────────────────────
 
-def register_frame_lookup(out_dir: Path) -> None:
+def register_frame_lookup(out_dir: Path) -> bool:
     """
     Scan out_dir for ts-*.aln + matching ts-*_TLT.txt files and register
     each TS's SEC <-> z_value/acq_order bridge (+ filename, + which SECs
     are dark) in project.json under 'frame_lookup'.
+
+    Returns True if any TS was registered, False if out_dir had no
+    ts-*.aln files or none of them could be matched/parsed -- lets a
+    caller (enrich.py) distinguish that from a silent no-op.
 
     The filename (sub_frame_path) and frames_dir are captured HERE, at
     build time, by composing with the already-registered mdoc_data section
@@ -549,7 +558,7 @@ def register_frame_lookup(out_dir: Path) -> None:
 
     aln_files = sorted(out_dir.glob('ts-*.aln'))
     if not aln_files:
-        return
+        return False
 
     project = _load()
     existing = project.get('frame_lookup', {}).get('per_ts', {})
@@ -604,7 +613,7 @@ def register_frame_lookup(out_dir: Path) -> None:
             n_fail += 1
 
     if not new_entries:
-        return
+        return False
 
     merged = {**existing, **new_entries}
     update_section('frame_lookup', {
@@ -616,6 +625,7 @@ def register_frame_lookup(out_dir: Path) -> None:
     if n_no_filename:
         print(f'  {n_no_filename} TS have no filename data (mdoc_data/rename_ts not yet '
               f'registered) -- re-run enrich --frame-lookup --force after registering them.')
+    return True
 
 
 def get_frame_lookup(ts_name: str) -> Optional[dict]:
