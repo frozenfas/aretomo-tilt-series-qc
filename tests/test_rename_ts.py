@@ -120,3 +120,81 @@ def test_dry_run_does_not_check_or_create(isolated_project):
     # it never touches disk.
     run(_args(in_dir, start=1, dry_run=True))
     assert pj.load().get('rename_ts', {}) == {}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cross-grid zero-pad width consistency
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_second_grid_reuses_established_width_even_if_narrower_would_fit(isolated_project):
+    """Grid 1: 150 files -> 3 digits (ts-001..ts-150). Grid 2 (separate
+    dir, --start continuing from 151): only 5 more files, whose own
+    auto-detected width would be 3 anyway here -- but the real point is
+    grid 2 must READ and reuse grid 1's established width, not recompute
+    independently."""
+    grid1_dir = isolated_project / 'grid1'
+    grid1_dir.mkdir()
+    _make_mdocs(grid1_dir, [f'Position_{i}.mdoc' for i in range(1, 151)])
+    run(_args(grid1_dir, start=1))
+    assert (grid1_dir / 'ts-001.mdoc').is_symlink()
+
+    grid2_dir = isolated_project / 'grid2'
+    grid2_dir.mkdir()
+    _make_mdocs(grid2_dir, ['Position_A.mdoc', 'Position_B.mdoc'])
+    run(_args(grid2_dir, start=151))
+
+    # 3-digit width carried over, not recomputed as a narrower value.
+    assert (grid2_dir / 'ts-151.mdoc').is_symlink()
+    assert (grid2_dir / 'ts-152.mdoc').is_symlink()
+    grids = pj.load()['rename_ts']['grids']
+    assert grids['2']['digits'] == 3
+
+
+def test_second_smaller_grid_at_start_1_does_not_silently_narrow(isolated_project, capsys):
+    """The exact scenario the audit flagged: a second, SMALLER grid
+    (--start defaulting back to a low number) would auto-detect a
+    narrower digit width than the established one if computed in
+    isolation -- must reuse the established (wider) width instead."""
+    grid1_dir = isolated_project / 'grid1'
+    grid1_dir.mkdir()
+    _make_mdocs(grid1_dir, [f'Position_{i}.mdoc' for i in range(1, 101)])
+    run(_args(grid1_dir, start=1))  # 100 files -> 3 digits, ts-001..ts-100
+
+    grid2_dir = isolated_project / 'grid2'
+    grid2_dir.mkdir()
+    _make_mdocs(grid2_dir, ['Position_A.mdoc'])
+    # In isolation this single file would auto-detect to 1 digit (ts-1).
+    run(_args(grid2_dir, start=1))
+
+    assert (grid2_dir / 'ts-001.mdoc').is_symlink()
+    assert not (grid2_dir / 'ts-1.mdoc').exists()
+
+
+def test_grid_needing_more_digits_widens_with_warning(isolated_project, capsys):
+    grid1_dir = isolated_project / 'grid1'
+    grid1_dir.mkdir()
+    _make_mdocs(grid1_dir, ['Position_1.mdoc', 'Position_2.mdoc'])
+    run(_args(grid1_dir, start=1, digits=2))  # force 2 digits: ts-01, ts-02
+
+    grid2_dir = isolated_project / 'grid2'
+    grid2_dir.mkdir()
+    _make_mdocs(grid2_dir, [f'Position_{i}.mdoc' for i in range(1, 51)])
+    run(_args(grid2_dir, start=100))  # needs 3 digits (up to ts-149)
+
+    assert (grid2_dir / 'ts-100.mdoc').is_symlink()
+    out = capsys.readouterr().out
+    assert 'WARNING' in out and 'wider' in out
+
+
+def test_explicit_digits_always_wins(isolated_project):
+    grid1_dir = isolated_project / 'grid1'
+    grid1_dir.mkdir()
+    _make_mdocs(grid1_dir, [f'Position_{i}.mdoc' for i in range(1, 151)])
+    run(_args(grid1_dir, start=1))  # established width: 3
+
+    grid2_dir = isolated_project / 'grid2'
+    grid2_dir.mkdir()
+    _make_mdocs(grid2_dir, ['Position_A.mdoc'])
+    run(_args(grid2_dir, start=200, digits=5))  # explicit override
+
+    assert (grid2_dir / 'ts-00200.mdoc').is_symlink()

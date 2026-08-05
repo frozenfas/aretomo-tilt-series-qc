@@ -72,7 +72,6 @@ def run(args):
         sys.exit(1)
 
     n = len(mdoc_files)
-    digits = args.digits or len(str(args.start + n - 1))
     prefix = '[DRY RUN] ' if args.dry_run else ''
 
     # Determine grid number from existing project state
@@ -80,6 +79,31 @@ def run(args):
     existing      = proj.get('rename_ts', {})
     existing_grids = existing.get('grids', {})
     grid_no       = max((int(g) for g in existing_grids), default=0) + 1
+
+    # Zero-pad width: reuse the width already established by earlier grids
+    # in this project rather than recomputing independently from just this
+    # invocation's own file count -- otherwise a second, smaller grid can
+    # silently pick a narrower width (e.g. ts-1 next to an earlier grid's
+    # ts-001), breaking cross-grid ts-* naming consistency/sort order with
+    # no warning. Only widens beyond the established value if this grid's
+    # own range genuinely needs more digits than earlier grids used.
+    established_digits = max(
+        (g['digits'] for g in existing_grids.values() if g.get('digits')),
+        default=None)
+    auto_digits = len(str(args.start + n - 1))
+    if args.digits:
+        digits = args.digits
+    elif established_digits is not None:
+        digits = max(established_digits, auto_digits)
+        if digits != established_digits:
+            print(f'{prefix}WARNING: this grid needs {auto_digits} digit(s) '
+                  f'(up to ts-{args.start + n - 1}), wider than the '
+                  f'{established_digits} digit(s) used by earlier grids -- '
+                  f'using {digits}. Earlier grids\' existing ts-XXXX '
+                  f'symlinks keep their own width; the project\'s ts-* '
+                  f'naming will no longer share a uniform width.')
+    else:
+        digits = auto_digits
 
     # Pre-flight: check every target path for a collision BEFORE creating
     # any symlink, so an overlapping --start against a partially-completed
