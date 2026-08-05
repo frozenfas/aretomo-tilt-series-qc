@@ -77,7 +77,6 @@ A second run will not overwrite an existing .bak (safety).
 import re
 import sys
 import shutil
-import datetime
 import argparse
 from pathlib import Path
 
@@ -1355,61 +1354,29 @@ def run(args):
 
 def _save_mdoc_to_project(paths):
     """
-    Parse validated mdoc files with mdocfile and save rich metadata to
-    project.json, merging with any previously saved entries so that
-    running on a subset (e.g. to fix a few files) updates only those
-    entries without wiping data for the rest of the dataset.
+    Parse validated mdoc files and save rich metadata to project.json,
+    merging with any previously saved entries so that running on a subset
+    (e.g. to fix a few files) updates only those entries without wiping
+    data for the rest of the dataset.
 
-    Entries are keyed by the ORIGINAL (pre-rename) filename stem, e.g.
-    'Position_1' -- matching what analyse.py/relion5_convert.py already
-    expect (they translate a ts-XXXX name back to this stem before
-    looking up). If `path` is a renamed ts-XXXX.mdoc symlink rather than
-    the original Position_N.mdoc, normalize its key back to that same
-    original stem via rename_ts.lookup, so validating the same TS both
-    before and after rename-ts updates one entry instead of silently
-    creating a second one under the ts-XXXX name.
+    Thin wrapper over shared/project_state.py:register_mdoc_data() -- see
+    its docstring for the key-resolution strategy (path.resolve().stem,
+    correct for both a renamed ts-XXXX.mdoc symlink and an original
+    Position_N.mdoc passed directly, no rename_ts.lookup dependency
+    needed) and the stale-key-stripping/frames_dir behavior this shares
+    with enrich.py's --mdoc-data handler (previously two independent,
+    drifted implementations -- see CLAUDE.md).
     """
     try:
-        from aretomo3_preprocess.shared.parsers import parse_mdoc_file
-        from aretomo3_preprocess.shared.project_json import load as _load, update_section
-        from aretomo3_preprocess.shared.project_state import get_ts_to_original_stem
+        from aretomo3_preprocess.shared.project_state import register_mdoc_data
     except ImportError:
         return
 
-    # Load existing entries so we can merge rather than replace
-    existing = _load().get('mdoc_data', {}).get('per_ts', {})
-    ts_to_original = get_ts_to_original_stem()
-
-    new_entries = {}
-    for path in paths:
-        p = Path(path)
-        try:
-            mdoc_data, angpix, acquisition = parse_mdoc_file(p)
-        except Exception:
-            continue
-        if mdoc_data:
-            key = ts_to_original.get(p.stem, p.stem)
-            new_entries[key] = {
-                'angpix':      angpix,
-                'acquisition': acquisition,
-                'frames':      {str(k): v for k, v in mdoc_data.items()},
-                # AreTomo3 requires movies co-located with their mdoc, so
-                # p's own directory IS the frames directory -- recorded once
-                # per TS here rather than per frame. Consumed by
-                # register_frame_lookup() to bake a full frame_path into
-                # resolve_frame()'s return value.
-                'frames_dir':  str(p.resolve().parent),
-            }
-
-    if new_entries:
-        merged = {**existing, **new_entries}
-        update_section('mdoc_data', {
-            'timestamp': datetime.datetime.now().isoformat(timespec='seconds'),
-            'n_ts':      len(merged),
-            'per_ts':    merged,
-        })
-        print(f'  mdoc_data: {len(new_entries)} TS saved'
-              + (f' ({len(merged)} total in project.json)' if existing else ''))
+    result = register_mdoc_data(paths)
+    if result['n_ok']:
+        print(f'  mdoc_data: {result["n_ok"]} TS saved'
+              + (f' ({result["merged_count"]} total in project.json)'
+                 if result['merged_count'] > result['n_ok'] else ''))
 
 
 def _failure_message(failure, r):

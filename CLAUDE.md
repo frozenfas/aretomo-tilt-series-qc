@@ -263,6 +263,24 @@ mdocs before making this blocking, so it's a defensive guard against a
 previously-flagged theoretical risk, not a currently-observed failure
 mode.
 
+**`register_mdoc_data()` (`project_state.py`) — the one place that
+merges a parsed mdoc into `mdoc_data`.** `enrich.py --mdoc-data` and
+`validate_mdoc.py`'s own save-on-pass step used to each hand-roll this
+"parse → build `per_ts` entry → merge with existing → write" logic
+independently, and had drifted apart on two real edge cases: only
+`enrich.py`'s version stripped stale `ts-\d+`-keyed entries (debris from
+an older key-resolution strategy — a bare `ts-123` key is never a real
+original stem), and only `validate_mdoc.py`'s version recorded
+`frames_dir`. Both call sites now share one implementation, so neither
+gap can silently reappear in just one of the two paths. Keys each entry
+by `path.resolve().stem` — correct whether `path` is a renamed
+`ts-XXX.mdoc` symlink (resolves through to the original `Position_N`
+stem at the filesystem level) or an original mdoc file passed directly,
+with no `rename_ts.lookup` project.json dependency needed either way
+(stronger than the old `get_ts_to_original_stem()`-based lookup
+`validate_mdoc.py` used, which would silently fall back to the wrong key
+if `rename_ts.lookup` wasn't registered yet).
+
 **External tool wrappers.** Most non-core commands (`pytom_match.py`,
 `gapstop_match.py`, `membrain_seg.py`, `cryocare.py`, `deep_dewedge*.py`,
 `topaz_*.py`, `imod_mtffilter.py`) shell out to a separately-installed tool at

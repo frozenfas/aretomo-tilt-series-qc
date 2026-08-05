@@ -424,6 +424,74 @@ def load_input_stacks() -> tuple:
     return mrc_files, source_info
 
 
+def register_mdoc_data(mdoc_files: list) -> dict:
+    """
+    Parse mdoc_files and merge their metadata into project.json's
+    mdoc_data section.
+
+    Consolidates two independent implementations (enrich.py's
+    _enrich_mdoc_data, validate_mdoc.py's _save_mdoc_to_project) that had
+    drifted apart on two real edge cases: only one of them stripped stale
+    'ts-\\d+'-keyed entries left over from an older key-resolution
+    strategy, and only one recorded frames_dir (see the frame_lookup
+    section of CLAUDE.md). Both now share this single implementation.
+
+    Each entry is keyed by path.resolve().stem -- correct whether path is
+    a renamed ts-XXX.mdoc symlink (resolves through to the original
+    Position_N stem at the filesystem level, no project.json/
+    rename_ts.lookup dependency needed to get this right) or an original
+    mdoc file passed directly (resolving to itself). This is also where
+    frames_dir is recorded (path.resolve().parent) -- AreTomo3 requires
+    raw movies co-located with their mdoc, so this is always where the
+    frames actually are; consumed by register_frame_lookup() to bake a
+    full frame_path into resolve_frame()'s return value.
+
+    Files that fail to parse, or parse to no data, are skipped (counted
+    in n_fail) rather than aborting the whole batch.
+
+    Returns {'n_ok', 'n_fail', 'merged_count'}. Does not write to
+    project.json at all if nothing parsed successfully.
+    """
+    from aretomo3_preprocess.shared.parsers import parse_mdoc_file
+
+    existing = _load().get('mdoc_data', {}).get('per_ts', {})
+    # A bare 'ts-123' key is never a real original stem (those are always
+    # Position_N-style names) -- always stale debris from before entries
+    # were keyed by resolved original stem, safe to drop unconditionally.
+    existing = {k: v for k, v in existing.items() if not re.match(r'^ts-\d+$', k)}
+
+    new_entries = {}
+    n_ok = n_fail = 0
+    for path in mdoc_files:
+        p = Path(path)
+        try:
+            mdoc_data, angpix, acquisition = parse_mdoc_file(p)
+        except Exception:
+            n_fail += 1
+            continue
+        if not mdoc_data:
+            n_fail += 1
+            continue
+        new_entries[p.resolve().stem] = {
+            'angpix':      angpix,
+            'acquisition': acquisition,
+            'frames':      {str(k): v for k, v in mdoc_data.items()},
+            'frames_dir':  str(p.resolve().parent),
+        }
+        n_ok += 1
+
+    if not new_entries:
+        return {'n_ok': n_ok, 'n_fail': n_fail, 'merged_count': len(existing)}
+
+    merged = {**existing, **new_entries}
+    update_section('mdoc_data', {
+        'timestamp': datetime.datetime.now().isoformat(timespec='seconds'),
+        'n_ts':      len(merged),
+        'per_ts':    merged,
+    })
+    return {'n_ok': n_ok, 'n_fail': n_fail, 'merged_count': len(merged)}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Frame lookup: SEC <-> acq_order/z_value bridge (see CLAUDE.md's
 # "frame_lookup" section) -- SEC/frame_b/acq_order/z_value are this

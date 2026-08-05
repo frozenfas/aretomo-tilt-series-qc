@@ -59,7 +59,6 @@ Typical usage
 """
 
 import csv as _csv_module
-import re
 import sys
 import datetime
 from pathlib import Path
@@ -75,7 +74,7 @@ from aretomo3_preprocess.shared.project_json import (
     load as _load_project, update_section,
 )
 from aretomo3_preprocess.shared.project_state import (
-    register_input_stacks, record_tool_path,
+    register_input_stacks, record_tool_path, register_mdoc_data,
 )
 
 
@@ -111,60 +110,26 @@ def _enrich_mdoc_data(frames_dir: Path, force: bool):
         print(f'  Use --force to overwrite.')
         return
 
-    from aretomo3_preprocess.shared.parsers import parse_mdoc_file
-
     ts_mdocs = sorted(frames_dir.glob('ts-*.mdoc'))
     if ts_mdocs:
         mdoc_files = ts_mdocs
-        key_of = lambda p: p.resolve().stem
         print(f'  Found {len(ts_mdocs)} ts-*.mdoc symlinks — reading only the '
               f'renamed/curated set (not every raw *.mdoc in this directory).')
     else:
         mdoc_files = sorted(frames_dir.glob('*.mdoc'))
-        key_of = lambda p: p.stem
     if not mdoc_files:
         print(f'  ERROR: no .mdoc files found in {frames_dir}')
         return
 
-    prior = _load_project().get('mdoc_data', {}).get('per_ts', {})
-    # Drop any 'ts-XXX'-keyed entries left over from before this function
-    # preferred ts-*.mdoc's resolved (original) stem as the key -- a bare
-    # 'ts-123' key is never a real original stem (those are always
-    # Position_N-style names), so it's always stale double-counted debris.
-    prior = {k: v for k, v in prior.items() if not re.match(r'^ts-\d+$', k)}
-    new_entries = {}
-    n_ok = n_fail = 0
-    for path in mdoc_files:
-        try:
-            mdoc_data, angpix, acquisition = parse_mdoc_file(path)
-        except Exception as exc:
-            print(f'    FAIL  {path.name}: {exc}')
-            n_fail += 1
-            continue
-        if mdoc_data:
-            new_entries[key_of(path)] = {
-                'angpix':      angpix,
-                'acquisition': acquisition,
-                'frames':      {str(k): v for k, v in mdoc_data.items()},
-            }
-            n_ok += 1
-        else:
-            n_fail += 1
-
-    if not new_entries:
+    result = register_mdoc_data(mdoc_files)
+    if result['n_ok'] == 0:
         print(f'  ERROR: no mdoc data extracted from {frames_dir}')
         return
-
-    merged = {**prior, **new_entries}
-    update_section('mdoc_data', {
-        'timestamp': datetime.datetime.now().isoformat(timespec='seconds'),
-        'n_ts':      len(merged),
-        'per_ts':    merged,
-    })
-    print(f'  mdoc_data: {n_ok} TS parsed'
-          + (f' ({len(merged)} total in project.json)' if prior else ''))
-    if n_fail:
-        print(f'  {n_fail} files could not be parsed')
+    print(f'  mdoc_data: {result["n_ok"]} TS parsed'
+          + (f' ({result["merged_count"]} total in project.json)'
+             if result['merged_count'] > result['n_ok'] else ''))
+    if result['n_fail']:
+        print(f'  {result["n_fail"]} files could not be parsed')
 
 
 def _enrich_mrc_data(mrc_dir: Path, in_skips: list, force: bool):
