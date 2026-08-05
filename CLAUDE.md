@@ -315,6 +315,26 @@ fixed 2026-08, same fail-loud-not-silent-corruption principle). Their
 `_load_threshold_csv()` was also a byte-for-byte duplicate, now
 `shared/discovery.py:load_threshold_csv()`.
 
+**`pytom_ribo_auto.py` drives `pytom_match.py` programmatically, not via
+its CLI** — it calls `pytom_match.run(pm_ns)` directly with a hand-built
+`argparse.Namespace`, three separate times (the handedness check, a
+`--reextract`-only path, and the main full run). Each of those used to
+hand-duplicate `pytom_match.py`'s entire CLI surface, restating most
+fields at whatever their already-current default happened to be, just to
+have a "complete" Namespace — a real, previously-unguarded risk: a new
+field `pytom_match.py`'s `run()` reads via plain attribute access (not
+`getattr(..., default)`) would silently `AttributeError` at every
+hand-built call site until each was updated to match, and the three
+would drift independently in the meantime (same "diverged twin" pattern
+as `pytom_match.py`/`gapstop_match.py` above, just across a command
+boundary instead of within one file). Fixed via
+`pytom_match.py:default_args()` — introspects the real parser's own
+argparse actions rather than a hand-maintained copy — and
+`pytom_ribo_auto.py:_build_pm_namespace(**overrides)`, which starts from
+that and applies only the genuine overrides each call site needs. Also
+made `pytom_match.py:find_tomogram()` (was `_find_tomogram`) a proper
+public function, since `pytom_ribo_auto.py` calls it directly too.
+
 ## Tilt-related file formats (read before touching tilt angles)
 
 AreTomo3/IMOD produce several files that all carry per-frame tilt-angle

@@ -203,13 +203,17 @@ def _star_to_mod(star_path, job_json_path, mod_dir, sphere_diameter=None):
     return True
 
 
-def _find_tomogram(aretomo_dir, prefix, vol_suffix):
+def find_tomogram(aretomo_dir, prefix, vol_suffix):
     """Locate the reconstructed volume for a given prefix.
 
     AreTomo3 naming conventions:
       ts-xxx_Vol.mrc       (single --at-bin run, default)
       ts-xxx_b4_Vol.mrc    (multi-bin, vol_suffix='_b4')
       ts-xxx.mrc           (fallback if no _Vol suffix)
+
+    Public (no leading underscore) since pytom_ribo_auto.py calls this
+    directly -- was previously reached into as a "private" _find_tomogram,
+    an unmarked cross-module dependency.
     """
     aretomo_dir = Path(aretomo_dir)
     candidates = []
@@ -545,6 +549,29 @@ def add_parser(subparsers):
     return p
 
 
+def default_args() -> dict:
+    """
+    Return {dest: default} for every CLI argument add_parser() defines,
+    by introspecting the real parser's own argparse actions -- not a
+    hand-maintained copy.
+
+    Lets other commands that drive this one programmatically (currently
+    pytom_ribo_auto.py, which calls run() directly with a hand-built
+    argparse.Namespace instead of going through the CLI) start from this
+    command's own actual defaults and override only what they need,
+    rather than hand-duplicating this parser's entire surface three
+    times over. That duplication was a real, previously-unguarded risk:
+    a new field added here that run() reads via plain attribute access
+    (not getattr(..., default)) would silently AttributeError at every
+    hand-built call site until each one was updated by hand to match.
+    """
+    inner = argparse.ArgumentParser()
+    sub = inner.add_subparsers()
+    add_parser(sub)
+    cmd_parser = sub.choices['pytom-match']
+    return {a.dest: a.default for a in cmd_parser._actions if a.dest != 'help'}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Main run
 # ─────────────────────────────────────────────────────────────────────────────
@@ -716,7 +743,7 @@ def run(args):
     for i, prefix in enumerate(prefixes):
         print(f'\n[{i+1}/{len(prefixes)}] {prefix}')
 
-        tomo = _find_tomogram(in_dir, prefix, args.vol_suffix)
+        tomo = find_tomogram(in_dir, prefix, args.vol_suffix)
         if tomo is None:
             print(f'  WARNING: volume not found for {prefix} — skipping')
             failed.append(prefix)

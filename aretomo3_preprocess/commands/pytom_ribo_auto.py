@@ -325,7 +325,7 @@ def _stage_resampled_tomograms(in_dir, staged_dir, vol_suffix, prefixes,
           f'(~1-3 min each; cached in staged/ across re-runs)...')
 
     for prefix in tqdm(prefixes, desc='Resampling', unit='tomo'):
-        src_vol = _pm._find_tomogram(in_dir, prefix, vol_suffix)
+        src_vol = _pm.find_tomogram(in_dir, prefix, vol_suffix)
         if src_vol is None:
             tqdm.write(f'  WARNING: no volume for {prefix} -- skipping')
             continue
@@ -447,6 +447,26 @@ def _prepare_template_and_mask(reg, particle, actual_apix, staged_dir, mirror, d
     _use_prescaled_directly(pre_mask, mask_path, dry_run)
 
     return template_path, mask_path
+
+
+def _build_pm_namespace(**overrides):
+    """
+    Build the argparse.Namespace passed to pytom_match.run(), starting
+    from pytom_match's own default_args() (introspected from its real
+    parser, not a hand-maintained copy) and applying only the overrides
+    this call site actually needs.
+
+    Previously each of the three call sites hand-duplicated pytom_match's
+    entire CLI surface, restating most fields at their already-default
+    value just to have a complete Namespace -- a real, previously-
+    unguarded risk (a new field pytom_match.py's run() reads via plain
+    attribute access, not getattr(..., default), would silently
+    AttributeError at every hand-built call site until each was updated
+    to match). Now only genuine overrides need to be listed.
+    """
+    ns_dict = _pm.default_args()
+    ns_dict.update(overrides)
+    return argparse.Namespace(**ns_dict)
 
 
 def _matching_defaults():
@@ -607,19 +627,15 @@ def _check_handedness(args, in_dir, out_dir, reg, diameter_a, gpus, sep):
 
     def _run_one(ts_name, label, template_path, mask_path, gpu):
         sub_out = check_dir / label / ts_name
-        pm_ns = argparse.Namespace(
-            input=str(in_dir), vol_suffix=vol_suffix,
-            select_ts=None, include=[ts_name], exclude=None,
-            bmask_dir=None, bmask_suffix='', dose=None,
+        pm_ns = _build_pm_namespace(
+            input=str(in_dir), vol_suffix=vol_suffix, include=[ts_name],
             template=str(template_path), mask=str(mask_path),
             voxel_size=actual_apix, gpu=[gpu], particle_diameter=diameter_a,
             **_matching_defaults(),
-            analyse=False, analyse_thickness=300.0, analyse_output=None,
             extract=True, n_particles=args.handedness_particles,
-            tophat_filter=True, tophat_bins=None,
-            cut_off=None, cut_off_csv=None, n_false_positives=None,
-            relion5_compat=True, imod=False, imod_dir=None, imod_sphere_diameter=None,
-            output=str(sub_out), extract_only=False, analyse_only=False,
+            tophat_filter=True,
+            relion5_compat=True,
+            output=str(sub_out),
             pytom_dir=args.pytom_dir, dry_run=args.dry_run,
         )
         _pm.run(pm_ns)
@@ -761,7 +777,7 @@ def _reextract(args, out_dir, diameter_a, sep):
           f'diameter={diameter_a:.0f} A')
     print(sep)
 
-    pm_ns = argparse.Namespace(
+    pm_ns = _build_pm_namespace(
         output=str(out_dir),
         n_particles=n_particles,
         particle_diameter=diameter_a,
@@ -769,13 +785,13 @@ def _reextract(args, out_dir, diameter_a, sep):
         # measured 2.2x more auto-cutoff particles with it off vs baseline,
         # at ~baseline time cost, and a visual QC check of the picks looked
         # fine -- see runs/08_notophat/pytom_extract_qc.html in that screen.
-        tophat_filter=False, tophat_bins=None,
-        cut_off=cut_off, cut_off_csv=None, n_false_positives=None,
-        relion5_compat=True, imod=True, imod_dir=None, imod_sphere_diameter=None,
+        tophat_filter=False,
+        cut_off=cut_off,
+        relion5_compat=True, imod=True,
         select_ts=args.select_ts, include=args.include, exclude=args.exclude,
-        analyse=True, analyse_thickness=300.0, analyse_output=None,
-        pytom_dir=args.pytom_dir, dry_run=args.dry_run, log=None,
-        extract_only=True, analyse_only=False,
+        analyse=True,
+        pytom_dir=args.pytom_dir, dry_run=args.dry_run,
+        extract_only=True,
     )
     _pm.run(pm_ns)
 
@@ -1014,29 +1030,27 @@ def run(args):
     # Reuses pytom-match's matching + extraction + QC-report pipeline
     # directly rather than reimplementing it -- see module docstring.
     n_particles = _resolve_n_particles(args)
-    pm_ns = argparse.Namespace(
+    pm_ns = _build_pm_namespace(
         # input
         input=str(in_dir), vol_suffix=vol_suffix,
         select_ts=args.select_ts, include=args.include, exclude=args.exclude,
-        bmask_dir=None, bmask_suffix='', dose=None,
         # template matching
         template=str(template_path), mask=str(mask_path),
         voxel_size=actual_apix, gpu=gpus, particle_diameter=diameter_a,
         **_matching_defaults(),
         # QC report
-        analyse=True, analyse_thickness=300.0, analyse_output=None,
+        analyse=True,
         # extraction
         extract=True, n_particles=n_particles,
         # tophat_filter off: bi38262-30-akinetes param screen (2026-08-01)
         # measured 2.2x more auto-cutoff particles with it off vs baseline,
         # at ~baseline time cost, and a visual QC check of the picks looked
         # fine -- see runs/08_notophat/pytom_extract_qc.html in that screen.
-        tophat_filter=False, tophat_bins=None,
+        tophat_filter=False,
         cut_off=(None if args.auto_cutoff else 0.0),
-        cut_off_csv=None, n_false_positives=None,
-        relion5_compat=True, imod=True, imod_dir=None, imod_sphere_diameter=None,
+        relion5_compat=True, imod=True,
         # run control
-        output=str(out_dir), extract_only=False, analyse_only=False,
+        output=str(out_dir),
         pytom_dir=args.pytom_dir, dry_run=args.dry_run,
     )
 
