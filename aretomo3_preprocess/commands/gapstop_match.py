@@ -77,6 +77,7 @@ from aretomo3_preprocess.shared.discovery import (
     find_volumes as _find_volumes,
     mrc_dims as _mrc_dims,
     mrc_pixel_size as _mrc_angpix,
+    load_threshold_csv as _load_threshold_csv,
     filter_by_include_exclude,
 )
 
@@ -213,14 +214,18 @@ def _write_wedge_list(out_path, tomo_num, angpix, nx, ny, nz,
         defocus_um, pshift = [], []
         for f in frames:
             entry = defocus_df.get(f['sec'])
-            if entry:
-                # mean of defocus1 and defocus2; gapstop requires single 'defocus' column
-                d_um = (entry['defocus1_A'] + entry['defocus2_A']) / 2.0 / 1e4
-                defocus_um.append(d_um)
-                pshift.append(entry['phase_shift_rad'])
-            else:
-                defocus_um.append(float('nan'))
-                pshift.append(0.0)
+            if entry is None:
+                # Matches pytom_match.py's equivalent lookup: fail this TS
+                # loudly instead of silently writing NaN into the wedge
+                # list -- a NaN defocus value would silently corrupt (or
+                # crash, depending on gapstop's own tolerance) the CTF
+                # correction downstream with no warning at all. See
+                # CLAUDE.md's pytom_match.py/gapstop_match.py note.
+                raise ValueError(f'no CTF entry for sec {f["sec"]}')
+            # mean of defocus1 and defocus2; gapstop requires single 'defocus' column
+            d_um = (entry['defocus1_A'] + entry['defocus2_A']) / 2.0 / 1e4
+            defocus_um.append(d_um)
+            pshift.append(entry['phase_shift_rad'])
         data['defocus'] = defocus_um
         # Only write pshift if any value is non-zero (phase plate data).
         # gapstop bug: _array() returns a list so pshift[:,None] crashes;
@@ -394,19 +399,6 @@ def _build_extract_script(scores_em, angles_em, angles_list, tomo_id,
         '"rlnScore":     motl.df["score"].values}); '
         f'starfile.write({{"particles": df}}, "{out_star}")'
     )
-
-
-def _load_threshold_csv(csv_path):
-    """Return {ts_name: threshold} from a CSV produced by the interactive QC report."""
-    import csv
-    thresholds = {}
-    with open(csv_path, newline='') as f:
-        for row in csv.DictReader(f):
-            try:
-                thresholds[row['ts_name'].strip()] = float(row['threshold'])
-            except (KeyError, ValueError):
-                pass
-    return thresholds
 
 
 def _run_extraction(ts_out, tomo_id, angpix, angles_list, python_bin, args,
@@ -1055,10 +1047,15 @@ def run(args):
 
         # Write wedge list STAR
         wedge_path = ts_out / f'{prefix}_wedgelist.star'
-        _write_wedge_list(
-            wedge_path, tomo_id, angpix, nx, ny, nz,
-            tilt_angles, defocus_df, frames, exposure_arr, args,
-        )
+        try:
+            _write_wedge_list(
+                wedge_path, tomo_id, angpix, nx, ny, nz,
+                tilt_angles, defocus_df, frames, exposure_arr, args,
+            )
+        except ValueError as exc:
+            print(f'  ERROR: {exc}')
+            failed.append(prefix)
+            continue
         print(f'  Wedge list: {wedge_path}')
 
         # Write gapstop parameter STAR

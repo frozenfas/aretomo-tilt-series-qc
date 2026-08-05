@@ -305,7 +305,15 @@ a hardcoded default binary path (e.g. `/opt/miniconda3/envs/gapstop/bin/gapstop`
 wrappers needs a fix, check whether the same class of bug exists in its
 siblings — `pytom_match.py` and `gapstop_match.py` in particular are
 near-twins (both do template matching / particle extraction) and have
-historically diverged when a fix landed in one but not the other.
+historically diverged when a fix landed in one but not the other. Two
+confirmed instances: their `_read_ts_metadata()`'s missing-`_TLT.txt`-SEC
+guard (gapstop's was an uncaught `KeyError` where pytom's already raised
+a caught `ValueError` — fixed 2026-08), and `_write_wedge_list()`'s
+missing-CTF-entry handling (gapstop silently wrote `NaN` defocus for just
+that frame instead of failing the TS, where pytom already raised — also
+fixed 2026-08, same fail-loud-not-silent-corruption principle). Their
+`_load_threshold_csv()` was also a byte-for-byte duplicate, now
+`shared/discovery.py:load_threshold_csv()`.
 
 ## Tilt-related file formats (read before touching tilt angles)
 

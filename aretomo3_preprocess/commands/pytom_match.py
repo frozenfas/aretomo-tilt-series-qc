@@ -68,6 +68,7 @@ from aretomo3_preprocess.shared.discovery import (
     print_cmd as _print_cmd,
     find_volumes as _find_volumes,
     mrc_dims as _mrc_dims,
+    load_threshold_csv as _load_threshold_csv,
     filter_by_include_exclude,
 )
 
@@ -576,19 +577,6 @@ def _fix_tomo_names(star_path):
         path.write_text(fixed)
         return True
     return False
-
-
-def _load_threshold_csv(csv_path):
-    """Return {ts_name: threshold} from a CSV produced by the interactive QC report."""
-    import csv as _csv
-    thresholds = {}
-    with open(csv_path, newline='') as f:
-        for row in _csv.DictReader(f):
-            try:
-                thresholds[row['ts_name'].strip()] = float(row['threshold'])
-            except (KeyError, ValueError):
-                pass
-    return thresholds
 
 
 def _build_extract_cmd(extract_bin, job_json, args, cut_off_override=None):

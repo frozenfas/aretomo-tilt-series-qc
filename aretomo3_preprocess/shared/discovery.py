@@ -109,6 +109,25 @@ def mrc_pixel_size(mrc_path):
     return None
 
 
+def load_threshold_csv(csv_path):
+    """
+    Return {ts_name: threshold} from a per-TS threshold override CSV
+    produced by the interactive QC report (pytom_match.py/gapstop_match.py
+    both consume this -- was a byte-for-byte identical duplicate in each).
+    Rows missing 'ts_name'/'threshold' or with a non-numeric threshold are
+    silently skipped.
+    """
+    import csv
+    thresholds = {}
+    with open(csv_path, newline='') as f:
+        for row in csv.DictReader(f):
+            try:
+                thresholds[row['ts_name'].strip()] = float(row['threshold'])
+            except (KeyError, ValueError):
+                pass
+    return thresholds
+
+
 def filter_by_include_exclude(prefixes, include, exclude):
     """
     Filter a list of TS prefixes by --include/--exclude patterns.
