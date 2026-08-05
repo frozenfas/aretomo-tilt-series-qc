@@ -218,6 +218,22 @@ data has no way to know it's gone stale. `frame_lookup` is the concrete
 example of the first case; `compute_reference_defocus` (used directly,
 never cached) is the concrete example of the second.
 
+**`select_ts.py` had a third, independent reference-defocus computation**
+— `_compute_ts_stats()` read `alignment_data.json`'s own cached
+per-frame `mean_defocus_um` (whatever `analyse` last wrote), a second
+"generation" of the same underlying CTFFIND data separate from
+`compute_reference_defocus`, with its own staleness window. Confirmed on
+real data (156 TS) that the two do silently disagree in practice — every
+TS showed a small but consistent difference between the cached and
+freshly-recomputed value. Fixed with an optional `--input DIR` flag: when
+given, `compute_reference_defocus(DIR)` is computed once for the whole
+batch and takes priority over `alignment_data.json`'s cached value per TS
+(falling back to it when a TS isn't found in the fresh scan). Omitted by
+default — unlike `imod_mtffilter.py` (which always has a required
+`--input` already in hand), `select_ts.py`'s only required input is
+`--analysis`, so this needed a genuinely new, opt-in flag rather than a
+free substitution.
+
 **`shared/` modules** — parsing and cross-command utilities, not one-off
 helpers:
 - `parsers.py` — `parse_aln_file`/`parse_ctf_file`/`parse_tlt_file`/`parse_mdoc_file`/`check_nominal_tilt_consistency`/`compute_reference_defocus`. Always reuse these instead of hand-rolling `.aln`/`.mdoc` parsing.

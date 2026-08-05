@@ -53,8 +53,19 @@ def _load_ratings(analysis_dir: Path, ratings_file=None) -> dict:
 # Per-TS statistics
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _compute_ts_stats(ts_name, ts_data, overlap_thres):
-    """Compute per-TS summary statistics from an alignment_data.json entry."""
+def _compute_ts_stats(ts_name, ts_data, overlap_thres, fresh_defocus=None):
+    """
+    Compute per-TS summary statistics from an alignment_data.json entry.
+
+    fresh_defocus: optional {ts_name: ref_defocus_um} from
+    shared/parsers.py:compute_reference_defocus() (--input, read fresh
+    from ts-*_CTF.txt/_TLT.txt every run). When given and this ts_name is
+    present, takes priority over alignment_data.json's own cached
+    mean_defocus_um -- alignment_data.json is only as fresh as the last
+    analyse run, a second, independent "generation" of the same
+    underlying CTFFIND data that can silently disagree with the current
+    files on disk (see CLAUDE.md).
+    """
     frames       = ts_data.get('frames', [])
     n_frames     = len(frames)
     angpix       = ts_data.get('angpix')
@@ -76,7 +87,7 @@ def _compute_ts_stats(ts_name, ts_data, overlap_thres):
             'thickness_px':   thickness_px,
             'thickness_angst':thickness_angst,
             'thickness_nm':   thickness_nm,
-            'ref_defocus_um': None,
+            'ref_defocus_um': (fresh_defocus or {}).get(ts_name),
             'alpha_deg':      ts_data.get('alpha_offset'),
         }
 
@@ -92,13 +103,18 @@ def _compute_ts_stats(ts_name, ts_data, overlap_thres):
     else:
         n_tilts = n_frames
 
-    # Defocus of first acquisition (acq_order == 1)
-    acq1 = [f for f in frames if f.get('acq_order') == 1]
-    if acq1:
-        ref_frame = acq1[0]
+    # Defocus of first acquisition (acq_order == 1). fresh_defocus (from
+    # --input, computed fresh from ts-*_CTF.txt every run) takes priority
+    # over alignment_data.json's own cached copy when both are available.
+    if fresh_defocus is not None and fresh_defocus.get(ts_name) is not None:
+        ref_defocus = fresh_defocus[ts_name]
     else:
-        ref_frame = min(frames, key=lambda f: abs(f.get('tilt', 0)))
-    ref_defocus = ref_frame.get('mean_defocus_um') if ref_frame else None
+        acq1 = [f for f in frames if f.get('acq_order') == 1]
+        if acq1:
+            ref_frame = acq1[0]
+        else:
+            ref_frame = min(frames, key=lambda f: abs(f.get('tilt', 0)))
+        ref_defocus = ref_frame.get('mean_defocus_um') if ref_frame else None
 
     return {
         'ts_name':        ts_name,
@@ -186,6 +202,16 @@ def add_parser(subparsers):
                    help='Output CSV file path (default: <analysis_dir>/ts-select.csv)')
     p.add_argument('--ratings', default=None, metavar='CSV',
                    help='Path to ts_ratings.csv (default: ts_ratings.csv in --analysis dir)')
+    p.add_argument('--input', '-i', default=None, metavar='DIR',
+                   help='Directory containing ts-*_CTF.txt/_TLT.txt (the same '
+                        'directory analyse\'s own --input pointed at). When '
+                        'given, ref_defocus_um is computed fresh from those '
+                        'files (shared/parsers.py:compute_reference_defocus) '
+                        'instead of using alignment_data.json\'s own cached '
+                        'copy -- avoids the two of them silently disagreeing '
+                        'if CTFFIND/AreTomo3 was re-run since the last analyse. '
+                        'Omit to keep the previous (alignment_data.json-only) '
+                        'behavior.')
     p.add_argument('--dry-run', action='store_true',
                    help='Print what would be selected/excluded without writing CSV')
 
@@ -242,6 +268,16 @@ def run(args):
     ts_names = sorted(alignment_data.keys())
     print(f'Loaded {len(ts_names)} tilt series from {analysis_dir}/alignment_data.json')
 
+    # ── Fresh reference defocus (optional) ────────────────────────────────────
+    fresh_defocus = None
+    if args.input is not None:
+        from aretomo3_preprocess.shared.parsers import compute_reference_defocus
+        input_dir = Path(args.input)
+        fresh_defocus = compute_reference_defocus(input_dir)
+        n_found = sum(1 for ts in ts_names if fresh_defocus.get(ts) is not None)
+        print(f'ref_defocus_um: computed fresh from {input_dir}/ts-*_CTF.txt '
+              f'({n_found}/{len(ts_names)} TS found)')
+
     # ── Load ratings ─────────────────────────────────────────────────────────
     ratings_path = Path(args.ratings) if args.ratings else analysis_dir / 'ts_ratings.csv'
     ratings = _load_ratings(analysis_dir, args.ratings)
@@ -274,7 +310,7 @@ def run(args):
 
     for ts_name in ts_names:
         stats          = _compute_ts_stats(ts_name, alignment_data[ts_name],
-                                           args.overlap_thres)
+                                           args.overlap_thres, fresh_defocus)
         stats['rating'] = ratings.get(ts_name)   # None if unrated
         reasons        = _apply_filters(stats, args)
         selected = len(reasons) == 0
