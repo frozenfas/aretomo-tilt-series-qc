@@ -112,6 +112,41 @@ from aretomo3_preprocess.shared.discovery import (
 )
 
 
+class _Tee:
+    """Duplicates writes to both the original stream and a log file, so a
+    long-running batch command leaves a persistent record in --output
+    without losing live terminal output. Installed by _start_logging()."""
+
+    def __init__(self, stream, log_file):
+        self._stream = stream
+        self._log_file = log_file
+
+    def write(self, data):
+        self._stream.write(data)
+        self._log_file.write(data)
+
+    def flush(self):
+        self._stream.flush()
+        self._log_file.flush()
+
+
+def _start_logging(out_dir, dry_run):
+    """Mirror stdout/stderr to <out_dir>/run.log for the rest of this
+    process. Call only once out_dir is in its final state (i.e. after any
+    --clean wipe) so the log doesn't get orphaned by a directory recreate.
+    No-op for --dry-run, which doesn't touch disk."""
+    if dry_run:
+        return
+    out_dir.mkdir(parents=True, exist_ok=True)
+    log_path = out_dir / 'run.log'
+    log_file = open(log_path, 'a')
+    log_file.write(f"\n{'=' * 70}\n{datetime.datetime.now().isoformat()}  "
+                    f"{' '.join(sys.argv)}\n{'=' * 70}\n")
+    log_file.flush()
+    sys.stdout = _Tee(sys.stdout, log_file)
+    sys.stderr = _Tee(sys.stderr, log_file)
+
+
 def _read_voxel_size(mrc_path):
     apix = mrc_pixel_size(mrc_path)
     if apix is None:
@@ -935,6 +970,7 @@ def run(args):
     args.imod_bin_dir = resolve_tool_path('imod', args.imod_bin_dir)
 
     if args.reextract:
+        _start_logging(out_dir, args.dry_run)
         diameter_a = _PARTICLES[args.particle]['diameter_a']
         _reextract(args, out_dir, diameter_a, sep)
         return
@@ -993,6 +1029,7 @@ def run(args):
     print(sep)
 
     if args.check_handedness:
+        _start_logging(out_dir, args.dry_run)
         _check_handedness(args, in_dir, out_dir, reg, diameter_a, gpus, sep)
         return
 
@@ -1000,6 +1037,9 @@ def run(args):
         print(f'WARNING: {warn_msg}')
 
     out_dir = check_output_dir(out_dir, clean=args.clean, dry_run=args.dry_run)
+    # After any --clean wipe, so the log file isn't orphaned by the
+    # directory being recreated out from under it.
+    _start_logging(out_dir, args.dry_run)
     staged_dir = out_dir / 'staged'
 
     # ── 1. Pick the tomogram bin closest to the target voxel size ──────────
