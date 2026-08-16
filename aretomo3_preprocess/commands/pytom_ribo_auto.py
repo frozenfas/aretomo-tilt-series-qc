@@ -36,6 +36,20 @@ What it automates that `pytom-match` normally requires by hand
      --random-phase-correction --half-precision --angular-search 10
      --high-pass 400 --relion5-compat --imod --analyse.
 
+Reconstruction-volume characteristics this tool has actually been run
+against (bi38262-30-akinetes, `run001`, 2026-08-01 param screen -- see the
+tophat_filter note further down for that screen's own details): 1.63 A/px
+unbinned, `-AtBin 4` (6.52 A/px tomogram, auto-resampled to the 10.0 A/px
+target per step 1b below), `-Wbp 1` (WBP, NOT SART), `-CorrCTF 1`
+(CTF-corrected), `-TiltCor 0`, `-VolZ 1800`. Matching against a SART
+(`-Wbp 0`) reconstruction has NOT been validated -- WBP is the generally
+preferred reconstruction method for template matching (linear, so
+correlation behaves predictably against a CTF-weighted reference; SART's
+iterative/nonlinear contrast transfer suits visualization/segmentation
+better than quantitative picking) and is specifically what this tool's
+defaults were tuned against. Treat WBP as a requirement of the input
+`--cmd 2` reconstruction, not an incidental detail of the test data.
+
 Only 70S has bundled reference/mask pairs on this system right now
 ---------------------------------------------------------------------
 Two candidate 70S references, at two different fixed target_apix, for
@@ -117,10 +131,6 @@ _BINVOL_BIN = f'{_IMOD_DIR}/bin/binvol'
 # Bounded below by whatever the source density's own native resolution
 # is -- pytom_create_template.py (>=0.13.2) refuses to upsample past it.
 _DEFAULT_TARGET_APIX = 10.0
-
-# How far an existing --at-bin reconstruction is allowed to sit from a
-# particle's target_apix before we resample instead of just using it as-is.
-_RESAMPLE_TOL_PCT = 5.0
 
 _REF_DIR = Path('/opt/data/pytom')
 
@@ -430,8 +440,18 @@ def _prepare_template_and_mask(reg, particle, actual_apix, staged_dir, mirror, d
               f'co-registered mirrored pair first (same pipeline used for the originals).')
         sys.exit(1)
 
-    _check_prescaled(ref_map, 'reference', particle, actual_apix)
-    _check_prescaled(pre_mask, 'mask', particle, actual_apix)
+    # Check against reg['target_apix'], NOT actual_apix: the reference/mask
+    # are pre-made, fixed files that must always be at the registry's
+    # target_apix, regardless of what apix this particular run's tomogram
+    # ends up using. The two should always coincide now that step 1b/the
+    # handedness-check equivalent always resamples to exactly target_apix
+    # (no more "close enough, use as-is" branch -- that used to let
+    # actual_apix drift from target_apix, e.g. 9.78 vs. 10.00, which made
+    # this check incorrectly flag the correctly-prepared reference as wrong;
+    # bug found 2026-08-16). Checking against the registry value directly
+    # here anyway, rather than relying on that invariant holding upstream.
+    _check_prescaled(ref_map, 'reference', particle, reg['target_apix'])
+    _check_prescaled(pre_mask, 'mask', particle, reg['target_apix'])
 
     staged_dir.mkdir(parents=True, exist_ok=True)
     mirror_tag = '_mirror' if mirror else ''
@@ -605,8 +625,10 @@ def _check_handedness(args, in_dir, out_dir, reg, diameter_a, gpus, sep):
     )
     print(sep)
 
-    gap_pct = 100.0 * abs(actual_apix - target_apix) / target_apix
-    if gap_pct > _RESAMPLE_TOL_PCT:
+    # Always resample unless the existing bin is already exact -- see the
+    # matching comment in the main run path (step 1b) for why "merely
+    # close" isn't good enough here.
+    if abs(actual_apix - target_apix) > _APIX_MATCH_TOL:
         vol_suffix = _stage_resampled_tomograms(
             in_dir, check_dir / 'staged_tomo', vol_suffix, ts_list,
             target_apix, args.dry_run, args.imod_bin_dir,
@@ -863,6 +885,16 @@ def add_parser(subparsers):
                       help='Check these specific TS instead of a random sample')
     hand.add_argument('--handedness-n-ts', type=int, default=4, metavar='N',
                       help='Sample size if --handedness-ts not given')
+    # TODO: this cap is applied identically to both the normal and mirrored
+    # template (see _check_handedness). The whole comparison depends on
+    # seeing a real count DIFFERENCE between the two -- on a tomogram with
+    # enough ribosomes that both mirror-states would naturally exceed 1000
+    # real hits, the cap could truncate both to ~the same number and hide
+    # the true difference, not just make the check slower to skip. Worth
+    # checking whether --handedness-particles needs raising (or auto-sizing
+    # from --expected-particles/tomogram density) before trusting a "no
+    # difference" result on a densely-populated tomogram, rather than
+    # assuming the default of 1000 is always high enough headroom.
     hand.add_argument('--handedness-particles', type=int, default=1000,
                       help='Cap on particles extracted per template for the comparison')
 
@@ -975,15 +1007,16 @@ def run(args):
     vol_suffix, actual_apix, sample_vol = _pick_bin_variant(in_dir, target_apix)
     print(sep)
 
-    # ── 1b. Resample to the target voxel size if no close-enough bin exists ─
+    # ── 1b. Resample to the target voxel size unless already exact ─────────
     # No existing --at-bin reconstruction is required to land on the exact
     # target: pytom_match_template.py needs template and tomogram at the
-    # *same* voxel size (no internal auto-rescale, unlike easymode), so if
-    # the closest bin is more than _RESAMPLE_TOL_PCT off, resample every
-    # selected tomogram to the target ourselves rather than searching at a
-    # mismatched or merely-close voxel size.
-    gap_pct = 100.0 * abs(actual_apix - target_apix) / target_apix
-    if gap_pct > _RESAMPLE_TOL_PCT:
+    # *same* voxel size and does NOT enforce this itself when --voxel-size
+    # is explicitly given (tmjob.py just prints a WARNING and proceeds with
+    # a real, uncorrected mismatch -- confirmed 2026-08-16 after a "close
+    # enough" 5%-tolerance skip let a 9.78 vs. 10.00 A/px mismatch through
+    # silently). So: always resample unless the existing bin is already
+    # exact (within _APIX_MATCH_TOL), never accept "merely close".
+    if abs(actual_apix - target_apix) > _APIX_MATCH_TOL:
         prefixes = [p for p, _ in _find_volumes(in_dir, vol_suffix)]
         prefixes = filter_by_include_exclude(prefixes, args.include, args.exclude)
         selected_ts = resolve_selected_ts(args.select_ts)
