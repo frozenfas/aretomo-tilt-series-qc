@@ -33,7 +33,18 @@ import sys
 import json
 import shutil
 import datetime
+import threading
 from pathlib import Path
+
+# Guards the read-modify-write cycle in update_section()/update_section_once()
+# against concurrent callers in the same process (e.g. pytom-ribo-auto's
+# --check-handedness worker threads, one per GPU, each independently
+# resolving/recording the same tool path at startup). Without this, threads
+# can race on the same underlying file: found in practice as a
+# FileNotFoundError from os.replace() when one thread's write consumed
+# another thread's still-in-use temp file (both used the same os.getpid()-
+# based name -- see _write()'s tmp_path, now also thread-scoped, 2026-08-16).
+_write_lock = threading.Lock()
 
 
 PROJECT_FILENAME = 'aretomo3_project.json'
@@ -85,7 +96,8 @@ def _write(data: dict, path: Path):
     os.replace() is a single filesystem rename, so readers only ever see the
     fully-old or fully-new file, never a partial one.
     """
-    tmp_path = path.with_suffix(path.suffix + f'.tmp{os.getpid()}')
+    tmp_path = path.with_suffix(
+        path.suffix + f'.tmp{os.getpid()}-{threading.get_ident()}')
     try:
         with open(tmp_path, 'w') as fh:
             json.dump(data, fh, indent=2)
@@ -176,14 +188,15 @@ def update_section(section: str, values: dict,
     if path is None:
         path = Path.cwd() / PROJECT_FILENAME
 
-    data                         = load_or_create(path)
-    data[section]                = values
-    data['project']['last_updated']   = (
-        datetime.datetime.now().isoformat(timespec='seconds')
-    )
-    data['project']['schema_version'] = SCHEMA_VERSION
+    with _write_lock:
+        data                         = load_or_create(path)
+        data[section]                = values
+        data['project']['last_updated']   = (
+            datetime.datetime.now().isoformat(timespec='seconds')
+        )
+        data['project']['schema_version'] = SCHEMA_VERSION
 
-    _write(data, path)
+        _write(data, path)
     print(f'Project file updated: {path.name}  [{section}]')
 
     if backup_dir is not None:
@@ -218,16 +231,17 @@ def update_section_once(section: str, values: dict,
     if path is None:
         path = Path.cwd() / PROJECT_FILENAME
 
-    data = load_or_create(path)
-    if section in data:
-        return   # already frozen — do not overwrite
+    with _write_lock:
+        data = load_or_create(path)
+        if section in data:
+            return   # already frozen — do not overwrite
 
-    data[section]                     = values
-    data['project']['last_updated']   = (
-        datetime.datetime.now().isoformat(timespec='seconds')
-    )
-    data['project']['schema_version'] = SCHEMA_VERSION
-    _write(data, path)
+        data[section]                     = values
+        data['project']['last_updated']   = (
+            datetime.datetime.now().isoformat(timespec='seconds')
+        )
+        data['project']['schema_version'] = SCHEMA_VERSION
+        _write(data, path)
     print(f'Project file updated: {path.name}  [{section}]  (invariant)')
 
     if backup_dir is not None:
