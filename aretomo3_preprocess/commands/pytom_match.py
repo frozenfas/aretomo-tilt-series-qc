@@ -323,12 +323,18 @@ def _write_aux_files(out_dir, prefix, tlt_out, defocus_out, exposure_out):
     return tlt_file, df_file, exp_file
 
 
-def _build_cmd(pytom_bin, tomo, tlt_file, df_file, exp_file, out_subdir, args, bmask=None):
+def _build_cmd(pytom_bin, tomo, tlt_file, df_file, exp_file, out_subdir, args,
+                bmask=None, gpu_override=None):
     """
     Build the pytom_match_template.py command for one tomogram.
 
     Argument order mirrors batch_pytom_aretomo3.py (Phaips/batch_pytom_aretomo3)
     with SLURM-specific parts removed.
+
+    gpu_override -- use this GPU list instead of args.gpu. For the
+    per-tomogram GPU worker pool in run() (multiple TS dispatched in
+    parallel, one GPU each) rather than mutating the shared args.gpu from
+    multiple threads, which would itself be a race.
     """
     cmd = [
         pytom_bin,
@@ -355,7 +361,7 @@ def _build_cmd(pytom_bin, tomo, tlt_file, df_file, exp_file, out_subdir, args, b
         cmd += ['--high-pass', str(args.high_pass)]
     if args.random_phase_correction:
         cmd += ['-r', '--rng-seed', str(args.rng_seed)]
-    cmd += ['-g'] + [str(g) for g in args.gpu]
+    cmd += ['-g'] + [str(g) for g in (gpu_override if gpu_override is not None else args.gpu)]
     if args.per_tilt_weighting:
         cmd += ['--per-tilt-weighting']
     if df_file is not None and args.tomogram_ctf_model:
@@ -740,14 +746,20 @@ def run(args):
     # ── Process each tomogram ──────────────────────────────────────────────
     ok, failed = [], []
 
-    for i, prefix in enumerate(prefixes):
-        print(f'\n[{i+1}/{len(prefixes)}] {prefix}')
-
+    def _process_one_ts(prefix, gpu):
+        """
+        Run matching (+ optional extraction/QC) for one TS on one GPU.
+        Returns (status, qc_entry_or_None, extract_qc_entry_or_None) rather
+        than mutating ok/failed/qc_entries/extract_qc_entries directly, so
+        it's safe to call from multiple worker threads at once (see the GPU
+        pool below) -- each TS only ever touches its own out_subdir, so the
+        real filesystem work here was always thread-safe; it's only the
+        shared Python lists that needed this to stay a pure function.
+        """
         tomo = find_tomogram(in_dir, prefix, args.vol_suffix)
         if tomo is None:
             print(f'  WARNING: volume not found for {prefix} — skipping')
-            failed.append(prefix)
-            continue
+            return 'failed', None, None
 
         try:
             tlt_out, defocus_out, exposure_out = _read_ts_metadata(
@@ -755,8 +767,7 @@ def run(args):
             )
         except (FileNotFoundError, ValueError) as e:
             print(f'  WARNING: {e} — skipping')
-            failed.append(prefix)
-            continue
+            return 'failed', None, None
 
         if args.dry_run:
             od = out_dir / prefix
@@ -781,7 +792,7 @@ def run(args):
 
         cmd = _build_cmd(
             pytom_bin, tomo, tlt_file, df_file, exp_file,
-            out_subdir, args, bmask=bmask,
+            out_subdir, args, bmask=bmask, gpu_override=[gpu],
         )
 
         _print_cmd(cmd)
@@ -800,8 +811,7 @@ def run(args):
 
         if args.dry_run:
             print('  [dry-run: skipping execution]')
-            ok.append(prefix)
-            continue
+            return 'ok', None, None
 
         import time as _time
         _t0 = _time.perf_counter()
@@ -811,12 +821,10 @@ def run(args):
         print(f'  Search time: {_h:02d}:{_m:02d}:{_s:02d}')
         if ret.returncode != 0:
             print(f'  ERROR: pytom exited with code {ret.returncode}')
-            failed.append(prefix)
-            continue
-
-        ok.append(prefix)
+            return 'failed', None, None
 
         # ── QC (score map) ────────────────────────────────────────────────
+        qc_entry = None
         if do_qc:
             before_b64 = after_b64 = None
             proj = central_slab_projection(tomo, qc_thick)
@@ -828,7 +836,7 @@ def run(args):
                 if sproj:
                     after_b64 = projection_to_b64png(sproj['img'], pct=(50, 99.9),
                                                        cmap='inferno', colorbar=True)
-            qc_entries.append({
+            qc_entry = {
                 'ts_name':     prefix,
                 'before_b64':  before_b64,
                 'after_b64':   after_b64,
@@ -839,9 +847,10 @@ def run(args):
                     'voxel':       f'{args.voxel_size} Å',
                     'search time': f'{_h:02d}:{_m:02d}:{_s:02d}',
                 },
-            })
+            }
 
         # ── Inline extraction ─────────────────────────────────────────────
+        extract_qc_entry = None
         if args.extract:
             if args.n_particles is None:
                 print('  WARNING: --extract set but --n-particles not given — skipping')
@@ -875,7 +884,7 @@ def run(args):
                             if do_qc_picks:
                                 star_files  = sorted(out_subdir.glob('*_particles.star'))
                                 score_files = sorted(out_subdir.glob('*_scores.mrc'))
-                                ext_entry = {
+                                extract_qc_entry = {
                                     'ts_name':   prefix,
                                     'img_b64':   None,
                                     'score_b64': None,
@@ -909,7 +918,7 @@ def run(args):
                                                 slab_angst=qc_thick,
                                                 particle_diameter=args.particle_diameter,
                                             )
-                                            ext_entry.update({
+                                            extract_qc_entry.update({
                                                 'img_b64':    result['img_b64'],
                                                 'score_b64':  sc_b64,
                                                 'n_total':    result['n_total'],
@@ -922,7 +931,70 @@ def run(args):
                                             })
                                     except Exception as exc:
                                         print(f'  WARNING: picks QC render failed: {exc}')
-                                extract_qc_entries.append(ext_entry)
+
+        return 'ok', qc_entry, extract_qc_entry
+
+    if len(args.gpu) <= 1 or args.dry_run:
+        # No point threading a single GPU (or a dry-run, which does no real
+        # GPU work) -- run sequentially, same result, simpler to read, and
+        # no behavior change for the common single-GPU case (matches
+        # pytom_ribo_auto.py's --check-handedness precedent for this exact
+        # tradeoff).
+        gpu = args.gpu[0]
+        for i, prefix in enumerate(prefixes):
+            print(f'\n[{i+1}/{len(prefixes)}] {prefix}')
+            status, qc_entry, extract_qc_entry = _process_one_ts(prefix, gpu)
+            (ok if status == 'ok' else failed).append(prefix)
+            if qc_entry is not None:
+                qc_entries.append(qc_entry)
+            if extract_qc_entry is not None:
+                extract_qc_entries.append(extract_qc_entry)
+    else:
+        # Multiple GPUs given: run one TS at a time per GPU, concurrently,
+        # rather than handing pytom_match_template.py all the GPU IDs at
+        # once -- with the default volume_split=[1,1,1] (no split) it would
+        # only ever actually use gpu_ids[0] for a single unsplit job,
+        # silently leaving the rest idle. This dispatches genuinely
+        # independent per-TS jobs across all given GPUs instead.
+        import queue
+        import threading
+
+        job_q = queue.Queue()
+        for prefix in prefixes:
+            job_q.put(prefix)
+        results_lock = threading.Lock()
+
+        def _worker(gpu):
+            while True:
+                try:
+                    prefix = job_q.get_nowait()
+                except queue.Empty:
+                    return
+                print(f'\n[gpu{gpu}] starting {prefix}')
+                status, qc_entry, extract_qc_entry = _process_one_ts(prefix, gpu)
+                with results_lock:
+                    (ok if status == 'ok' else failed).append(prefix)
+                    if qc_entry is not None:
+                        qc_entries.append(qc_entry)
+                    if extract_qc_entry is not None:
+                        extract_qc_entries.append(extract_qc_entry)
+                print(f'[gpu{gpu}] done {prefix}: {status}')
+                job_q.task_done()
+
+        threads = [threading.Thread(target=_worker, args=(gpu,)) for gpu in args.gpu]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # Threads finish in whatever order they finish -- re-sort into the
+        # original prefixes order so the summary/QC report isn't shuffled
+        # run-to-run for no reason.
+        order = {p: i for i, p in enumerate(prefixes)}
+        ok.sort(key=lambda p: order[p])
+        failed.sort(key=lambda p: order[p])
+        qc_entries.sort(key=lambda e: order[e['ts_name']])
+        extract_qc_entries.sort(key=lambda e: order[e['ts_name']])
 
     # ── Summary ────────────────────────────────────────────────────────────
     print(f'\n{sep}')
