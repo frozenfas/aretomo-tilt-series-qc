@@ -112,39 +112,47 @@ from aretomo3_preprocess.shared.discovery import (
 )
 
 
-class _Tee:
-    """Duplicates writes to both the original stream and a log file, so a
-    long-running batch command leaves a persistent record in --output
-    without losing live terminal output. Installed by _start_logging()."""
-
-    def __init__(self, stream, log_file):
-        self._stream = stream
-        self._log_file = log_file
-
-    def write(self, data):
-        self._stream.write(data)
-        self._log_file.write(data)
-
-    def flush(self):
-        self._stream.flush()
-        self._log_file.flush()
-
-
 def _start_logging(out_dir, dry_run):
     """Mirror stdout/stderr to <out_dir>/run.log for the rest of this
-    process. Call only once out_dir is in its final state (i.e. after any
-    --clean wipe) so the log doesn't get orphaned by a directory recreate.
-    No-op for --dry-run, which doesn't touch disk."""
+    process, via a real `tee` subprocess wired in with os.dup2 on our own
+    fd 1/2 -- not a pure-Python sys.stdout/stderr wrapper. That distinction
+    matters: subprocess.run(cmd) elsewhere in this file (the actual
+    pytom_match_template.py / pytom_extract_candidates.py calls) inherits
+    the process's real OS file descriptors directly, bypassing any
+    Python-level sys.stdout/stderr replacement entirely -- confirmed in
+    practice 2026-08-19, when an extraction failure's actual error text
+    went straight to the terminal and was unrecoverable, only the wrapper
+    script's own print()s had made it into run.log. Redirecting the real
+    fds instead means every subprocess launched from here also gets
+    captured, with no changes needed at each individual call site.
+
+    One real, expected side effect: tqdm (used for the resampling
+    progress bar) checks isatty() on its output stream to decide whether
+    to do in-place \\r updates; once fd 1 is a pipe into tee rather than a
+    real terminal, isatty() is False and it falls back to plain
+    one-line-per-update output. Same tradeoff as `command | tee file` in
+    a shell -- inherent to capturing subprocess output this way, not a bug.
+
+    Call only once out_dir is in its final state (i.e. after any --clean
+    wipe) so the log doesn't get orphaned by a directory recreate. No-op
+    for --dry-run, which doesn't touch disk."""
     if dry_run:
         return
     out_dir.mkdir(parents=True, exist_ok=True)
     log_path = out_dir / 'run.log'
-    log_file = open(log_path, 'a')
-    log_file.write(f"\n{'=' * 70}\n{datetime.datetime.now().isoformat()}  "
-                    f"{' '.join(sys.argv)}\n{'=' * 70}\n")
-    log_file.flush()
-    sys.stdout = _Tee(sys.stdout, log_file)
-    sys.stderr = _Tee(sys.stderr, log_file)
+
+    sys.stdout.flush()
+    sys.stderr.flush()
+    print(f"\n{'=' * 70}\n{datetime.datetime.now().isoformat()}  "
+          f"{' '.join(sys.argv)}\n{'=' * 70}")
+    sys.stdout.flush()
+
+    # tee inherits our current (real terminal) fd 1 as its own stdout --
+    # spawn it before touching our own fds, so it still reaches the
+    # terminal after we redirect ours into its stdin below.
+    tee = subprocess.Popen(['tee', '-a', str(log_path)], stdin=subprocess.PIPE)
+    os.dup2(tee.stdin.fileno(), 1)
+    os.dup2(tee.stdin.fileno(), 2)
 
 
 def _read_voxel_size(mrc_path):
