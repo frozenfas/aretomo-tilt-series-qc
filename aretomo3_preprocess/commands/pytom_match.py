@@ -61,7 +61,7 @@ from aretomo3_preprocess.shared.project_json import (
     update_section, args_to_dict,
 )
 from aretomo3_preprocess.shared.project_state import (
-    resolve_selected_ts, record_analysis_run, resolve_tool_path,
+    resolve_selected_ts, record_analysis_run, resolve_tool_path, get_tool_path,
 )
 from aretomo3_preprocess.shared.landing_page import write_landing_page
 from aretomo3_preprocess.shared.discovery import (
@@ -183,9 +183,23 @@ def _star_to_mod(star_path, job_json_path, mod_dir, sphere_diameter=None):
             else:
                 fh.write(f'{x:.6f} {y:.6f} {z:.6f}\n')
 
+    # shutil.which() only sees whatever's already loaded into *this* shell's
+    # PATH (e.g. from `module load imod`) -- fall back to the IMOD install
+    # dir already recorded in project.json's tool_paths (set via `enrich
+    # --set-path-imod` or a prior command that resolved --imod-dir/similar),
+    # same as aretomo3/pytom's own resolution, rather than giving up just
+    # because this particular shell never sourced IMOD's own env script.
     point2model = shutil.which('point2model')
     if not point2model:
-        print('  WARNING: point2model not found on PATH — load IMOD first')
+        imod_root = get_tool_path('imod')
+        if imod_root:
+            candidate = Path(imod_root) / 'bin' / 'point2model'
+            if candidate.exists():
+                point2model = str(candidate)
+    if not point2model:
+        print('  WARNING: point2model not found on PATH or in the recorded '
+              'IMOD tool_paths entry — load IMOD first, or run '
+              '`enrich --set-path-imod /path/to/IMOD`')
         txt.unlink(missing_ok=True)
         return False
 
