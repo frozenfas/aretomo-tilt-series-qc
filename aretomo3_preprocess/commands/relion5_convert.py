@@ -610,40 +610,51 @@ def run(args):
     # rather than leaving it to be worked out by hand each time (as was done
     # manually here). What was worked out, so a future implementation doesn't
     # have to re-derive it:
-    #   --w/--h = the raw aligned tilt image's own nx/ny (e.g. from
-    #     run001-cmd0/ts-N.mrc's header, or equivalently camera width/height
-    #     from mdoc_data) -- NOT AreTomo3's own reconstructed-volume nx/ny.
-    #     Confirmed AreTomo3 TRANSPOSES X/Y between its input tilt images and
-    #     its output volume (e.g. this project: raw tilt nx,ny=5760,4092 vs
-    #     AreTomo3 bin2 volume nx,ny=2046,2880 -- note 2046~=4092/2,
-    #     2880=5760/2, swapped) -- confirmed via real relion_pipeliner source
-    #     (pipeline_jobs.cpp) that RELION's own --w/--h map directly to
-    #     EMDL_TOMO_SIZE_X/_Y with no such transpose, then verified
-    #     empirically with an actual test reconstruction.
+    #   --w/--h = NOT the raw aligned tilt image's own nx/ny directly --
+    #     use AreTomo3's own reconstructed-volume nx/ny instead (scaled back
+    #     to unbinned pixels). CORRECTED 2026-09-14 (bi30960_6): an earlier
+    #     version of this note said to use the raw tilt image's nx/ny
+    #     unswapped, verified only by confirming --w/--h map directly to
+    #     output nx/ny labels with no internal transpose inside
+    #     relion_tomo_reconstruct_tomogram itself (true, via source and an
+    #     empirical test) -- but that test only checked labels, not actual
+    #     volume content/orientation. The user caught the real bug by
+    #     comparing an actual reconstruction against AreTomo3's own volume in
+    #     3dmod: the "unswapped" recommendation produced a volume in the
+    #     wrong orientation AND cropped real specimen off the top/bottom
+    #     (not just rotated -- signal was lost).
+    #     Root cause: AreTomo3 TRANSPOSES X/Y between its input tilt images
+    #     and its own reconstructed volume (this project: raw tilt
+    #     nx,ny=5760,4092 vs AreTomo3 bin2 volume nx,ny=2046,2880 -- note
+    #     AreTomo3's volume nx~=raw ny/2, volume ny=raw nx/2). RELION's own
+    #     --w/--h map directly to EMDL_TOMO_SIZE_X/_Y with no internal
+    #     transpose of their own (confirmed via pipeline_jobs.cpp) -- but
+    #     that just means RELION faithfully builds whatever box you tell it
+    #     to, not that the raw tilt image's own nx/ny is the *correct* box to
+    #     ask for. AreTomo3's own (swapped) volume convention is the one to
+    #     match. Concretely for this project: --w 4092 --h 5760 (raw ny then
+    #     raw nx -- i.e. swapped from the raw tilt image's own nx,ny order).
     #   --d = the -VolZ value used for the matching run-aretomo3 --cmd 2 run
     #     (already unbinned, no conversion needed).
     #   --binned_angpix = target pixel size in A (e.g. base_apix * AtBin) --
     #     RELION takes a pixel size here, not an integer bin factor like
     #     AreTomo3's -AtBin.
     #
-    # Separately and IMPORTANTLY: this AreTomo3 X/Y transpose means pytom
-    # (or any picker run against AreTomo3's own reconstructed volume)
-    # produces rlnCenteredCoordinateX/Y/ZAngst in AreTomo3's *swapped*
-    # convention -- NOT the plain width/height convention
-    # relion_tomo_reconstruct_tomogram's own box uses. Empirically confirmed
-    # (bi30960_6, 2026-09-14): the top 3 pytom picks for one TS were all
-    # out-of-bounds under the naive direct X/Y mapping into a test
-    # reconstruct_tomogram volume, but fit under a swapped mapping. HOWEVER,
-    # this does NOT mean particle coordinates need correcting for real
-    # subtomogram extraction -- relion_tomo_subtomo reconstructs directly
-    # from the tilt series + alignment geometry, not from that intermediate
-    # volume, and was verified separately and empirically (real
-    # relion_tomo_subtomo run on 3 real picks -- resulting subtomograms
-    # showed 15-25x higher central-region voxel variance than background,
-    # the signature of a correctly-centered real particle) to place
-    # coordinates correctly with NO swap needed. The swap only matters if a
-    # reconstruct_tomogram volume is generated for visual QC with picks
-    # overlaid on it.
+    # Separately: this AreTomo3 X/Y transpose also explains (and simplifies
+    # to one consistent story, not two) why pytom's picks -- computed against
+    # AreTomo3's own swapped-convention volume -- only fit a
+    # reconstruct_tomogram test box built in that SAME swapped convention.
+    # There is no separate "coordinates need swapping" problem once
+    # --w/--h are corrected as above: pytom's rlnCenteredCoordinateX/Y/ZAngst
+    # need no adjustment of their own, for reconstruct_tomogram OR for real
+    # extraction. Confirmed separately and empirically for the real
+    # extraction path too (bi30960_6, 2026-09-14): an actual
+    # relion_tomo_subtomo run on 3 real picks (which reconstructs directly
+    # from the tilt series + alignment geometry, not from
+    # reconstruct_tomogram's intermediate volume) placed them correctly with
+    # no coordinate swap needed -- resulting subtomograms showed 15-25x
+    # higher central-region voxel variance than background, the signature of
+    # a correctly-centered real particle.
 
     # ── dependency checks ─────────────────────────────────────────────────────
     missing = []
