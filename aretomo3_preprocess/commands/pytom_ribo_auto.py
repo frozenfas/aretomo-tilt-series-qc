@@ -162,9 +162,6 @@ def _read_voxel_size(mrc_path):
     return apix
 
 
-_IMOD_DIR   = '/opt/IMOD'
-_BINVOL_BIN = f'{_IMOD_DIR}/bin/binvol'
-
 # Target tomogram voxel size -- not exposed as a CLI flag (minimize options
 # for this "auto" tool). Per-particle (_PARTICLES[x]['target_apix']), not
 # global: different registry entries can be prepared at different fixed
@@ -339,41 +336,15 @@ def _pick_bin_variant(in_dir, target_apix):
     return suffix, apix, path
 
 
-def _find_binvol(imod_bin_dir=None):
-    if imod_bin_dir:
-        c = Path(imod_bin_dir) / 'binvol'
-        if c.exists():
-            return str(c)
-    return shutil.which('binvol') or (_BINVOL_BIN if Path(_BINVOL_BIN).exists() else None)
-
-
-def _resample_volume(src_path, dst_path, src_apix, target_apix, dry_run, imod_bin_dir=None):
-    """Resample one tomogram to target_apix via IMOD binvol (arbitrary float
-    binning factor, Lanczos-3 antialiased -- IMOD's own default filter, see
-    `binvol -help`) -- unlike run-aretomo3's --at-bin (integer only), this
-    hits the target voxel size exactly."""
-    binvol_bin = _find_binvol(imod_bin_dir)
-    if binvol_bin is None:
-        print(f'ERROR: binvol not found (expected {_BINVOL_BIN}). '
-              f'Install/locate IMOD (--imod-bin-dir).')
-        sys.exit(1)
-    factor = target_apix / src_apix
-    cmd = [binvol_bin, '-binning', f'{factor:.6f}', '-antialias', '6',
-           str(src_path), str(dst_path)]
-    if dry_run:
-        _print_cmd(cmd)
-        print('  [dry-run: skipping execution]')
-        return True
-    imod_dir = str(Path(binvol_bin).resolve().parent.parent)  # .../bin/binvol -> ...
-    env = dict(os.environ, IMOD_DIR=os.environ.get('IMOD_DIR', imod_dir))
-    ret = subprocess.run(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    if ret.returncode != 0:
-        print(f'\nERROR: binvol failed on {src_path.name}: {ret.stderr.decode().strip()}')
-        return False
-    return True
-
-
-_RESAMPLED_SUFFIX = '_resampled'
+# Shared with pytom_match.py (the lower-level module this one already
+# depends on as `_pm` -- keeping these as aliases rather than separate
+# copies avoids the two implementations drifting apart, which is exactly
+# what happened before 2026-10-02: pytom_match.py's own direct-CLI path had
+# no voxel-size enforcement at all until this session, because this
+# module's fix for the same problem (2026-08-16) never made it back there.
+_find_binvol      = _pm._find_binvol
+_resample_volume  = _pm._resample_volume
+_RESAMPLED_SUFFIX = _pm._RESAMPLED_SUFFIX
 
 
 def _stage_resampled_tomograms(in_dir, staged_dir, vol_suffix, prefixes,
@@ -430,7 +401,7 @@ def _stage_symlink(dst_dir, src_path):
     return dst
 
 
-_APIX_MATCH_TOL = 0.01  # A/px; treat as "the same voxel size" within this
+_APIX_MATCH_TOL = _pm._APIX_MATCH_TOL  # A/px; shared with pytom_match.py
 
 
 def _voxel_size_matches(mrc_path, target_apix):

@@ -70,10 +70,93 @@ from aretomo3_preprocess.shared.discovery import (
     mrc_dims as _mrc_dims,
     load_threshold_csv as _load_threshold_csv,
     filter_by_include_exclude,
+    mrc_pixel_size,
 )
 
 # Default pytom binary location
 _PYTOM_BIN = '/opt/miniconda3/envs/pytom_tm/bin/pytom_match_template.py'
+
+# pytom_match_template.py needs template and tomogram at the *same* voxel
+# size and does NOT enforce this itself when --voxel-size is explicitly
+# given -- tmjob.py just prints a WARNING and proceeds with a real,
+# uncorrected mismatch. pytom_ribo_auto.py already learned this the hard
+# way (2026-08-16, a 9.78 vs. 10.00 A/px mismatch let through silently by
+# an earlier "close enough" 5%-tolerance skip) and auto-resamples via IMOD
+# binvol; this wrapper didn't get the same fix until 2026-10-02, when a
+# direct (non-ribo-auto) pytom-match run against a native-bin2 (5.34 A/px)
+# tomogram with --voxel-size 10.0 silently matched at the wrong scale and
+# OOM'd on the ~6.6x-oversized un-resampled volume. Mirrors
+# pytom_ribo_auto.py's _read_voxel_size/_resample_volume/_APIX_MATCH_TOL
+# (not shared via import to avoid a circular dependency -- pytom_ribo_auto
+# already imports from this module).
+_APIX_MATCH_TOL   = 0.01  # A/px; treat as "the same voxel size" within this
+_RESAMPLED_SUFFIX = '_resampled'
+_IMOD_DIR   = '/opt/IMOD'
+_BINVOL_BIN = f'{_IMOD_DIR}/bin/binvol'
+
+
+def _find_binvol(imod_bin_dir=None):
+    if imod_bin_dir:
+        c = Path(imod_bin_dir) / 'binvol'
+        if c.exists():
+            return str(c)
+    return shutil.which('binvol') or (_BINVOL_BIN if Path(_BINVOL_BIN).exists() else None)
+
+
+def _resample_volume(src_path, dst_path, src_apix, target_apix, dry_run, imod_bin_dir=None):
+    """Resample one tomogram to target_apix via IMOD binvol (arbitrary float
+    binning factor, Lanczos-3 antialiased -- IMOD's own default filter)."""
+    import os
+    binvol_bin = _find_binvol(imod_bin_dir)
+    if binvol_bin is None:
+        print(f'ERROR: binvol not found (expected {_BINVOL_BIN}). Install/locate IMOD.')
+        return False
+    factor = target_apix / src_apix
+    cmd = [binvol_bin, '-binning', f'{factor:.6f}', '-antialias', '6',
+           str(src_path), str(dst_path)]
+    if dry_run:
+        _print_cmd(cmd)
+        print('  [dry-run: skipping execution]')
+        return True
+    imod_dir = str(Path(binvol_bin).resolve().parent.parent)
+    env = dict(os.environ, IMOD_DIR=os.environ.get('IMOD_DIR', imod_dir))
+    ret = subprocess.run(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    if ret.returncode != 0:
+        print(f'\nERROR: binvol failed on {Path(src_path).name}: '
+              f'{ret.stderr.decode().strip()}')
+        return False
+    return True
+
+
+def _ensure_voxel_size(tomo, prefix, target_apix, staged_dir, dry_run, imod_bin_dir=None):
+    """Return a tomogram path guaranteed to be at target_apix, resampling
+    via IMOD binvol into staged_dir and caching the result there if the
+    volume as found isn't already at that voxel size (within
+    _APIX_MATCH_TOL). Returns None on failure (caller should skip the TS).
+
+    Output is named '{prefix}{_RESAMPLED_SUFFIX}_Vol.mrc' (not derived from
+    tomo's own filename) to match find_tomogram()'s expected
+    '{prefix}{vol_suffix}_Vol.mrc' pattern -- the same convention
+    pytom_ribo_auto.py's _stage_resampled_tomograms uses, so a staged_dir
+    from either path is interchangeable as --input with --vol-suffix
+    _resampled."""
+    if target_apix is None:
+        return tomo
+    actual_apix = mrc_pixel_size(tomo)
+    if actual_apix is None or abs(actual_apix - target_apix) <= _APIX_MATCH_TOL:
+        return tomo
+    staged_dir = Path(staged_dir)
+    staged_dir.mkdir(parents=True, exist_ok=True)
+    dst = staged_dir / f'{prefix}{_RESAMPLED_SUFFIX}_Vol.mrc'
+    if dst.exists() and not dry_run:
+        print(f'  {prefix}: already resampled, reusing {dst} '
+              f'(delete to force regeneration)')
+        return dst
+    print(f'  {prefix}: {actual_apix:.2f} -> {target_apix:.2f} A/px '
+          f'(voxel size mismatch, resampling via IMOD binvol)')
+    if not _resample_volume(tomo, dst, actual_apix, target_apix, dry_run, imod_bin_dir):
+        return None
+    return dst
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -454,6 +537,19 @@ def add_parser(subparsers):
                       help='Voxel size in Å (tomogram and template must match)')
     tmpl.add_argument('--gpu', '-g', nargs='+', type=int, default=None,
                       help='GPU ID(s) for pytom_match_template.py')
+    tmpl.add_argument('--auto-resample', action='store_true',
+                      help='Tomogram voxel size (from its own header) must match '
+                           '--voxel-size, checked before each TS is matched; by '
+                           'default a mismatch stops that TS with an ERROR rather '
+                           'than matching at the wrong scale. Pass this flag to '
+                           'instead resample the tomogram to --voxel-size '
+                           'automatically via IMOD binvol (cached under '
+                           '<output>/_staged_resampled/). Template and mask are '
+                           'never auto-resampled -- a mismatch there always stops '
+                           'the whole run (wrong file or typo\'d --voxel-size).')
+    tmpl.add_argument('--imod-bin-dir', default=None,
+                      help='Directory containing the IMOD binvol binary, if not on '
+                           'PATH or at /opt/IMOD/bin/binvol (used with --auto-resample)')
 
     # Fixed 2026-10-02 (bi30960_6): this used to be a mutually-exclusive
     # group, which was stricter than both the underlying
@@ -713,6 +809,27 @@ def run(args):
         print('ERROR: one of --particle-diameter or --angular-search is required for matching')
         sys.exit(1)
 
+    # Template and mask are fixed, already-prepared inputs -- a voxel-size
+    # mismatch against --voxel-size here is a command/file-selection error
+    # (wrong file, or a typo'd --voxel-size), never auto-fixed. Stop before
+    # touching any tomogram. (The tomogram itself gets its own mismatch
+    # check per-TS below, which --auto-resample *can* fix -- resampling the
+    # already-prepared template/mask at matching time makes no sense, but
+    # resampling raw reconstructed data to match the template does.)
+    bad_inputs = []
+    for label, path in (('template', args.template), ('mask', args.mask)):
+        apix = mrc_pixel_size(path)
+        if apix is None:
+            bad_inputs.append(f'  {label} ({path}): cannot read voxel size from header')
+        elif abs(apix - args.voxel_size) > _APIX_MATCH_TOL:
+            bad_inputs.append(f'  {label} ({path}): header says {apix:.3f} A/px, '
+                               f'does not match --voxel-size {args.voxel_size:.3f} A/px')
+    if bad_inputs:
+        print('ERROR: voxel size mismatch in prepared inputs -- stopping before matching:')
+        print('\n'.join(bad_inputs))
+        print('Fix the --voxel-size value or point at the correct template/mask file.')
+        sys.exit(1)
+
     in_dir = Path(args.input).resolve()
     if not in_dir.is_dir():
         print(f'ERROR: --input {in_dir} not found')
@@ -806,6 +923,22 @@ def run(args):
         if tomo is None:
             print(f'  WARNING: volume not found for {prefix} — skipping')
             return 'failed', None, None
+
+        actual_apix = mrc_pixel_size(tomo)
+        tomo_mismatch = (actual_apix is None
+                          or abs(actual_apix - args.voxel_size) > _APIX_MATCH_TOL)
+        if tomo_mismatch and not getattr(args, 'auto_resample', False):
+            shown = f'{actual_apix:.3f}' if actual_apix is not None else 'unknown'
+            print(f'  ERROR: {prefix} tomogram voxel size {shown} A/px does not match '
+                  f'--voxel-size {args.voxel_size:.3f} A/px ({tomo}) — skipping. '
+                  f'Pass --auto-resample to resample automatically via IMOD binvol, '
+                  f'or point --vol-suffix at an already-resampled volume.')
+            return 'failed', None, None
+        if tomo_mismatch:
+            tomo = _ensure_voxel_size(tomo, prefix, args.voxel_size, out_dir / '_staged_resampled',
+                                       args.dry_run, getattr(args, 'imod_bin_dir', None))
+            if tomo is None:
+                return 'failed', None, None
 
         try:
             tlt_out, defocus_out, exposure_out = _read_ts_metadata(
