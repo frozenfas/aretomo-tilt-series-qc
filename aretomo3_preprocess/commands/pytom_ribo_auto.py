@@ -577,6 +577,22 @@ def _matching_defaults(volume_split=None):
     explicitly for any particle/GPU combo where [1,1,1] hasn't already
     been proven stable (only '70S' on a 16 GB card has been).
     """
+    # TODO (2026-10-02, bi30960_6): defocus_handedness is left unset here
+    # (pytom falls back to its own internal default) even though it's
+    # genuinely project/microscope-specific, not a universal constant --
+    # unlike every other value in this dict, which this lab has validated
+    # as safe to hardcode across projects. This project already determined
+    # it empirically via `aretomo3-preprocess ctf-handedness` (a dedicated
+    # command, separate from this one): consensus "-1", "clear": true
+    # across all 3 successfully analysed TS (ts-1/ts-2/ts-5), stored in
+    # this project's own aretomo3_project.json under the top-level
+    # 'ctf_handedness' key ('ctf_handedness'.'consensus'). Before running
+    # pytom-ribo-auto for real, this function (or its caller) should check
+    # the current project's aretomo3_project.json for that key and use its
+    # 'consensus' value for defocus_handedness automatically when present,
+    # rather than leaving it unset and silently relying on pytom's own
+    # default -- falling back to None (today's behaviour) only when no
+    # ctf-handedness determination has been run yet for this project.
     return dict(
         angular_search='10', non_spherical_mask=True, z_axis_rotational_symmetry=1,
         volume_split=list(volume_split) if volume_split else [1, 1, 1],
