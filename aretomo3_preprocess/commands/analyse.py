@@ -1188,6 +1188,29 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
       width: 13px; height: 13px; border-radius: 50%;
       background: #1565c0; cursor: pointer;
     }}
+    #print-pages {{ display: none; }}
+    @media print {{
+      /* Isolate #print-pages -- everything else (toolbar, filters, the
+         single-image viewer) is hidden but stays in the DOM so normal
+         on-screen state (visIndices/filters/idx) is untouched. */
+      body * {{ visibility: hidden; }}
+      #print-pages, #print-pages * {{ visibility: visible; }}
+      #print-pages {{
+        display: block !important;
+        position: absolute; top: 0; left: 0; width: 100%;
+      }}
+      .print-page {{
+        page-break-after: always;
+        break-after: page;
+        text-align: center;
+        padding: 24px 0;
+      }}
+      .print-page:last-child {{ page-break-after: avoid; break-after: avoid; }}
+      .print-page h2 {{
+        font-family: 'Segoe UI', sans-serif; font-size: 16px; margin-bottom: 12px;
+      }}
+      .print-page img {{ max-width: 100%; max-height: 90vh; }}
+    }}
   </style>
 </head>
 <body>
@@ -1204,6 +1227,11 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
       </select>
       <button class="nav-btn" id="btn-next">Next &#8594;</button>
       <span id="counter">1&nbsp;/&nbsp;{n}</span>
+      <button class="nav-btn" id="btn-export-pdf"
+              style="font-size:0.82em;background:#546e7a;border:1px solid #78909c;"
+              title="Print / save as PDF -- one page per tilt series currently shown (respects active filters)">
+        &#128196; Export PDF
+      </button>
     </div>
 
     <div id="selection-bar" class="control-block ts-only">
@@ -1956,10 +1984,35 @@ def make_html(ts_entries, out_path, threshold, gain_check=None, selection=None,
       reader.readAsText(file);
     }});
 
+    // ── Export PDF -- one page per entry currently shown (respects active
+    //    tab scope + filters/selection via visIndices, same set the on-
+    //    screen counter/progress-bar already reflect). Builds a print-only
+    //    stack of <img> pages (page-break-after per entry, see @media print
+    //    above), then hands off to the browser's own print-to-PDF -- no
+    //    external library, keeps the report a single self-contained file.
+    document.getElementById('btn-export-pdf').addEventListener('click', () => {{
+      const pages = document.getElementById('print-pages');
+      pages.innerHTML = '';
+      const list = visIndices.length ? visIndices : [...Array(n).keys()];
+      list.forEach(i => {{
+        const page = document.createElement('div');
+        page.className = 'print-page';
+        const h2 = document.createElement('h2');
+        h2.textContent = titles[i];
+        const img = document.createElement('img');
+        img.src = images[i];
+        page.appendChild(h2);
+        page.appendChild(img);
+        pages.appendChild(page);
+      }});
+      window.print();
+    }});
+
     // Sets up .ts-only visibility and scoped visIndices/show() to match the
     // initial viewScope -- not just show(0) -- see switchTab().
     switchTab(activeTab);
   </script>
+  <div id="print-pages"></div>
 </body>
 </html>
 """
