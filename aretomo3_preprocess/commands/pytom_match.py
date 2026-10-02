@@ -455,32 +455,28 @@ def add_parser(subparsers):
     tmpl.add_argument('--gpu', '-g', nargs='+', type=int, default=None,
                       help='GPU ID(s) for pytom_match_template.py')
 
-    # TODO (2026-10-02, bi30960_6): this mutually-exclusive group is stricter
-    # than both the underlying pytom_match_template.py (which happily accepts
-    # both flags together -- --angular-search overrides the Crowther-criterion
-    # auto-computation that --particle-diameter would otherwise drive, while
+    # Fixed 2026-10-02 (bi30960_6): this used to be a mutually-exclusive
+    # group, which was stricter than both the underlying
+    # pytom_match_template.py (happily accepts both flags together --
+    # --angular-search overrides the Crowther-criterion auto-computation
+    # that --particle-diameter would otherwise drive, while
     # --particle-diameter still feeds extraction peak-spacing) and this
     # project's own validated production convention (pytom_ribo_auto.py's
     # _matching_defaults() passes a fixed angular_search='10' per-particle
-    # alongside each _PARTICLES entry's own diameter_a -- see that file).
-    # The command-building code a few lines below (search for
-    # `if args.particle_diameter:` / `if args.angular_search:`) already
-    # handles both being set independently and would pass both through
-    # correctly -- this restriction exists only in the CLI parser, not in
-    # any real downstream constraint. Found while setting up 40S/60S
-    # subunit picking (EMD-14317/EMD-18765) and wanting to invoke this
-    # lower-level `pytom-match` command directly (no _PARTICLES preset yet
-    # for those) while still matching pytom_ribo_auto's own convention of
-    # specifying both diameter and angular-search together. Should just be
-    # a plain argument_group (ang.add_argument(...) x2), not a
-    # mutually-exclusive one -- keep the "at least one of the two is
-    # required" check at line ~696 as-is, just drop the XOR constraint.
+    # alongside each _PARTICLES entry's own diameter_a, via a direct
+    # Namespace + run() call that bypasses this CLI parser entirely -- so
+    # the old XOR restriction only ever blocked invoking this lower-level
+    # `pytom-match` command directly from the command line with the same
+    # convention, not pytom_ribo_auto itself). The command-building code a
+    # few lines below (search for `if args.particle_diameter:` /
+    # `if args.angular_search:`) already handled both being set
+    # independently; the "at least one of the two is required" check at
+    # line ~696 is unaffected by this change.
     ang = p.add_argument_group('angular search (required for matching)')
-    ang_grp = ang.add_mutually_exclusive_group(required=False)
-    ang_grp.add_argument('--particle-diameter', type=float,
-                         help='Particle diameter in Å (Crowther criterion sampling)')
-    ang_grp.add_argument('--angular-search',
-                         help='Angular search step in degrees, or path to .txt rotation list')
+    ang.add_argument('--particle-diameter', type=float,
+                     help='Particle diameter in Å (Crowther criterion sampling)')
+    ang.add_argument('--angular-search',
+                     help='Angular search step in degrees, or path to .txt rotation list')
 
     opt = p.add_argument_group('pytom optional')
     opt.add_argument('--non-spherical-mask', action='store_true',
