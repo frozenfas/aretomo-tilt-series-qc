@@ -54,6 +54,7 @@ Typical usage
 import argparse
 import json
 import math
+import re
 import sys
 from pathlib import Path
 
@@ -212,6 +213,65 @@ def _load_mdoc_from_project(project: dict, ts_name: str) -> tuple:
     return frames, frames_dir
 
 
+_HAND_RE = re.compile(r'Import into RELION using\s+(-?\d+(?:\.\d+)?)\s+tilt handedness')
+
+
+def _read_ctf_handedness_qc(ctf_handedness_dir: Path) -> float | None:
+    """
+    Parse per-TS testinv.log CONCLUSION lines under ctf_handedness_dir
+    (e.g. ctf_handedness_qc/<ts>/testinv.log). Not every TS necessarily has
+    one -- this is a one-off ctfplotter -testInv check, not run per TS by
+    default -- but defocus handedness is a microscope/software convention,
+    not a per-TS property, so one consistent dataset-wide value from
+    whichever TS were tested applies to all of them. Returns None (caller
+    falls back to AreTomo3's raw CTF dfhand) if the dir has no logs or the
+    tested TS disagree.
+    """
+    if ctf_handedness_dir is None or not ctf_handedness_dir.is_dir():
+        return None
+    values = {}
+    for log_path in sorted(ctf_handedness_dir.glob('*/testinv.log')):
+        m = _HAND_RE.search(log_path.read_text())
+        if m:
+            values[log_path.parent.name] = float(m.group(1))
+    if not values:
+        print(f'  WARNING: no testinv.log CONCLUSION found under {ctf_handedness_dir}')
+        return None
+    distinct = set(values.values())
+    if len(distinct) > 1:
+        print(f'  WARNING: ctf_handedness_qc TS disagree on handedness: {values} -- '
+              f'not using any of them, falling back to raw AreTomo3 CTF dfhand')
+        return None
+    hand_val = distinct.pop()
+    print(f'  ctf_handedness_qc: {len(values)} TS tested {sorted(values)}, '
+          f'all agree rlnTomoHand = {hand_val:+.0f} -- using for every TS')
+    return hand_val
+
+
+def _read_aretomo_volume_geometry(vol_path: Path, pix_size: float) -> dict | None:
+    """
+    Read AreTomo3's own already-reconstructed volume (the SAME volume
+    picking/template-matching ran against) so rlnTomoReconstructedTomogram
+    can point RELION5 directly at it -- matching aretomo3torelion5.py's
+    approach -- instead of expecting a separate RELION-native reconstruction
+    job, which uses a different reconstruction engine/pixel grid and is not
+    the volume particle coordinates were actually determined against.
+    """
+    if not _HAS_MRCFILE or not vol_path.exists():
+        return None
+    with _mrcfile.open(vol_path, mode='r', permissive=True, header_only=True) as m:
+        nx, ny, nz = int(m.header.nx), int(m.header.ny), int(m.header.nz)
+        vol_apix = float(m.voxel_size.x)
+    binning = vol_apix / pix_size if pix_size else 1.0
+    return {
+        'rlnTomoReconstructedTomogram': str(vol_path),
+        'rlnTomoTomogramBinning':        round(binning, 6),
+        'rlnTomoSizeX':                   int(round(nx * binning)),
+        'rlnTomoSizeY':                   int(round(ny * binning)),
+        'rlnTomoSizeZ':                   int(round(nz * binning)),
+    }
+
+
 def _unstack_mrc(src: Path, out_dir: Path, index_to_stem: dict,
                  pixel_size: float, suffix: str = '.mrc',
                  dry_run: bool = False) -> dict:
@@ -264,7 +324,9 @@ def _process_ts(ts_name: str, input_dir: Path, cmd0_dir: Path, imod_dir: Path,
                 output_dir: Path, session: dict,
                 movie_frames: int, mtf: str, optics_group: str,
                 no_unstack: bool, unstack_halves: bool, dry_run: bool,
-                project: dict = None, mdoc_dir: Path = None) -> dict | None:
+                project: dict = None, mdoc_dir: Path = None,
+                ctf_hand_override: float | None = None,
+                tomogram_suffix: str = '_resampled_Vol.mrc') -> dict | None:
     """
     Process one tilt series.  Returns a dict of global-star fields, or None on
     fatal error.
@@ -490,9 +552,32 @@ def _process_ts(ts_name: str, input_dir: Path, cmd0_dir: Path, imod_dir: Path,
     n_dark = sum(1 for r in rows if r['_is_dark'])
     print(f'  {ts_name}: {n_inc} tilts ({n_dark} dark excluded) → {ts_star_path}')
 
-    ctf_hand_val = 1.0
-    if ctf_data:
-        ctf_hand_val = float(next(iter(ctf_data.values())).get('dfhand', 1.0))
+    if ctf_hand_override is not None:
+        ctf_hand_val = ctf_hand_override
+    else:
+        # Falls back to AreTomo3's own raw CTF-file 'dfhand' field (or 1.0 if
+        # absent) -- not reliable, since AreTomo3 doesn't itself run the
+        # -testInv-style handedness test. Pass --ctf-handedness-dir to use
+        # this project's own ctf_handedness_qc result instead.
+        ctf_hand_val = 1.0
+        if ctf_data:
+            ctf_hand_val = float(next(iter(ctf_data.values())).get('dfhand', 1.0))
+        print(f'  WARNING: {ts_name}: no --ctf-handedness-dir given -- rlnTomoHand = '
+              f'{ctf_hand_val} taken from AreTomo3\'s raw CTF file, unvalidated')
+
+    vol_path = input_dir / f'{ts_name}{tomogram_suffix}' if tomogram_suffix else None
+    vol_geom = _read_aretomo_volume_geometry(vol_path, pix_size) if vol_path else None
+    if tomogram_suffix and vol_geom is None:
+        print(f'  WARNING: {ts_name}: AreTomo3 volume not found at {vol_path} -- '
+              f'rlnTomoReconstructedTomogram left unset')
+    if vol_geom is None:
+        vol_geom = {
+            'rlnTomoReconstructedTomogram': 'FileNotFound',
+            'rlnTomoTomogramBinning':        1.0,
+            'rlnTomoSizeX':                   0,
+            'rlnTomoSizeY':                   0,
+            'rlnTomoSizeZ':                   0,
+        }
 
     return {
         'rlnTomoName':                   ts_name,
@@ -507,6 +592,7 @@ def _process_ts(ts_name: str, input_dir: Path, cmd0_dir: Path, imod_dir: Path,
         'rlnTomoTiltSeriesPixelSize':     pix_size,
         'rlnTomoZRot':                    xf_list[0]['z_rot'] if xf_list else 0.0,
         'rlnTomoTomogramThickness':       thickness_nm,
+        **vol_geom,
     }
 
 
@@ -544,6 +630,17 @@ def add_parser(subparsers):
                    help='Number of movie frames per tilt (varies by dataset).')
     p.add_argument('--mtf', default='DUMMY', metavar='FILE',
                    help='MTF file name for the detector (default: DUMMY).')
+    p.add_argument('--ctf-handedness-dir', default=None, metavar='DIR',
+                   help='Directory of ctf_handedness_qc output (one <ts>/testinv.log '
+                        'per tested TS). When given, rlnTomoHand uses this project\'s '
+                        'own ctfplotter -testInv result (dataset-wide) instead of '
+                        'trusting AreTomo3\'s raw CTF-file dfhand field.')
+    p.add_argument('--tomogram-suffix', default='_resampled_Vol.mrc', metavar='SUFFIX',
+                   help='Filename suffix (appended to the TS name, found in --input) '
+                        'of AreTomo3\'s own already-reconstructed volume, used to '
+                        'populate rlnTomoReconstructedTomogram directly rather than '
+                        'relying on a separate RELION-native reconstruction job. '
+                        'Set to "" to skip (default: _resampled_Vol.mrc).')
     p.add_argument('--optics-group', default='optics1', metavar='NAME',
                    help='Optics group name (default: optics1).')
     p.add_argument('--select-ts', default=None, metavar='CSV',
@@ -679,6 +776,9 @@ def run(args):
         print(f'ERROR: --mdoc-dir {mdoc_dir} not found')
         sys.exit(1)
 
+    ctf_hand_override = (_read_ctf_handedness_qc(Path(args.ctf_handedness_dir).resolve())
+                          if args.ctf_handedness_dir else None)
+
     cmd0_dir = Path(args.cmd0_dir).resolve() if args.cmd0_dir else _detect_cmd0_dir(input_dir)
     if cmd0_dir != input_dir:
         print(f'cmd0 directory: {cmd0_dir}')
@@ -778,6 +878,8 @@ def run(args):
             dry_run        = args.dry_run,
             project        = project,
             mdoc_dir       = mdoc_dir,
+            ctf_hand_override = ctf_hand_override,
+            tomogram_suffix    = args.tomogram_suffix,
         )
         if result is None:
             n_fail += 1
@@ -794,7 +896,9 @@ def run(args):
             'rlnMicrographOriginalPixelSize', 'rlnTomoHand',
             'rlnMtfFileName', 'rlnOpticsGroupName',
             'rlnTomoTiltSeriesPixelSize', 'rlnTomoZRot',
-            'rlnTomoTomogramThickness',
+            'rlnTomoTomogramThickness', 'rlnTomoTomogramBinning',
+            'rlnTomoSizeX', 'rlnTomoSizeY', 'rlnTomoSizeZ',
+            'rlnTomoReconstructedTomogram',
         ]
         df_global = pd.DataFrame(global_rows)[_GLOBAL_COLS]
         global_star = output_dir / 'tilt_series_aligned.star'
